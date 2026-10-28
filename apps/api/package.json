@@ -1,0 +1,43 @@
+{
+  "name": "@reviewr/api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reviewr REST API (NestJS + Fastify + PostgreSQL)",
+  "type": "module",
+  "scripts": {
+    "build": "nest build",
+    "dev": "nest start --watch --exec \"node --env-file-if-exists=.env\"",
+    "start": "node --env-file-if-exists=.env dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src test",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node --env-file-if-exists=.env dist/database/migrate.js"
+  },
+  "dependencies": {
+    "@nestjs/common": "^12.3.2",
+    "@nestjs/core": "^12.3.2",
+    "@nestjs/platform-fastify": "^12.3.2",
+    "@reviewr/shared": "workspace:*",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "drizzle-orm": "^0.45.4",
+    "pg": "^8.23.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@algoan/eslint-config": "^3.0.0",
+    "@electric-sql/pglite": "0.5.12",
+    "@nestjs/cli": "^12.0.11",
+    "@nestjs/testing": "^12.3.2",
+    "@swc/core": "^1.15.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "drizzle-kit": "^0.31.11",
+    "eslint": "^10.0.0",
+    "typescript": "~6.0.3",
+    "unplugin-swc": "^1.5.0",
+    "vitest": "^4.0.0"
+  }
+}

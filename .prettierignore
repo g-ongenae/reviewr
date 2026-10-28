@@ -1,0 +1,6 @@
+pnpm-lock.yaml
+dist
+.expo
+android
+ios
+drizzle/meta

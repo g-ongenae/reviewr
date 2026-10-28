@@ -1,0 +1,272 @@
+:root {
+  --accent: #db2777;
+  --accent-dark: #be185d;
+  --bg: #ffffff;
+  --bg-soft: #f7f7f8;
+  --border: #e4e4e7;
+  --text: #18181b;
+  --muted: #71717a;
+  --danger: #dc2626;
+  --warning-bg: #fef3c7;
+  color-scheme: light dark;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181b;
+    --bg-soft: #202024;
+    --border: #3f3f46;
+    --text: #f4f4f5;
+    --muted: #a1a1aa;
+    --warning-bg: #422006;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.primary:not(:disabled):hover {
+  background: var(--accent-dark);
+}
+
+button.danger {
+  color: var(--danger);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  border-right: 1px solid var(--border);
+  background: var(--bg-soft);
+  overflow-y: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 1.1rem;
+}
+
+.document-list,
+.revision-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.document-item,
+.revision-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 0.5rem;
+}
+
+.document-item:hover,
+.revision-item:hover {
+  background: var(--border);
+}
+
+.document-item.selected,
+.revision-item.selected {
+  background: var(--border);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.document-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.content {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.empty {
+  display: grid;
+  place-content: center;
+  text-align: center;
+  height: 100%;
+  color: var(--muted);
+}
+
+.editor-layout {
+  display: flex;
+  height: 100%;
+}
+
+.editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 1rem 2rem;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.status.dirty {
+  color: var(--accent);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  background: var(--warning-bg);
+}
+
+.banner span {
+  flex: 1;
+}
+
+.title-input,
+.content-input {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+}
+
+.title-input {
+  font-size: 2rem;
+  font-weight: 700;
+  padding: 1.5rem 0 0.5rem;
+}
+
+.content-input {
+  flex: 1;
+  resize: none;
+  font-family: Georgia, 'Iowan Old Style', serif;
+  font-size: 1.15rem;
+  line-height: 1.7;
+}
+
+.history {
+  width: 320px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-soft);
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.history h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.badge {
+  margin-left: 0.4rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.75rem;
+}
+
+.preview {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.preview h3 {
+  margin: 0 0 0.5rem;
+}
+
+.preview-content {
+  white-space: pre-wrap;
+  font-family: Georgia, serif;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.8rem;
+}
+
+.error {
+  color: var(--danger);
+}
+
+.padded {
+  padding: 2rem;
+}

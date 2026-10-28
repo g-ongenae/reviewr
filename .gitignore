@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+.env.local
+
+# Expo / React Native
+.expo/
+apps/mobile/android/
+apps/mobile/ios/
+*.apk
+*.aab
+
+.DS_Store

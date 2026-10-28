@@ -1,0 +1,67 @@
+import type { Document, Revision } from '@reviewr/shared';
+import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { api, errorMessage, queryKeys } from '../api';
+import { displayTitle, formatDate } from '../format';
+
+interface Props {
+  document: Document;
+  onRestore: (revision: Revision) => void;
+}
+
+/** Lists past revisions; selecting one previews it and offers to restore it into the editor. */
+export const RevisionHistory = ({ document, onRestore }: Props) => {
+  const [selected, setSelected] = useState<number | undefined>(undefined);
+  const revisions = useQuery({
+    queryKey: queryKeys.revisions(document.id),
+    queryFn: () => api.listRevisions(document.id),
+  });
+  const preview = useQuery({
+    queryKey: queryKeys.revision(document.id, selected ?? 0),
+    queryFn: () => api.getRevision(document.id, selected ?? 0),
+    enabled: selected !== undefined,
+    staleTime: Infinity, // Revisions are immutable.
+  });
+
+  return (
+    <aside className="history">
+      <h2>History</h2>
+      {revisions.isPending && <p className="muted">Loading…</p>}
+      {revisions.isError && <p className="error">{errorMessage(revisions.error)}</p>}
+      <ul className="revision-list">
+        {revisions.data?.map((revision) => (
+          <li key={revision.revision}>
+            <button
+              className={revision.revision === selected ? 'revision-item selected' : 'revision-item'}
+              onClick={() => setSelected(revision.revision === selected ? undefined : revision.revision)}
+            >
+              <span>
+                Revision {revision.revision}
+                {revision.revision === document.revision && <span className="badge">current</span>}
+              </span>
+              <span className="muted small">{formatDate(revision.createdAt)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      {selected !== undefined && (
+        <div className="preview">
+          {preview.isPending && <p className="muted">Loading…</p>}
+          {preview.isError && <p className="error">{errorMessage(preview.error)}</p>}
+          {preview.data && (
+            <>
+              <h3>{displayTitle(preview.data.title)}</h3>
+              <pre className="preview-content">{preview.data.content}</pre>
+              {preview.data.revision !== document.revision && (
+                <button className="primary" onClick={() => preview.data && onRestore(preview.data)}>
+                  Restore into editor
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </aside>
+  );
+};
