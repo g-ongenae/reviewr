@@ -21,5 +21,5 @@ const app: NestFastifyApplication = await NestFactory.create<NestFastifyApplicat
   new FastifyAdapter({ bodyLimit: bodyLimitBytes }),
 );
 configureApp(app, config);
-await app.listen(config.port, '0.0.0.0');
+await app.listen(config.port, config.host);
 new Logger('Bootstrap').log(`Reviewr API listening on ${await app.getUrl()}`);
