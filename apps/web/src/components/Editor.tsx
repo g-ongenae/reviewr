@@ -1,6 +1,7 @@
 import type { Document } from '@reviewr/shared';
 import { contentMaxLength, titleMaxLength } from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
 import { api, errorMessage, isConflict, queryKeys } from '../api';
 import { countWords } from '../format';
@@ -10,6 +11,7 @@ import { RevisionHistory } from './RevisionHistory';
 interface Props {
   document: Document;
   onDeleted: () => void;
+  toolbarStart?: ReactNode;
 }
 
 interface Draft {
@@ -17,7 +19,7 @@ interface Draft {
   content: string;
 }
 
-export const Editor = ({ document, onDeleted }: Props) => {
+export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<Draft>({ title: document.title, content: document.content });
   const [showHistory, setShowHistory] = useState(false);
@@ -106,6 +108,7 @@ export const Editor = ({ document, onDeleted }: Props) => {
     <div className="editor-layout">
       <section className="editor">
         <div className="toolbar">
+          {toolbarStart}
           <span className={dirty ? 'status dirty' : 'status'}>{status}</span>
           <span className="muted small">{countWords(draft.content)} words</span>
           <span className="spacer" />

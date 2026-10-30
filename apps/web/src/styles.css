@@ -73,6 +73,10 @@ button.danger {
   height: 100vh;
 }
 
+.layout.sidebar-collapsed {
+  grid-template-columns: 1fr;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -81,6 +85,24 @@ button.danger {
   border-right: 1px solid var(--border);
   background: var(--bg-soft);
   overflow-y: auto;
+}
+
+.sidebar[hidden] {
+  display: none;
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  padding: 0.3rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.icon-button:hover {
+  background: var(--border);
+  color: var(--text);
 }
 
 .brand {
@@ -134,7 +156,18 @@ button.danger {
   overflow: hidden;
 }
 
+.empty-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.empty-layout > .toolbar {
+  padding: 1rem 2rem 0.75rem;
+}
+
 .empty {
+  flex: 1;
   display: grid;
   place-content: center;
   text-align: center;

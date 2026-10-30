@@ -1,22 +1,35 @@
 import { useQuery } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { api, errorMessage, queryKeys } from '../api';
 import { Editor } from './Editor';
 
 interface Props {
   id: string;
   onDeleted: () => void;
+  /** Shown at the start of the toolbar, e.g. the button that unfolds the sidebar. */
+  toolbarStart?: ReactNode;
 }
 
 /** Loads a document, then hands it to the editor. */
-export const DocumentView = ({ id, onDeleted }: Props) => {
+export const DocumentView = ({ id, onDeleted, toolbarStart }: Props) => {
   const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => api.getDocument(id) });
 
   if (document.isPending) {
-    return <p className="muted padded">Loading…</p>;
+    return (
+      <div className="padded">
+        {toolbarStart}
+        <p className="muted">Loading…</p>
+      </div>
+    );
   }
   if (document.isError) {
-    return <p className="error padded">Could not load this document: {errorMessage(document.error)}</p>;
+    return (
+      <div className="padded">
+        {toolbarStart}
+        <p className="error">Could not load this document: {errorMessage(document.error)}</p>
+      </div>
+    );
   }
 
-  return <Editor document={document.data} onDeleted={onDeleted} />;
+  return <Editor document={document.data} onDeleted={onDeleted} toolbarStart={toolbarStart} />;
 };
