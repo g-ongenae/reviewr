@@ -2,7 +2,9 @@
 
 # reviewr
 
-Tools to enhance your writing. For now: write texts, save them, and get them back, on the web and on Android. Every save keeps a revision.
+An IDE for stories: a ruler, not an intelligence. See the [vision](docs/VISION.md) and the [architecture](docs/ARCHITECTURE.md).
+
+For now: write texts, save them, and get them back, on the web and on Android. Every save keeps a revision.
 
 ## Layout
 
