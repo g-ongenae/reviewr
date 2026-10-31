@@ -8,6 +8,8 @@ import { countWords } from '../format';
 import { setUnsavedChanges } from '../unsavedChanges';
 
 interface Props {
+  sessionWords: number;
+  recordWords: (before: string, after: string) => void;
   /** Called once the text has been saved as a new document. */
   onCreated: (document: Document) => void;
   toolbarStart?: ReactNode;
@@ -16,7 +18,7 @@ interface Props {
 /**
  * Home page: a blank page ready to type in. The text only becomes a document when it is saved.
  */
-export const Composer = ({ onCreated, toolbarStart }: Props) => {
+export const Composer = ({ onCreated, toolbarStart, sessionWords, recordWords }: Props) => {
   const queryClient = useQueryClient();
   const [content, setContent] = useState('');
   const dirty = content.trim().length > 0;
@@ -65,6 +67,7 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
     <section className="editor">
       <div className="toolbar">
         {toolbarStart}
+        <span className="muted small">{sessionWords} words this session</span>
         {dirty && (
           <>
             <span className="status dirty">{create.isPending ? 'Saving…' : 'Unsaved changes'}</span>
@@ -90,7 +93,10 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
           aria-label="New document"
           value={content}
           maxLength={contentMaxLength}
-          onChange={(event) => setContent(event.target.value)}
+          onChange={(event) => {
+            recordWords(content, event.target.value);
+            setContent(event.target.value);
+          }}
           autoFocus
         />
         {content.length === 0 && (

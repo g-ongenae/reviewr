@@ -68,3 +68,7 @@ After changing `apps/api/src/database/schema.ts`, generate a migration with `pnp
 The types are defined in `packages/shared/src/types.ts`. Titles are limited to 200 characters and content to 1,000,000.
 
 There is no authentication yet: all documents are shared by everyone who can reach the API.
+
+## Private deployment and backups
+
+See [M0 operations](docs/M0.md) for the private Compose deployment, hourly backup configuration and restore rehearsal. Deployment, off-host backups and a restore on the operator's infrastructure have not yet been verified.

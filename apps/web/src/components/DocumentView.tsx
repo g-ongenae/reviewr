@@ -4,6 +4,8 @@ import { api, errorMessage, queryKeys } from '../api';
 import { Editor } from './Editor';
 
 interface Props {
+  sessionWords: number;
+  recordWords: (before: string, after: string) => void;
   id: string;
   onDeleted: () => void;
   /** Shown at the start of the toolbar, e.g. the button that unfolds the sidebar. */
@@ -11,7 +13,7 @@ interface Props {
 }
 
 /** Loads a document, then hands it to the editor. */
-export const DocumentView = ({ id, onDeleted, toolbarStart }: Props) => {
+export const DocumentView = ({ id, onDeleted, toolbarStart, sessionWords, recordWords }: Props) => {
   const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => api.getDocument(id) });
 
   if (document.isPending) {
@@ -31,5 +33,13 @@ export const DocumentView = ({ id, onDeleted, toolbarStart }: Props) => {
     );
   }
 
-  return <Editor document={document.data} onDeleted={onDeleted} toolbarStart={toolbarStart} />;
+  return (
+    <Editor
+      sessionWords={sessionWords}
+      recordWords={recordWords}
+      document={document.data}
+      onDeleted={onDeleted}
+      toolbarStart={toolbarStart}
+    />
+  );
 };

@@ -9,6 +9,8 @@ import { setUnsavedChanges } from '../unsavedChanges';
 import { RevisionHistory } from './RevisionHistory';
 
 interface Props {
+  sessionWords: number;
+  recordWords: (before: string, after: string) => void;
   document: Document;
   onDeleted: () => void;
   toolbarStart?: ReactNode;
@@ -19,7 +21,7 @@ interface Draft {
   content: string;
 }
 
-export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
+export const Editor = ({ document, onDeleted, toolbarStart, sessionWords, recordWords }: Props) => {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<Draft>({ title: document.title, content: document.content });
   const [showHistory, setShowHistory] = useState(false);
@@ -109,6 +111,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
       <section className="editor">
         <div className="toolbar">
           {toolbarStart}
+          <span className="muted small">{sessionWords} words this session</span>
           <span className={dirty ? 'status dirty' : 'status'}>{status}</span>
           <span className="muted small">{countWords(draft.content)} words</span>
           <span className="spacer" />
@@ -156,7 +159,10 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           placeholder="Start writing…"
           value={draft.content}
           maxLength={contentMaxLength}
-          onChange={(event) => setDraft({ ...draft, content: event.target.value })}
+          onChange={(event) => {
+            recordWords(draft.content, event.target.value);
+            setDraft({ ...draft, content: event.target.value });
+          }}
           autoFocus
         />
       </section>
