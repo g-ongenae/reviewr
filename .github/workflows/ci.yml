@@ -15,3 +15,41 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
+
+  postgres-e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: reviewr
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: reviewr_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U reviewr -d reviewr_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @reviewr/shared build
+      - run: pnpm --filter @reviewr/api test
+        env:
+          REVIEWR_TEST_DATABASE_URL: postgres://reviewr:test@localhost:5432/reviewr_test
+  backup-rehearsal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build
+        env:
+          PRIVATE_BIND_IP: 127.0.0.1
+          POSTGRES_USER: reviewr
+          POSTGRES_PASSWORD: rehearsal
+          POSTGRES_DB: reviewr_test
+          DATABASE_URL: postgres://reviewr:rehearsal@postgres:5432/reviewr_test
+      - run: scripts/rehearse-backup.sh

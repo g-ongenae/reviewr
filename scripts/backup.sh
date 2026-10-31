@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${BACKUP_DIR:?Set BACKUP_DIR}" "${EXPORT_REPO:?Set EXPORT_REPO}" "${OFFHOST_TARGET:?Set OFFHOST_TARGET (rsync destination)}"
+git -C "$EXPORT_REPO" rev-parse --git-dir >/dev/null
+if ! git -C "$EXPORT_REPO" diff --cached --quiet; then
+  echo "EXPORT_REPO has staged changes; refusing to commit them" >&2
+  exit 1
+fi
 mkdir -p "$BACKUP_DIR"
 tmp=$(mktemp "$BACKUP_DIR/.dump.XXXXXX")
 trap 'rm -f "$tmp"' EXIT

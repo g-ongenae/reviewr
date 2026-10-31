@@ -8,7 +8,15 @@ if not (repo / '.git').is_dir():
     raise SystemExit('EXPORT_REPO must be an initialized git repository')
 documents = json.load(sys.stdin)
 # Validate all identifiers before touching existing exports.
-items = [(str(uuid.UUID(str(d['id']))), d['content']) for d in documents]
+if not isinstance(documents, list):
+    raise ValueError('Expected an array of documents')
+items = []
+for document in documents:
+    if not isinstance(document, dict) or not isinstance(document.get('content'), str):
+        raise ValueError('Invalid document content')
+    items.append((str(uuid.UUID(str(document['id']))), document['content']))
+if len({identifier for identifier, _ in items}) != len(items):
+    raise ValueError('Duplicate document ID')
 directory = repo / 'documents'
 directory.mkdir(exist_ok=True)
 for identifier, content in items:

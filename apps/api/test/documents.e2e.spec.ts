@@ -5,6 +5,9 @@ import { Test } from '@nestjs/testing';
 import type { Document, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
+import { drizzle as pgDrizzle } from 'drizzle-orm/node-postgres';
+import { migrate as pgMigrate } from 'drizzle-orm/node-postgres/migrator';
+import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { configureApp } from '../src/app.js';
 import { AppModule } from '../src/app.module.js';
@@ -16,7 +19,8 @@ import * as schema from '../src/database/schema.js';
  */
 describe('Documents API', () => {
   let app: NestFastifyApplication;
-  let pglite: PGlite;
+  let pglite: PGlite | undefined;
+  let pool: pg.Pool | undefined;
 
   const call = async (method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: object) => {
     const response = await app.inject({ method, url, payload });
@@ -28,9 +32,21 @@ describe('Documents API', () => {
     (await call('POST', '/documents', { title, content })).body as Document;
 
   beforeAll(async () => {
-    pglite = new PGlite();
-    const db = drizzle(pglite, { schema });
-    await migrate(db, { migrationsFolder });
+    const testUrl = process.env.REVIEWR_TEST_DATABASE_URL;
+    let db;
+    if (testUrl !== undefined && testUrl !== '') {
+      const url = new URL(testUrl);
+      if (url.pathname !== '/reviewr_test') {
+        throw new Error('Test database must be named reviewr_test');
+      }
+      pool = new pg.Pool({ connectionString: testUrl });
+      db = pgDrizzle(pool, { schema });
+      await pgMigrate(db, { migrationsFolder });
+    } else {
+      pglite = new PGlite();
+      db = drizzle(pglite, { schema });
+      await migrate(db, { migrationsFolder });
+    }
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(databaseToken)
@@ -43,8 +59,9 @@ describe('Documents API', () => {
   });
 
   afterAll(async () => {
-    await app.close();
-    await pglite.close();
+    await app?.close();
+    await pglite?.close();
+    await pool?.end();
   });
 
   it('reports health', async () => {
