@@ -41,6 +41,7 @@ export const App = () => {
             key={selectedId}
             id={selectedId}
             onDeleted={() => select(undefined)}
+            onGoBack={() => navigate(undefined)}
             toolbarStart={sidebarOpen ? undefined : sidebarToggle}
           />
         )}

@@ -11,5 +11,7 @@ export const queryKeys = {
 
 export const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
 
+export const isNotFound = (error: unknown): boolean => error instanceof ApiError && error.status === 404;
+
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : 'Something went wrong';
