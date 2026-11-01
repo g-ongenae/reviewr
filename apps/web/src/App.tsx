@@ -11,8 +11,11 @@ export const App = () => {
   const [sidebarOpen, toggleSidebar] = useSidebar();
   const sidebarToggle = <SidebarToggle open={sidebarOpen} onToggle={toggleSidebar} />;
   const navigate = (id: string | undefined) => {
-    if (id !== selectedId && confirmDiscardChanges()) {
-      select(id);
+    if (id === selectedId || confirmDiscardChanges()) {
+      if (id !== selectedId) select(id);
+      if (sidebarOpen && window.matchMedia('(max-width: 640px)').matches) {
+        toggleSidebar();
+      }
     }
   };
 

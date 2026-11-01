@@ -377,3 +377,17 @@ button.danger {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
 }
+
+@media (max-width: 640px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .layout:not(.sidebar-collapsed) .content {
+    display: none;
+  }
+
+  .sidebar {
+    border-right: 0;
+  }
+}
