@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { api, errorMessage, isConflict, queryKeys } from '@/lib/api';
+import { api, inlineError, isConflict, queryKeys } from '@/lib/api';
 import { countWords } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
 
@@ -17,7 +17,14 @@ export default function DocumentScreen() {
     return <ActivityIndicator style={styles.message} color={theme.accent} />;
   }
   if (document.isError) {
-    return <Text style={[styles.message, { color: theme.danger }]}>{errorMessage(document.error)}</Text>;
+    const message = inlineError(document.error);
+    return message === undefined ? (
+      <Text style={[styles.message, { color: theme.muted }]}>
+        This document will open as soon as the server is back.
+      </Text>
+    ) : (
+      <Text style={[styles.message, { color: theme.danger }]}>{message}</Text>
+    );
   }
 
   return <Editor document={document.data} />;
@@ -57,7 +64,9 @@ const Editor = ({ document }: { document: Document }) => {
     onSuccess: onSaved,
     onError: (error) => {
       if (!isConflict(error)) {
-        Alert.alert('Could not save', errorMessage(error));
+        // An unreachable server is reported by the notification; the draft stays here, ready to save again.
+        const message = inlineError(error);
+        if (message !== undefined) Alert.alert('Could not save', message);
         return;
       }
       Alert.alert('Changed elsewhere', 'This document was saved from another device since you opened it.', [
@@ -86,7 +95,10 @@ const Editor = ({ document }: { document: Document }) => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       router.back();
     },
-    onError: (error) => Alert.alert('Could not delete', errorMessage(error)),
+    onError: (error) => {
+      const message = inlineError(error);
+      if (message !== undefined) Alert.alert('Could not delete', message);
+    },
   });
 
   const confirmDelete = () =>

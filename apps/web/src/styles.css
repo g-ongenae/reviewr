@@ -391,3 +391,80 @@ button.danger {
     border-right: 0;
   }
 }
+
+.toast-region {
+  position: fixed;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  max-width: 24rem;
+  padding: 0.85rem 1.1rem 0.85rem 0.95rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow:
+    0 10px 30px -12px rgb(0 0 0 / 0.25),
+    0 2px 6px rgb(0 0 0 / 0.06);
+  animation: toast-in 0.25s ease-out;
+}
+
+.toast-icon {
+  flex: none;
+  margin-top: 0.1rem;
+  color: var(--accent);
+}
+
+.toast-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.toast-text strong {
+  font-weight: 600;
+}
+
+.toast-text span {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Lift the card off the page: shadows barely show on a dark background. */
+  .toast {
+    background: var(--bg-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .toast-region {
+    left: 1rem;
+    right: 1rem;
+    bottom: 1rem;
+  }
+
+  .toast {
+    max-width: none;
+  }
+}

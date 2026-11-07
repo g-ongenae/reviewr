@@ -3,7 +3,7 @@ import { contentMaxLength, titleMaxLength } from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
-import { api, errorMessage, isConflict, queryKeys } from '../api';
+import { api, inlineError, isConflict, queryKeys } from '../api';
 import { countWords } from '../format';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { RevisionHistory } from './RevisionHistory';
@@ -102,6 +102,8 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   }, [dirty]);
   useEffect(() => () => setUnsavedChanges(false), []);
 
+  // An unreachable server is reported by the notification; the draft stays here, ready to save again.
+  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error);
   const status = save.isPending ? 'Saving…' : dirty ? 'Unsaved changes' : `Saved · revision ${document.revision}`;
 
   return (
@@ -139,9 +141,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
             </button>
           </div>
         ) : (
-          (save.isError || remove.isError || overwrite.isError) && (
-            <div className="banner error">{errorMessage(save.error ?? remove.error ?? overwrite.error)}</div>
-          )
+          actionError && <div className="banner error">{actionError}</div>
         )}
 
         <input

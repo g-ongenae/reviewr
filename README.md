@@ -41,7 +41,7 @@ If you change `packages/shared`, rebuild it with `pnpm --filter @reviewr/shared 
 pnpm build && pnpm typecheck && pnpm lint && pnpm test
 ```
 
-API tests are end-to-end: they run the real Nest app against an in-process PostgreSQL ([PGlite](https://pglite.dev)), so Docker isn't needed.
+API tests are end-to-end: they run the real Nest app against an in-process PostgreSQL ([PGlite](https://pglite.dev)), so Docker isn't needed. `packages/shared` tests the HTTP client's error classification, and the web app tests its components in jsdom with `fetch` stubbed.
 
 ## Data model
 

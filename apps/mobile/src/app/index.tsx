@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, Stack } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
-import { api, apiUrl, errorMessage, queryKeys } from '@/lib/api';
+import { api, apiUrl, inlineError, queryKeys } from '@/lib/api';
 import { displayTitle, formatDate } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
 
@@ -19,6 +19,10 @@ export default function DocumentListScreen() {
     },
   });
 
+  const createError = inlineError(create.error);
+  // When the server is unreachable the notification says so: show the (empty) list, which can be pulled to retry.
+  const listError = inlineError(documents.error);
+
   return (
     <View style={styles.container}>
       <Stack.Screen
@@ -30,13 +34,11 @@ export default function DocumentListScreen() {
           ),
         }}
       />
-      {create.isError && <Text style={[styles.message, { color: theme.danger }]}>{errorMessage(create.error)}</Text>}
+      {createError && <Text style={[styles.message, { color: theme.danger }]}>{createError}</Text>}
       {documents.isPending ? (
         <ActivityIndicator style={styles.message} color={theme.accent} />
-      ) : documents.isError ? (
-        <Text style={[styles.message, { color: theme.danger }]}>
-          Could not reach {apiUrl}: {errorMessage(documents.error)}
-        </Text>
+      ) : listError !== undefined ? (
+        <Text style={[styles.message, { color: theme.danger }]}>Could not load documents: {listError}</Text>
       ) : (
         <FlatList
           data={documents.data}
@@ -44,7 +46,11 @@ export default function DocumentListScreen() {
           refreshing={documents.isRefetching}
           onRefresh={() => void documents.refetch()}
           ListEmptyComponent={
-            <Text style={[styles.message, { color: theme.muted }]}>No documents yet. Tap “New” to start writing.</Text>
+            <Text style={[styles.message, { color: theme.muted }]}>
+              {documents.isError
+                ? `Waiting for ${apiUrl}… Pull down to retry.`
+                : 'No documents yet. Tap “New” to start writing.'}
+            </Text>
           }
           ItemSeparatorComponent={() => <View style={[styles.separator, { backgroundColor: theme.border }]} />}
           renderItem={({ item }) => (

@@ -1,7 +1,7 @@
 import type { Document, Revision } from '@reviewr/shared';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { api, errorMessage, queryKeys } from '../api';
+import { api, inlineError, queryKeys } from '../api';
 import { displayTitle, formatDate } from '../format';
 
 interface Props {
@@ -23,11 +23,14 @@ export const RevisionHistory = ({ document, onRestore }: Props) => {
     staleTime: Infinity, // Revisions are immutable.
   });
 
+  const revisionsError = inlineError(revisions.error);
+  const previewError = inlineError(preview.error);
+
   return (
     <aside className="history">
       <h2>History</h2>
       {revisions.isPending && <p className="muted">Loading…</p>}
-      {revisions.isError && <p className="error">{errorMessage(revisions.error)}</p>}
+      {revisionsError && <p className="error">{revisionsError}</p>}
       <ul className="revision-list">
         {revisions.data?.map((revision) => (
           <li key={revision.revision}>
@@ -48,7 +51,7 @@ export const RevisionHistory = ({ document, onRestore }: Props) => {
       {selected !== undefined && (
         <div className="preview">
           {preview.isPending && <p className="muted">Loading…</p>}
-          {preview.isError && <p className="error">{errorMessage(preview.error)}</p>}
+          {previewError && <p className="error">{previewError}</p>}
           {preview.data && (
             <>
               <h3>{displayTitle(preview.data.title)}</h3>

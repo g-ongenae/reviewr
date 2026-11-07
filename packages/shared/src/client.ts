@@ -8,6 +8,7 @@ import type {
   UpdateDocumentInput,
 } from './types.js';
 import { ApiError } from './api-error.js';
+import { NetworkError } from './network-error.js';
 
 const httpNoContent: number = 204;
 
@@ -31,6 +32,13 @@ export class ReviewrClient {
     private readonly fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
   ) {
     this.root = baseUrl.replace(/\/+$/, '');
+  }
+
+  /**
+   * Check the API (and its database) is up.
+   */
+  public async health(): Promise<{ status: 'ok' }> {
+    return this.request('GET', '/health');
   }
 
   /**
@@ -95,6 +103,9 @@ export class ReviewrClient {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+    }).catch((error: unknown) => {
+      // An aborted request was cancelled on purpose: let the caller see it as such.
+      throw error instanceof Error && error.name === 'AbortError' ? error : new NetworkError(error);
     });
 
     if (!response.ok) {

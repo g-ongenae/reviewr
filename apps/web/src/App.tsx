@@ -1,6 +1,7 @@
 import { Composer } from './components/Composer';
 import { DocumentList } from './components/DocumentList';
 import { DocumentView } from './components/DocumentView';
+import { ServerStatus } from './components/ServerStatus';
 import { SidebarToggle } from './components/SidebarToggle';
 import { confirmDiscardChanges } from './unsavedChanges';
 import { useSelectedDocumentId } from './useHashRoute';
@@ -49,6 +50,7 @@ export const App = () => {
           />
         )}
       </main>
+      <ServerStatus />
     </div>
   );
 };
