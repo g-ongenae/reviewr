@@ -247,6 +247,38 @@ annotations      id, document_id, commit_id, kind ('approve' | 'flag' | 'note'),
 
 `documents` and `revisions` map onto `documents`, `commits` and `blobs`. Each existing revision becomes a commit whose parent is the previous revision. The current `content` becomes both the draft and `head_commit_id`.
 
+## Offline and reconciliation
+
+The clients work without the server. The server stays the source of truth, but losing the connection must never block writing or lose text.
+
+### On the device
+
+- **Local store:** IndexedDB on the web, SQLite (`expo-sqlite`) on mobile. For each open document it keeps the local draft, plus the **base**: the server draft content and `draftVersion` that the local edits started from. The base is what makes a three-way comparison possible later.
+- **Outbox:** pending operations, in order: create document (with its idempotency key), save draft, save version, rename. Draft saves are coalesced (only the latest content is sent). Versions saved offline are queued and created in order on reconnect, after the draft is reconciled.
+- **Connection state:** the client is _online_, _offline_ (network error, or 502/503/504 from the proxy), or _syncing_. Offline shows a notification ("Server unreachable") and a "saved on this device" status. It never shows a blocking error. Retries back off, and `online`/`focus` events and the first successful request trigger a sync.
+- **Reading offline:** the document list and the documents opened recently are cached, so the app opens and the sidebar is usable without the server. Documents never opened on this device are listed but not editable until the connection is back.
+
+### Sync on reconnect
+
+For each document with pending changes, the client sends its draft with the base `draftVersion`, as autosave already does:
+
+1. **The server didn't move** (`draftVersion` matches): the draft is accepted. Nothing to show.
+2. **Only the server moved** (no local edits since the base): the client takes the server draft silently.
+3. **Both moved:** the server answers 409 with its current draft and version. The client computes a three-way merge of _base_, _mine_ and _theirs_, by word, and opens the **reconciliation view**.
+
+### The reconciliation view
+
+- Shows the merged text with each change attributed to _mine_ or _theirs_. Changes that don't overlap are already applied. Each overlapping change is a **conflict**, resolved with: keep mine, keep theirs, keep both (one after the other), or edit by hand.
+- Nothing is applied until the writer confirms. The result is saved as the new draft against the server's `draftVersion`. If the server moved again meanwhile, the view is refreshed with the new _theirs_.
+- **Nothing is ever dropped:** before the result is saved, the losing side of every conflict is kept as a named version ("Offline copy — 7 Nov, phone"), so a wrong choice can always be undone from the history.
+- The merge is deterministic (same three texts, same result) and lives in a pure, fixture-tested package shared by web and mobile. It never "guesses" a better sentence: it only places the writer's own changes.
+- A deleted document with pending local edits is not lost: the local text is offered as a new document.
+
+### Later
+
+- With commits and refs (v3), offline work becomes a branch from the base commit and reconciliation becomes a regular merge with a `merge_parent_id`. The diff becomes prose-aware: by sentence, using the same segmentation as the rules, with a word diff inside changed sentences.
+- With real-time co-writing, Yjs merges live edits automatically. Its updates are still snapshotted into commits, so offline edits reconciled by Yjs remain visible in the history.
+
 ## Review modes
 
 A review mode is a front-end plugin that receives the analysis tree and the annotations, and decides:

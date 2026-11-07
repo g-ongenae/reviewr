@@ -6,7 +6,7 @@ reviewr is an editor for people who write fiction and poetry. Developers have ed
 
 ## Principles
 
-1. **Nothing blocks writing.** You open reviewr and you get a blank page. No title, no project, no plan, no rules. Everything else (naming, organising, constraining) can come later, while you write or after.
+1. **Nothing blocks writing.** You open reviewr and you get a blank page. No title, no project, no plan, no rules. Everything else (naming, organising, constraining) can come later, while you write or after. Not even a lost connection stops you: reviewr keeps working offline and catches up when the server is back.
 2. **A ruler, not an intelligence.** reviewr measures, highlights and checks the text. It never rewrites it. Analysis is deterministic: the same text with the same rules always gives the same result. LLM features are an optional last resort, off by default, and only answer questions ("give me names for a new character"). They never edit the text.
 3. **Rules are measurements; the writer sets the goal.** A rule doesn't know what is "good". The writer decides which way to push it:
    - A villain's dialogue can _maximise_ the insensitive words `alex` finds, and a saint's can _minimise_ them.
@@ -52,6 +52,13 @@ reviewr is an editor for people who write fiction and poetry. Developers have ed
 - **Focus (blind) review:** only the sentence, with no context.
 - **Later, random review:** sentences in random order. It avoids repeating the same sentence too soon, but allows seeing it again in long sessions, because a sentence reads differently after a different neighbour. Long sentences (Proust) are split into chunks. Everything is configurable: chunking, chunk size, repeats, randomness.
 
+### Offline and reconciliation
+
+- **Write without a connection.** On the train, on a plane, or when the server is down, the editor keeps working on the web and on the phone. The text is kept on the device, and a discreet notification ("Server unreachable") says that changes are waiting to be sent. Nothing is lost and nothing is blocked.
+- **Catch up on reconnect.** When the server is back, the waiting changes are sent. If nobody else touched the document in the meantime, this happens silently.
+- **Reconcile when both sides changed.** If the document was also edited elsewhere (another tab, the phone, later a co-author), reviewr never picks a winner on its own. It opens a reconciliation view: a diff of the two texts against the version they both started from. Changes that don't overlap are already combined. Each conflict is resolved by the writer: keep mine, keep theirs, keep both, or edit by hand. Whatever is set aside is kept as a version, so it can always be found again.
+- **Later:** the diff becomes prose-aware (by sentence, with the same segmentation as the rules), and offline work becomes a branch that is merged like any other.
+
 ### History
 
 - **v1:** linear versions, as today.
@@ -79,11 +86,11 @@ reviewr is an editor for people who write fiction and poetry. Developers have ed
 
 ## Roadmap
 
-| Phase | Content                                                                                                                                                                                                                             |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| v1    | Single user. English UI, ready for translation. Plain editor with markup and preview. Autosaved draft and named versions (linear). 2 language-independent rules with goals (sentence length, repetition). Default and focus review. |
-| v2    | Projects built from documents. More rules and lenses. Plugin API. Exports and data API. UI translations. Language-specific rules: syllables, vocabulary, French first.                                                              |
-| v3    | Accounts open to the public. Git-like branches, merges, diffs and blame. Random review.                                                                                                                                             |
-| v4    | Propositions, polls, cadavre exquis, real-time co-writing. Optional LLM "muse" plugin.                                                                                                                                              |
+| Phase | Content                                                                                                                                                                                                                                                                                                       |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v1    | Single user. English UI, ready for translation. Plain editor with markup and preview. Autosaved draft and named versions (linear). Works offline, with a reconciliation view (diff, conflicts) on reconnect. 2 language-independent rules with goals (sentence length, repetition). Default and focus review. |
+| v2    | Projects built from documents. More rules and lenses. Plugin API. Exports and data API. UI translations. Language-specific rules: syllables, vocabulary, French first.                                                                                                                                        |
+| v3    | Accounts open to the public. Git-like branches, merges, diffs and blame. Offline work merged as a branch, with prose-aware diffs. Random review.                                                                                                                                                              |
+| v4    | Propositions, polls, cadavre exquis, real-time co-writing. Optional LLM "muse" plugin.                                                                                                                                                                                                                        |
 
 The data model is designed for v3 and v4 from the start, even though v1 only uses part of it.
