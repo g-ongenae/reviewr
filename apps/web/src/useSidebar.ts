@@ -1,29 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
-
-const storageKey = 'reviewr.sidebarOpen';
-
-const readStored = (): boolean => {
-  try {
-    return window.localStorage.getItem(storageKey) !== 'false';
-  } catch {
-    return true;
-  }
-};
+import { useEffect } from 'react';
+import { useStoredBoolean } from './useStoredBoolean';
 
 /**
  * Whether the document sidebar is unfolded. Remembered across reloads; Ctrl/Cmd + B toggles it.
  */
 export const useSidebar = (): [boolean, () => void] => {
-  const [open, setOpen] = useState(readStored);
-  const toggle = useCallback(() => setOpen((value) => !value), []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(storageKey, String(open));
-    } catch {
-      // Storage unavailable (private mode…): the choice just won't survive a reload.
-    }
-  }, [open]);
+  const [open, toggle] = useStoredBoolean('reviewr.sidebarOpen', true);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

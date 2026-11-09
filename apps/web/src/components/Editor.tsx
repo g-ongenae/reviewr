@@ -6,7 +6,9 @@ import { useEffect, useEffectEvent, useState } from 'react';
 import { api, inlineError, isConflict, queryKeys } from '../api';
 import { countWords } from '../format';
 import { setUnsavedChanges } from '../unsavedChanges';
+import { useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
+import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
 interface Props {
   document: Document;
@@ -23,6 +25,8 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<Draft>({ title: document.title, content: document.content });
   const [showHistory, setShowHistory] = useState(false);
+  const [showStats, toggleStats] = useWritingStatsPanel();
+  const todayBaseline = useTodayBaseline(document);
   const dirty = draft.title !== document.title || draft.content !== document.content;
 
   const onSaved = async (saved: Document) => {
@@ -114,6 +118,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           <span className={dirty ? 'status dirty' : 'status'}>{status}</span>
           <span className="muted small">{countWords(draft.content)} words</span>
           <span className="spacer" />
+          <WritingStatsToggle open={showStats} onToggle={toggleStats} />
           <button onClick={() => setShowHistory((value) => !value)}>{showHistory ? 'Hide history' : 'History'}</button>
           <button
             className="danger"
@@ -131,6 +136,12 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
             Save
           </button>
         </div>
+
+        {showStats && (
+          <div className="writing-stats-anchor">
+            <WritingStatsPanel content={draft.content} baseline={todayBaseline} />
+          </div>
+        )}
 
         {isConflict(save.error) ? (
           <div className="banner">

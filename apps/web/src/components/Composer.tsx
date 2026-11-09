@@ -6,6 +6,7 @@ import { useEffect, useEffectEvent, useState } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import { countWords } from '../format';
 import { setUnsavedChanges } from '../unsavedChanges';
+import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
 interface Props {
   /** Called once the text has been saved as a new document. */
@@ -13,12 +14,15 @@ interface Props {
   toolbarStart?: ReactNode;
 }
 
+const newDocumentBaseline = { status: 'ready', content: '' } as const;
+
 /**
  * Home page: a blank page ready to type in. The text only becomes a document when it is saved.
  */
 export const Composer = ({ onCreated, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
   const [content, setContent] = useState('');
+  const [showStats, toggleStats] = useWritingStatsPanel();
   const dirty = content.trim().length > 0;
 
   const create = useMutation({
@@ -75,6 +79,7 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
           </>
         )}
         <span className="spacer" />
+        <WritingStatsToggle open={showStats} onToggle={toggleStats} />
         <button
           className="primary"
           disabled={!dirty || create.isPending}
@@ -84,6 +89,13 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
           Save
         </button>
       </div>
+
+      {showStats && (
+        <div className="writing-stats-anchor">
+          {/* Everything on the blank page is written today. */}
+          <WritingStatsPanel content={content} baseline={newDocumentBaseline} />
+        </div>
+      )}
 
       {createError && <div className="banner error">{createError}</div>}
 
