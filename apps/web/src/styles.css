@@ -107,6 +107,10 @@ button.danger {
   color: var(--text);
 }
 
+.icon-button.active {
+  color: var(--accent);
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -164,6 +168,7 @@ button.danger {
 }
 
 .editor {
+  container: editor / inline-size;
   flex: 1;
   height: 100%;
   display: flex;
@@ -237,6 +242,95 @@ button.danger {
   font-family: Georgia, 'Iowan Old Style', serif;
   font-size: 1.15rem;
   line-height: 1.7;
+}
+
+/* Writing stats: a strip above the text, or a card floating beside it when the margins are wide enough. */
+.writing-stats-anchor {
+  position: relative;
+}
+
+.writing-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0.75rem auto 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.writing-stats section {
+  padding: 0.6rem 0.9rem 0.7rem;
+}
+
+.writing-stats section + section {
+  border-left: 1px solid var(--border);
+}
+
+.writing-stats h2 {
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.writing-stats dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0;
+}
+
+.writing-stats dt {
+  color: var(--muted);
+}
+
+.writing-stats dd {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin: 0;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.writing-stats .deleted {
+  color: var(--muted);
+}
+
+@container editor (min-width: 76rem) {
+  .writing-stats-anchor {
+    height: 0;
+    z-index: 1;
+  }
+
+  .writing-stats {
+    position: absolute;
+    top: 1rem;
+    right: 0;
+    grid-template-columns: 1fr;
+    width: 13rem;
+    margin: 0;
+    box-shadow:
+      0 10px 30px -12px rgb(0 0 0 / 0.18),
+      0 2px 6px rgb(0 0 0 / 0.04);
+  }
+
+  .writing-stats section + section {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .writing-stats {
+    background: var(--bg-soft);
+  }
 }
 
 .composer {

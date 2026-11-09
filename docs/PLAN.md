@@ -33,7 +33,7 @@ Each step is small enough to merge and use on its own.
 - `docker-compose.yml` runs API + web + Postgres. (low priority, delayed)
 - Backups: hourly `pg_dump` copied off the host, plus a plain-text export (each document's content as `.md` in a git repository). Restore tested once. (low priority, delayed)
 - CI (GitHub Actions): build, typecheck, lint, test. (done)
-- Quick win: words written today / this session in the toolbar (`countWords` exists).
+- Quick win: a writing stats panel, shown or hidden from the toolbar: words and characters in the document, and written today (net words, characters written and deleted), measured against the last version saved before midnight. (done)
 
 Done: the author writes on the deployed instance, from the browser and the phone.
 
