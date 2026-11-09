@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { api, errorMessage, queryKeys } from '../api';
+import { api, inlineError, queryKeys } from '../api';
 import { displayTitle, formatDate } from '../format';
 
 interface Props {
@@ -14,7 +14,9 @@ export const DocumentList = ({ selectedId, onSelect }: Props) => {
     return <p className="muted">Loading…</p>;
   }
   if (documents.isError) {
-    return <p className="error">Could not load documents: {errorMessage(documents.error)}</p>;
+    // When the server is unreachable the notification says so: leave the sidebar empty.
+    const message = inlineError(documents.error);
+    return message === undefined ? null : <p className="error">Could not load documents: {message}</p>;
   }
   if (documents.data.length === 0) {
     return <p className="muted">No documents yet.</p>;

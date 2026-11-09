@@ -20,11 +20,13 @@
     "prepare": "tsc -p tsconfig.build.json",
     "dev": "tsc -p tsconfig.build.json --watch",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@algoan/eslint-config": "^3.0.0",
     "eslint": "^10.0.0",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.12"
   }
 }

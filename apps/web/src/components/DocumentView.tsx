@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { api, errorMessage, isNotFound, queryKeys } from '../api';
+import { api, inlineError, isNotFound, queryKeys } from '../api';
 import { Editor } from './Editor';
 
 interface Props {
@@ -44,10 +44,15 @@ export const DocumentView = ({ id, onDeleted, onGoBack, toolbarStart }: Props) =
     );
   }
   if (document.isError) {
+    const message = inlineError(document.error);
     return (
       <div className="padded">
         {toolbarStart}
-        <p className="error">Could not load this document: {errorMessage(document.error)}</p>
+        {message === undefined ? (
+          <p className="muted">This document will open as soon as the server is back.</p>
+        ) : (
+          <p className="error">Could not load this document: {message}</p>
+        )}
       </div>
     );
   }

@@ -3,7 +3,7 @@ import { contentMaxLength } from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
-import { api, errorMessage, queryKeys } from '../api';
+import { api, inlineError, queryKeys } from '../api';
 import { countWords } from '../format';
 import { setUnsavedChanges } from '../unsavedChanges';
 
@@ -61,6 +61,9 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
   }, [dirty]);
   useEffect(() => () => setUnsavedChanges(false), []);
 
+  // An unreachable server is reported by the notification; the text stays here, ready to save again.
+  const createError = inlineError(create.error);
+
   return (
     <section className="editor">
       <div className="toolbar">
@@ -82,7 +85,7 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
         </button>
       </div>
 
-      {create.isError && <div className="banner error">{errorMessage(create.error)}</div>}
+      {createError && <div className="banner error">{createError}</div>}
 
       <div className="composer">
         <textarea
