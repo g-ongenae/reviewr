@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { useDeferredValue, useMemo } from 'react';
 import { countWords } from '../format';
 import { useStoredBoolean } from '../useStoredBoolean';
-import type { TodayBaseline } from '../useTodayBaseline';
+import type { Baseline } from '../useTodayBaseline';
 import { countCharacterChanges, countCharacters } from '../writingStats';
 
 const panelId = 'writing-stats';
@@ -48,39 +48,85 @@ export const WritingStatsToggle = ({ open, onToggle }: ToggleProps) => {
   );
 };
 
+/** What the last save changed: the saved text, measured against the revision before it. */
+export interface LastRevision {
+  content: string;
+  previous: Baseline;
+}
+
 interface PanelProps {
   content: string;
   /** What the text was when today began. */
-  baseline: TodayBaseline;
+  baseline: Baseline;
+  /** Omitted for a text that was never saved. */
+  lastRevision?: LastRevision;
 }
 
 const pendingText = { loading: '…', unavailable: '—' } as const;
 const pendingTitle = {
-  loading: 'Loading the last version saved before today…',
-  unavailable: 'Needs the last version saved before today: available once the server is reachable.',
+  today: {
+    loading: 'Loading the last version saved before today…',
+    unavailable: 'Needs the last version saved before today: available once the server is reachable.',
+  },
+  lastRevision: {
+    loading: 'Loading the previous revision…',
+    unavailable: 'Needs the previous revision: available once the server is reachable.',
+  },
 } as const;
 
-/** Size of the text and how much of it was written today. */
-export const WritingStatsPanel = ({ content, baseline }: PanelProps) => {
+interface Changes {
+  /** Net change in words: negative when words were removed. */
+  words: number;
+  added: number;
+  deleted: number;
+}
+
+/** What changed from `before` to `after`, or undefined while `before` is not known. */
+const useChanges = (before: Baseline | undefined, after: string): Changes | undefined => {
+  const beforeText = before?.status === 'ready' ? before.content : undefined;
+  return useMemo(
+    () =>
+      beforeText === undefined
+        ? undefined
+        : { words: countWords(after) - countWords(beforeText), ...countCharacterChanges(beforeText, after) },
+    [beforeText, after],
+  );
+};
+
+/** Size of the text, how much of it was written today, and what the last save changed. */
+export const WritingStatsPanel = ({ content, baseline, lastRevision }: PanelProps) => {
   // Counting runs on a deferred copy of the text, so typing never waits for it.
   const text = useDeferredValue(content);
-  const baselineText = baseline.status === 'ready' ? baseline.content : undefined;
   const words = useMemo(() => countWords(text), [text]);
   const characters = useMemo(() => countCharacters(text), [text]);
-  const baselineWords = useMemo(() => (baselineText === undefined ? 0 : countWords(baselineText)), [baselineText]);
-  const changes = useMemo(
-    () => (baselineText === undefined ? undefined : countCharacterChanges(baselineText, text)),
-    [baselineText, text],
+  const today = useChanges(baseline, text);
+  const last = useChanges(lastRevision?.previous, lastRevision?.content ?? '');
+
+  const row = (
+    label: string,
+    source: Baseline,
+    titles: (typeof pendingTitle)[keyof typeof pendingTitle],
+    value: ReactNode,
+    title: string,
+  ) => (
+    <>
+      <dt>{label}</dt>
+      {source.status === 'ready' ? (
+        <dd title={title}>{value}</dd>
+      ) : (
+        <dd className="muted" title={titles[source.status]}>
+          {pendingText[source.status]}
+        </dd>
+      )}
+    </>
   );
 
-  const today = (value: ReactNode, title: string) =>
-    baseline.status === 'ready' ? (
-      <dd title={title}>{value}</dd>
-    ) : (
-      <dd className="muted" title={pendingTitle[baseline.status]}>
-        {pendingText[baseline.status]}
-      </dd>
-    );
+  const characterChanges = (changes: Changes | undefined) => (
+    <>
+      <span className="added">+{numberFormat.format(changes?.added ?? 0)}</span>
+      <span className="deleted">−{numberFormat.format(changes?.deleted ?? 0)}</span>
+    </>
+  );
 
   return (
     <aside id={panelId} className="writing-stats" aria-label="Writing stats">
@@ -89,11 +135,21 @@ export const WritingStatsPanel = ({ content, baseline }: PanelProps) => {
         <dl>
           <dt>Total</dt>
           <dd>{numberFormat.format(words)}</dd>
-          <dt>Today</dt>
-          {today(
-            signed(words - baselineWords),
+          {row(
+            'Today',
+            baseline,
+            pendingTitle.today,
+            signed(today?.words ?? 0),
             'Net change since the start of the day: negative when words were removed.',
           )}
+          {lastRevision &&
+            row(
+              'Last revision',
+              lastRevision.previous,
+              pendingTitle.lastRevision,
+              signed(last?.words ?? 0),
+              'Net change made by the last save: negative when words were removed.',
+            )}
         </dl>
       </section>
       <section>
@@ -101,14 +157,21 @@ export const WritingStatsPanel = ({ content, baseline }: PanelProps) => {
         <dl>
           <dt>Total</dt>
           <dd title="Including spaces and line breaks">{numberFormat.format(characters)}</dd>
-          <dt>Today</dt>
-          {today(
-            <>
-              <span className="added">+{numberFormat.format(changes?.added ?? 0)}</span>
-              <span className="deleted">−{numberFormat.format(changes?.deleted ?? 0)}</span>
-            </>,
+          {row(
+            'Today',
+            baseline,
+            pendingTitle.today,
+            characterChanges(today),
             'Characters written / deleted since the start of the day',
           )}
+          {lastRevision &&
+            row(
+              'Last revision',
+              lastRevision.previous,
+              pendingTitle.lastRevision,
+              characterChanges(last),
+              'Characters written / deleted by the last save',
+            )}
         </dl>
       </section>
     </aside>

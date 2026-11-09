@@ -1,6 +1,6 @@
 import type { Document, Revision, RevisionSummary } from '@reviewr/shared';
 import { QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createQueryClient } from '../queryClient';
@@ -42,7 +42,7 @@ const renderWithQueries = (ui: ReactNode) => {
 };
 
 /** Value shown next to `label` in the panel's `section` group. */
-const stat = (section: string, label: 'Total' | 'Today') => {
+const stat = (section: string, label: 'Total' | 'Today' | 'Last revision') => {
   const group = screen.getByRole('heading', { name: section }).closest('section');
   const term = within(group as HTMLElement).getByText(label);
   return term.nextElementSibling?.textContent;
@@ -69,7 +69,7 @@ describe('WritingStatsPanel', () => {
     expect(stat('Words', 'Today')).toBe('…');
 
     // Yesterday: "Once upon a tide, the keeper slept." (7 words).
-    expect(await screen.findByText('−1')).toBeTruthy();
+    await waitFor(() => expect(stat('Words', 'Today')).toBe('−1'));
     // "," → ".", "the" → "The" (one letter), "keeper slept" → "end".
     expect(stat('Characters', 'Today')).toBe('+5−14');
 
@@ -78,6 +78,49 @@ describe('WritingStatsPanel', () => {
     });
     expect(stat('Words', 'Total')).toBe('9');
     expect(stat('Words', 'Today')).toBe('+2');
+  });
+
+  it('shows what the last save changed, which unsaved edits leave alone', async () => {
+    const secondToday: Revision = {
+      documentId: 'doc-1',
+      revision: 2,
+      title: savedToday.title,
+      content: 'Once upon a tide. The keeper slept.',
+      createdAt: now,
+    };
+    const thirdToday: Document = { ...savedToday, revision: 3 };
+    fetchMock.mockImplementation((input) => {
+      const path = new URL(input instanceof Request ? input.url : input.toString(), 'http://localhost').pathname;
+      if (path.endsWith('/revisions')) {
+        return Promise.resolve(json([{ ...revisions[0], revision: 3 }, { ...secondToday }, revisions[1]]));
+      }
+      if (path.endsWith('/revisions/2')) return Promise.resolve(json(secondToday));
+      if (path.endsWith('/revisions/1')) return Promise.resolve(json(yesterdayVersion));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    renderWithQueries(<Editor document={thirdToday} onDeleted={() => {}} />);
+
+    expect(stat('Words', 'Last revision')).toBe('…');
+    // "The keeper slept." → "The end.": one word fewer, "keeper slept" → "end".
+    await waitFor(() => expect(stat('Words', 'Last revision')).toBe('−1'));
+    expect(stat('Characters', 'Last revision')).toBe('+3−12');
+
+    fireEvent.change(screen.getByPlaceholderText('Start writing…'), {
+      target: { value: 'Once upon a tide. The end. Or was it?' },
+    });
+    expect(stat('Words', 'Last revision')).toBe('−1');
+  });
+
+  it('has no last revision before the first save', () => {
+    renderWithQueries(<Composer onCreated={() => {}} />);
+    expect(screen.queryByText('Last revision')).toBeNull();
+  });
+
+  it('counts the whole first revision as written', () => {
+    const created: Document = { ...savedToday, revision: 1, createdAt: now };
+    renderWithQueries(<Editor document={created} onDeleted={() => {}} />);
+    expect(stat('Words', 'Last revision')).toBe('+6');
+    expect(stat('Characters', 'Last revision')).toBe('+26−0');
   });
 
   it('can be hidden, and stays hidden on the next document', () => {

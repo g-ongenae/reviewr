@@ -16,13 +16,14 @@ export const useStartOfToday = (): number => {
   return start;
 };
 
-export type TodayBaseline = { status: 'ready'; content: string } | { status: 'loading' } | { status: 'unavailable' };
+/** A past version of the text, which may still be loading or out of reach while the server is. */
+export type Baseline = { status: 'ready'; content: string } | { status: 'loading' } | { status: 'unavailable' };
 
 /**
  * The document's content as it was when today began: the last revision saved before midnight, or nothing for a
  * document created today. What is written today is measured against it, so it adds up across devices and reloads.
  */
-export const useTodayBaseline = (document: Document): TodayBaseline => {
+export const useTodayBaseline = (document: Document): Baseline => {
   const today = useStartOfToday();
   const createdToday = Date.parse(document.createdAt) >= today;
   const untouchedToday = Date.parse(document.updatedAt) < today;
@@ -49,4 +50,19 @@ export const useTodayBaseline = (document: Document): TodayBaseline => {
   if (lastBeforeToday === undefined) return { status: 'ready', content: '' };
   if (baseline.data === undefined) return baseline.isError ? { status: 'unavailable' } : { status: 'loading' };
   return { status: 'ready', content: baseline.data.content };
+};
+
+/** The content of the revision before the saved one: what the last save changed. Nothing before the first revision. */
+export const useLastRevisionBaseline = (document: Document): Baseline => {
+  const previous = document.revision - 1;
+  const query = useQuery({
+    queryKey: queryKeys.revision(document.id, previous),
+    queryFn: () => api.getRevision(document.id, previous),
+    enabled: previous > 0,
+    staleTime: Infinity, // Revisions are immutable.
+  });
+
+  if (previous <= 0) return { status: 'ready', content: '' };
+  if (query.data === undefined) return query.isError ? { status: 'unavailable' } : { status: 'loading' };
+  return { status: 'ready', content: query.data.content };
 };

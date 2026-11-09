@@ -4,7 +4,6 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
 import { api, inlineError, queryKeys } from '../api';
-import { countWords } from '../format';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
@@ -72,12 +71,7 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
     <section className="editor">
       <div className="toolbar">
         {toolbarStart}
-        {dirty && (
-          <>
-            <span className="status dirty">{create.isPending ? 'Saving…' : 'Unsaved changes'}</span>
-            <span className="muted small">{countWords(content)} words</span>
-          </>
-        )}
+        {dirty && <span className="status dirty">{create.isPending ? 'Saving…' : 'Unsaved changes'}</span>}
         <span className="spacer" />
         <WritingStatsToggle open={showStats} onToggle={toggleStats} />
         <button

@@ -4,9 +4,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
 import { api, inlineError, isConflict, queryKeys } from '../api';
-import { countWords } from '../format';
 import { setUnsavedChanges } from '../unsavedChanges';
-import { useTodayBaseline } from '../useTodayBaseline';
+import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
 import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
@@ -27,6 +26,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const [showHistory, setShowHistory] = useState(false);
   const [showStats, toggleStats] = useWritingStatsPanel();
   const todayBaseline = useTodayBaseline(document);
+  const previousRevision = useLastRevisionBaseline(document);
   const dirty = draft.title !== document.title || draft.content !== document.content;
 
   const onSaved = async (saved: Document) => {
@@ -116,7 +116,6 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
         <div className="toolbar">
           {toolbarStart}
           <span className={dirty ? 'status dirty' : 'status'}>{status}</span>
-          <span className="muted small">{countWords(draft.content)} words</span>
           <span className="spacer" />
           <WritingStatsToggle open={showStats} onToggle={toggleStats} />
           <button onClick={() => setShowHistory((value) => !value)}>{showHistory ? 'Hide history' : 'History'}</button>
@@ -139,7 +138,11 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
 
         {showStats && (
           <div className="writing-stats-anchor">
-            <WritingStatsPanel content={draft.content} baseline={todayBaseline} />
+            <WritingStatsPanel
+              content={draft.content}
+              baseline={todayBaseline}
+              lastRevision={{ content: document.content, previous: previousRevision }}
+            />
           </div>
         )}
 
