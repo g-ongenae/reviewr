@@ -271,6 +271,62 @@ describe('createAutosave', () => {
     });
   });
 
+  describe('a failed write whose outcome is unknown', () => {
+    // The server may have committed B as version 2 and the response was lost: a revert to A is not saved yet.
+    const startOnA = () => start({ base: { content: 'A', draftVersion: 1 }, retryDelayMs: () => 1000 });
+    const theirs: Draft = { content: 'B', draftVersion: 2 };
+
+    it('still sends a revert typed during the request, and the stale version gets a conflict', async () => {
+      startOnA();
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.edit('A');
+      await server.current().reject(new TypeError('Failed to fetch'));
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'retrying', content: 'A' });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(server.calls.at(-1)).toEqual({ content: 'A', draftVersion: 1 });
+      expect(status()).toBe('retrying');
+      await server.current().answer({ kind: 'conflict', server: theirs });
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'A', server: theirs });
+    });
+
+    it('does not report a revert typed after the failure as saved, and flush sends it', async () => {
+      startOnA();
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().reject(new TypeError('Failed to fetch'));
+
+      autosave.edit('A');
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'retrying', content: 'A' });
+      let outcome: string | undefined;
+      void autosave.flush().then((value) => (outcome = value));
+      expect(server.calls.at(-1)).toEqual({ content: 'A', draftVersion: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBeUndefined();
+
+      await server.current().answer({ kind: 'conflict', server: theirs });
+      expect(outcome).toBe('conflict');
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'A' });
+    });
+
+    it('is saved once the revert is confirmed, when the failed write had not landed', async () => {
+      startOnA();
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().reject(new TypeError('Failed to fetch'));
+      autosave.edit('A');
+      const flushed = autosave.flush();
+      await server.current().answer({ kind: 'saved', draftVersion: 2 });
+      await expect(flushed).resolves.toBe('saved');
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'A',
+        base: { content: 'A', draftVersion: 2 },
+      });
+    });
+  });
+
   describe('conflicts', () => {
     const theirs: Draft = { content: 'Once upon a time', draftVersion: 5 };
 
@@ -345,6 +401,15 @@ describe('createAutosave', () => {
       expect(server.calls).toHaveLength(1);
       expect(listener).not.toHaveBeenCalled();
       await expect(autosave.flush()).resolves.toBe('disposed');
+    });
+
+    it('stops notifying when a listener disposes the machine', () => {
+      start();
+      const later = vi.fn();
+      autosave.subscribe(() => autosave.dispose());
+      autosave.subscribe(later);
+      autosave.edit('Once upon');
+      expect(later).not.toHaveBeenCalled();
     });
 
     it('cancels a pending debounce', async () => {

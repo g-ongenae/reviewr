@@ -55,6 +55,7 @@ interface CommonState {
  *
  * - `conflict`: the server's draft moved under the local text. Nothing is sent until `resolve` is called.
  * - `retrying`: the last request failed. The text is kept and sent again after a backoff (a retry may be in flight).
+ *   It stays so even if the text is edited back to `base`: the failed write may have reached the server.
  * - `saving`: a request is in flight. Text typed meanwhile is sent right after it.
  * - `unsaved`: the text differs from the server's draft, and a save is scheduled.
  * - `saved`: the server's draft is the local text.
@@ -119,6 +120,11 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   let inFlight = false;
   let timer: unknown;
   let failures = 0;
+  /**
+   * A request failed, so whether the server holds `base` or what was sent is unknown. Until a save succeeds or a
+   * conflict says what the server holds, text equal to `base` is not known to be saved.
+   */
+  let uncertain = false;
   let lastError: unknown;
   /** The server's draft while in conflict. */
   let server: Draft | undefined;
@@ -126,12 +132,15 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   const flushes: { seq: number; settle: (outcome: FlushOutcome) => void }[] = [];
   const listeners = new Set<() => void>();
 
+  /** Whether the local text still has to be sent for the server to hold it. */
+  const needsSave = () => uncertain || content !== base.content;
+
   const computeState = (): AutosaveState => {
     const common = { content, base };
     if (server !== undefined) return { ...common, status: 'conflict', server };
     if (failures > 0) return { ...common, status: 'retrying', error: lastError, attempt: failures };
     if (inFlight) return { ...common, status: 'saving' };
-    if (content !== base.content) return { ...common, status: 'unsaved' };
+    if (needsSave()) return { ...common, status: 'unsaved' };
     return { ...common, status: 'saved' };
   };
 
@@ -141,7 +150,11 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     const next = computeState();
     if (sameState(snapshot, next)) return;
     snapshot = next;
-    for (const listener of [...listeners]) listener();
+    for (const listener of [...listeners]) {
+      // A listener may dispose the machine: the ones after it must not run.
+      if (disposed) return;
+      listener();
+    }
   };
 
   const settleFlushes = (outcome: FlushOutcome, all: boolean) => {
@@ -180,6 +193,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     switch (result.kind) {
       case 'saved':
         base = { content: sent.content, draftVersion: result.draftVersion };
+        uncertain = false;
         failures = 0;
         lastError = undefined;
         savedSeq = Math.max(savedSeq, seq);
@@ -189,10 +203,12 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         return;
       case 'conflict':
         server = result.server;
+        uncertain = false;
         settleFlushes('conflict', true);
         break;
       case 'failed':
         failures++;
+        uncertain = true;
         lastError = result.error;
         settleFlushes('failed', true);
         schedule(retryDelayMs(failures));
@@ -217,7 +233,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   const send = () => {
     if (disposed || inFlight || server !== undefined) return;
     clearTimer();
-    if (content === base.content) {
+    if (!needsSave()) {
       markClean();
       update();
       return;
@@ -233,7 +249,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       content = next;
       editSeq++;
       if (server === undefined && !inFlight) {
-        if (content === base.content) {
+        if (!needsSave()) {
           clearTimer();
           markClean();
         } else {
@@ -247,7 +263,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     flush() {
       if (disposed) return Promise.resolve('disposed');
       if (server !== undefined) return Promise.resolve('conflict');
-      if (!inFlight && content === base.content) return Promise.resolve('saved');
+      if (!inFlight && !needsSave()) return Promise.resolve('saved');
       const done = new Promise<FlushOutcome>((settle) => flushes.push({ seq: editSeq, settle }));
       send();
       return done;
