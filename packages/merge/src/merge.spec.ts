@@ -306,6 +306,36 @@ describe('mergeWords fixtures', () => {
       ['an inserted duplicate line', 'Elle attend.\n', 'Elle attend.\nElle attend.\n', 'Elle part.\n'],
       ['an inserted duplicate sentence', 'Oui.', 'Oui. Oui.', 'Non.'],
       ['a deleted sentence hidden in an edit of its twin', 'Oui. Oui. Oui.', 'Oui. Non.', 'Si. Oui. Oui.'],
+      [
+        'a deleted line next to its twin ending a line',
+        'Avant. Oui.\nOui.\nAprès.',
+        'Avant. Oui.\nAprès.',
+        'Avant. Si.\nOui.\nAprès.',
+      ],
+      [
+        'the same with a changed last line',
+        'Avant. Oui.\nOui.\nAprès.',
+        'Avant. Oui.\nEnsuite.',
+        'Avant. Si.\nOui.\nAprès.',
+      ],
+      [
+        'a deleted paragraph next to its twin ending a paragraph',
+        'Avant. Oui.\n\nOui.\n\nAprès.',
+        'Avant. Oui.\n\nAprès.',
+        'Avant. Si.\n\nOui.\n\nAprès.',
+      ],
+      [
+        'the same with a changed last paragraph',
+        'Avant. Oui.\n\nOui.\n\nAprès.',
+        'Avant. Oui.\n\nEnsuite.',
+        'Avant. Si.\n\nOui.\n\nAprès.',
+      ],
+      [
+        'an inserted line next to its twin ending a line',
+        'Avant. Oui.\nOui.',
+        'Avant. Oui.\nOui.\nOui.',
+        'Avant. Si.\nOui.',
+      ],
       ['a deleted line hidden in an edit of its twin', 'Oui.\nOui.\nOui.\n', 'Oui.\nNon.\n', 'Si.\nOui.\nOui.\n'],
     ])(
       'makes %s and an edit of its twin a conflict, whichever side wrote what',

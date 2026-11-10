@@ -191,11 +191,13 @@ class PartList {
  * `une fenêtre` on one side and into `la porte` on the other is a conflict, not `une porte`: the merge never decides
  * on its own how two edits of the same phrase fit together. Changes separated by a punctuation mark, a line break or
  * another word merge cleanly;
- * - over repeated text, a change counts everywhere it could have been made. Each side is aligned with the base twice,
- * preferring the earliest then the latest of equal matches; a change also covers the base text between the nearest
- * tokens both alignments keep in the same place. Deleting one of two identical sentences `Elle attend.` while the
- * other side changes the first into `Elle part.` is a conflict: nothing says which sentence was deleted. The same
- * deletion merges cleanly with a change elsewhere.
+ * - over repeated text, each side is aligned with the base twice, over all its tokens: the shortest alignment
+ * preferring the earliest of equal matches, and the one preferring the latest. A change covers, for the conflict test,
+ * the base text between the nearest tokens both alignments keep as the same token of that side, so every token either
+ * alignment changes counts. Deleting one of two identical sentences `Elle attend.` while the other side changes the
+ * first into `Elle part.` is a conflict: nothing says which sentence was deleted. The same deletion merges cleanly
+ * with a change elsewhere. Not covered: a third equally short alignment, a reading that takes more edits, and
+ * token-level alternatives across an unchanged line when a side changed more than 2,000 tokens (see the README).
  *
  * Deterministic: the same three texts always give the same result. Every part's text is taken from the inputs, so
  * joining the parts as one side wrote them gives that side back.

@@ -11,10 +11,10 @@ export interface Hunk {
 }
 
 /**
- * Past this many inserted plus deleted items, a Myers diff gives up and the whole run counts as replaced. It bounds the
- * time of one diff to about `(n + m) × maxEdits` comparisons, and its memory to `maxEdits²` integers.
+ * Past this many inserted plus deleted items, a Myers diff gives up. It bounds the time of one diff to about
+ * `(n + m) × maxEdits` comparisons (much less on prose), and its memory to about `maxEdits²` integers.
  */
-const maxEdits: number = 1000;
+const maxEdits: number = 2000;
 
 /**
  * Walk the Myers trace back from `(n, m)` to `(0, 0)`, as the runs that differ, in order.
@@ -105,8 +105,7 @@ const myers = (
 /**
  * Diff of `a[aFrom, aTo)` and `b[bFrom, bTo)` that prefers the earliest matches: the common start is skipped, then
  * Myers runs on what is left (its greedy diagonals also match as early as they can). The common end is not skipped
- * first, as that would prefer the latest matches there. If the rest is too different, it counts as one replacement,
- * common end excluded.
+ * first, as that would prefer the latest matches there. Undefined if the rest is too different for Myers.
  */
 const diffRange = (
   a: readonly string[],
@@ -115,7 +114,7 @@ const diffRange = (
   aTo: number,
   bFrom: number,
   bTo: number,
-): Hunk[] => {
+): Hunk[] | undefined => {
   let start: number = 0;
   while (aFrom + start < aTo && bFrom + start < bTo && a[aFrom + start] === b[bFrom + start]) {
     start++;
@@ -127,16 +126,32 @@ const diffRange = (
   if (aStart === aTo || bStart === bTo) {
     return [{ aStart, aEnd: aTo, bStart, bEnd: bTo }];
   }
-  const hunks: Hunk[] | undefined = myers(a, b, aStart, aTo, bStart, bTo);
-  if (hunks !== undefined) {
-    return hunks;
+
+  return myers(a, b, aStart, aTo, bStart, bTo);
+};
+
+/**
+ * `a[aFrom, aTo)` replaced as a whole by `b[bFrom, bTo)`, without their common start and end.
+ */
+const replaceRange = (
+  a: readonly string[],
+  b: readonly string[],
+  aFrom: number,
+  aTo: number,
+  bFrom: number,
+  bTo: number,
+): Hunk[] => {
+  let [aStart, aEnd, bStart, bEnd] = [aFrom, aTo, bFrom, bTo];
+  while (aStart < aEnd && bStart < bEnd && a[aStart] === b[bStart]) {
+    aStart++;
+    bStart++;
   }
-  let end: number = 0;
-  while (aTo - end > aStart && bTo - end > bStart && a[aTo - end - 1] === b[bTo - end - 1]) {
-    end++;
+  while (aEnd > aStart && bEnd > bStart && a[aEnd - 1] === b[bEnd - 1]) {
+    aEnd--;
+    bEnd--;
   }
 
-  return [{ aStart, aEnd: aTo - end, bStart, bEnd: bTo - end }];
+  return aStart === aEnd && bStart === bEnd ? [] : [{ aStart, aEnd, bStart, bEnd }];
 };
 
 /**
@@ -189,27 +204,35 @@ const joinAcrossSpaces = (hunks: readonly Hunk[], a: readonly string[]): Hunk[] 
 };
 
 /**
- * Token-level diff of `a` and `b`, preferring the earliest matches. Lines (paragraphs) are compared first, then the
- * tokens inside the lines that differ, which keeps a long chapter with scattered edits fast. Hunks only separated by
- * spaces are joined. `reversed` says the tokens are in reverse order, for the lines.
+ * Fallback for texts too different for one Myers run over all their tokens: lines (paragraphs) are compared first,
+ * then the tokens inside the lines that differ. Faster, but tokens are never matched across an unchanged line.
  */
-const diffEarliest = (a: readonly string[], b: readonly string[], reversed: boolean): Hunk[] => {
+const diffByLines = (a: readonly string[], b: readonly string[], reversed: boolean): Hunk[] => {
   const aLines: { lines: string[]; starts: number[] } = splitLines(a, reversed);
   const bLines: { lines: string[]; starts: number[] } = splitLines(b, reversed);
-  const lineHunks: Hunk[] = diffRange(aLines.lines, bLines.lines, 0, aLines.lines.length, 0, bLines.lines.length);
-  const tokenHunks: Hunk[] = lineHunks.flatMap((hunk: Hunk): Hunk[] =>
-    diffRange(
-      a,
-      b,
+  const lineHunks: Hunk[] =
+    diffRange(aLines.lines, bLines.lines, 0, aLines.lines.length, 0, bLines.lines.length) ??
+    replaceRange(aLines.lines, bLines.lines, 0, aLines.lines.length, 0, bLines.lines.length);
+
+  return lineHunks.flatMap((hunk: Hunk): Hunk[] => {
+    const range: [number, number, number, number] = [
       aLines.starts[hunk.aStart] ?? 0,
       aLines.starts[hunk.aEnd] ?? a.length,
       bLines.starts[hunk.bStart] ?? 0,
       bLines.starts[hunk.bEnd] ?? b.length,
-    ),
-  );
+    ];
 
-  return joinAcrossSpaces(tokenHunks, a);
+    return diffRange(a, b, ...range) ?? replaceRange(a, b, ...range);
+  });
 };
+
+/**
+ * Token-level diff of `a` and `b`, preferring the earliest matches: one Myers run over all the tokens, or
+ * {@link diffByLines} past {@link maxEdits}. Hunks only separated by spaces are joined. `reversed` says the tokens are
+ * in reverse order, for the lines.
+ */
+const diffEarliest = (a: readonly string[], b: readonly string[], reversed: boolean): Hunk[] =>
+  joinAcrossSpaces(diffRange(a, b, 0, a.length, 0, b.length) ?? diffByLines(a, b, reversed), a);
 
 /**
  * Token-level diff of `a` and `b`, as the runs that differ, in order. `earliest` keeps the earliest of several equal

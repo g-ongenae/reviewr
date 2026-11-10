@@ -92,35 +92,42 @@ describe('mergeWords against edits known by construction', () => {
     },
   );
 
-  it.each(Array.from({ length: 200 }, (_: unknown, seed: number): number => seed))(
-    'never silently merges a deleted copy among identical sentences with an edit of another copy, seed %i',
+  it.each(Array.from({ length: 300 }, (_: unknown, seed: number): number => seed))(
+    'never silently merges a deleted or inserted copy among identical ones with an edit of a copy, seed %i',
     (seed: number) => {
       const next: () => number = random(seed + 3000);
-      const copies: number = 2 + Math.floor(next() * 4);
+      const pickOne = (list: readonly string[]): string => list[Math.floor(next() * list.length)] ?? '';
+      const separators: string[] = ['. ', ', ', '.\n', '.\n\n'];
+      // Units of text and the separator after each: a context sentence, 2 to 5 identical copies (on one line, on
+      // separate lines or in separate paragraphs), then `Puis.` and `Après.`, made of words not in the vocabulary.
       const copy: string = randomLine(next, 1 + Math.floor(next() * 3));
-      const separator: string = ['. ', '.\n', ', ', '.\n\n'][Math.floor(next() * 4)] ?? '. ';
-      const sentences: string[] = [
-        randomLine(next, 3),
-        ...Array.from({ length: copies }, (): string => copy),
-        randomLine(next, 3),
+      const copySeparator: string = pickOne(separators);
+      const units: [string, string][] = [
+        [randomLine(next, 3), pickOne(separators)],
+        ...Array.from({ length: 2 + Math.floor(next() * 4) }, (): [string, string] => [copy, copySeparator]),
+        ['Puis', pickOne(separators)],
+        ['Après', '.'],
       ];
-      const join = (list: readonly string[]): string => list.join(separator);
-      const pick = (): number => 1 + Math.floor(next() * copies);
-      // Mine deletes one copy and, half the time, also rewrites another copy or the next sentence.
-      const deleted: number = pick();
-      const mineSentences: (string | undefined)[] = [...sentences];
+      const join = (list: readonly [string, string][]): string => list.map(([text, after]) => text + after).join('');
+      const copyIndex = (): number => 1 + Math.floor(next() * (units.length - 3));
+      // Mine deletes or duplicates one copy with its separator, and sometimes rewrites the last sentence. `Puis.` in
+      // between keeps these edits the shortest way to write mine.
+      const mineUnits: [string, string][] = [...units];
+      const unit: number = copyIndex();
       if (next() < 0.5) {
-        const nearby: number = Math.min(deleted + 1 + Math.floor(next() * 2), sentences.length - 1);
-        mineSentences[nearby] = 'Non';
+        mineUnits.splice(unit, 1);
+      } else {
+        mineUnits.splice(unit, 0, [copy, copySeparator]);
       }
-      mineSentences[deleted] = undefined;
-      const theirsSentences: string[] = [...sentences];
-      theirsSentences[pick()] = 'Si';
-      const mine: string = join(mineSentences.filter((item: string | undefined): item is string => item !== undefined));
-      const theirs: string = join(theirsSentences);
+      if (next() < 0.5) {
+        mineUnits[mineUnits.length - 1] = ['Ensuite', '.'];
+      }
+      const theirsUnits: [string, string][] = [...units];
+      theirsUnits[copyIndex()] = ['Si', copySeparator];
+      const [base, mine, theirs] = [join(units), join(mineUnits), join(theirsUnits)];
 
-      expect(mergeWords(join(sentences), mine, theirs).conflicts).toBeGreaterThan(0);
-      expect(mergeWords(join(sentences), theirs, mine).conflicts).toBeGreaterThan(0);
+      expect(mergeWords(base, mine, theirs).conflicts).toBeGreaterThan(0);
+      expect(mergeWords(base, theirs, mine).conflicts).toBeGreaterThan(0);
     },
   );
 });
