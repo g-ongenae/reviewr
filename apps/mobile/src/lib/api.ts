@@ -1,4 +1,11 @@
-import { ApiError, describeError, isServerUnreachable, ReachabilityTracker, ReviewrClient } from '@reviewr/shared';
+import {
+  ApiError,
+  describeError,
+  isServerUnreachable,
+  ReachabilityTracker,
+  ReviewrClient,
+  withClientFeatures,
+} from '@reviewr/shared';
 import Constants from 'expo-constants';
 
 /**
@@ -14,7 +21,8 @@ const resolveApiUrl = (): string => {
 };
 
 export const apiUrl = resolveApiUrl();
-export const api = new ReviewrClient(apiUrl);
+// Announces that this app understands absent titles (`title: null`); see `withClientFeatures`.
+export const api = new ReviewrClient(apiUrl, withClientFeatures());
 
 /** Whether the API answered the last request; drives the "Server unreachable" notification. */
 export const reachability = new ReachabilityTracker();

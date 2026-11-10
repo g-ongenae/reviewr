@@ -6,3 +6,4 @@ export * from './errors.js';
 export * from './client.js';
 export * from './reachability.js';
 export * from './title.js';
+export * from './features.js';
