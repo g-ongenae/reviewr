@@ -2,10 +2,20 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import type { Document, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import { and, desc, eq } from 'drizzle-orm';
 import { databaseToken, type Database } from '../database/database.js';
-import { DocumentRow, documents, RevisionRow, revisions } from '../database/schema.js';
-import { toDocument, toDocumentSummary, toRevision, toRevisionSummary } from './documents.mapper.js';
+import { DocumentRow, documents, revisions } from '../database/schema.js';
+import {
+  DocumentSummaryRow,
+  RevisionSummaryRow,
+  toDocument,
+  toDocumentSummary,
+  toRevision,
+  toRevisionSummary,
+} from './documents.mapper.js';
 import { CreateDocumentDto } from './dto/create-document.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
+
+/** Revision number of the first save of a document. */
+const firstRevision: number = 1;
 
 /**
  * Narrow an optional row, throwing a 404 when it is missing.
@@ -32,7 +42,7 @@ export class DocumentsService {
    * List documents, most recently updated first.
    */
   public async list(): Promise<DocumentSummary[]> {
-    const rows: Omit<DocumentRow, 'content'>[] = await this.db
+    const rows: DocumentSummaryRow[] = await this.db
       .select({
         id: documents.id,
         title: documents.title,
@@ -56,11 +66,20 @@ export class DocumentsService {
   }
 
   /**
-   * Create a document and its first revision.
+   * Create a document and its first revision. The draft starts equal to that revision.
    */
   public async create(input: CreateDocumentDto): Promise<Document> {
     return this.db.transaction(async (tx) => {
-      const [row] = await tx.insert(documents).values({ title: input.title, content: input.content }).returning();
+      const [row] = await tx
+        .insert(documents)
+        .values({
+          title: input.title,
+          content: input.content,
+          revision: firstRevision,
+          draftContent: input.content,
+          draftBaseRevision: firstRevision,
+        })
+        .returning();
       const created: DocumentRow = assertFound(row, 'new');
       await tx.insert(revisions).values({
         documentId: created.id,
@@ -79,7 +98,8 @@ export class DocumentsService {
    *
    * Fails with 409 if the document was saved since `baseRevision` (optimistic locking), so that
    * concurrent edits from two devices never silently overwrite each other. Saving identical
-   * content is a no-op and does not create a revision.
+   * content is a no-op and does not create a revision. Otherwise the draft is replaced by the saved
+   * content and based on the new revision; `draftVersion` is bumped only if the draft text changed.
    */
   public async update(id: string, input: UpdateDocumentDto): Promise<Document> {
     return this.db.transaction(async (tx) => {
@@ -98,7 +118,15 @@ export class DocumentsService {
       const now: Date = new Date();
       const [row] = await tx
         .update(documents)
-        .set({ title: input.title, content: input.content, revision: current.revision + 1, updatedAt: now })
+        .set({
+          title: input.title,
+          content: input.content,
+          revision: current.revision + 1,
+          draftContent: input.content,
+          draftVersion: current.draftContent === input.content ? current.draftVersion : current.draftVersion + 1,
+          draftBaseRevision: current.revision + 1,
+          updatedAt: now,
+        })
         .where(eq(documents.id, id))
         .returning();
       const updated: DocumentRow = assertFound(row, id);
@@ -130,7 +158,7 @@ export class DocumentsService {
    */
   public async listRevisions(documentId: string): Promise<RevisionSummary[]> {
     await this.get(documentId);
-    const rows: Omit<RevisionRow, 'content'>[] = await this.db
+    const rows: RevisionSummaryRow[] = await this.db
       .select({
         documentId: revisions.documentId,
         revision: revisions.revision,

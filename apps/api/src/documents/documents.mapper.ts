@@ -1,10 +1,16 @@
 import type { Document, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import type { DocumentRow, RevisionRow } from '../database/schema.js';
 
+/** Columns of a document row read to list documents. */
+export type DocumentSummaryRow = Pick<DocumentRow, 'id' | 'title' | 'revision' | 'createdAt' | 'updatedAt'>;
+
+/** Columns of a revision row read to list revisions. */
+export type RevisionSummaryRow = Pick<RevisionRow, 'documentId' | 'revision' | 'title' | 'createdAt'>;
+
 /**
  * Convert a database row to its API summary representation.
  */
-export const toDocumentSummary = (row: Omit<DocumentRow, 'content'>): DocumentSummary => ({
+export const toDocumentSummary = (row: DocumentSummaryRow): DocumentSummary => ({
   id: row.id,
   title: row.title,
   revision: row.revision,
@@ -23,7 +29,7 @@ export const toDocument = (row: DocumentRow): Document => ({
 /**
  * Convert a revision row to its API summary representation.
  */
-export const toRevisionSummary = (row: Omit<RevisionRow, 'content'>): RevisionSummary => ({
+export const toRevisionSummary = (row: RevisionSummaryRow): RevisionSummary => ({
   documentId: row.documentId,
   revision: row.revision,
   title: row.title,

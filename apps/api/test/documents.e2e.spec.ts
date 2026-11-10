@@ -3,7 +3,8 @@ import { PGlite } from '@electric-sql/pglite';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import type { Document, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
-import { drizzle } from 'drizzle-orm/pglite';
+import { eq } from 'drizzle-orm';
+import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { configureApp } from '../src/app.js';
@@ -17,6 +18,7 @@ import * as schema from '../src/database/schema.js';
 describe('Documents API', () => {
   let app: NestFastifyApplication;
   let pglite: PGlite;
+  let db: PgliteDatabase<typeof schema>;
 
   const call = async (method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: object) => {
     const response = await app.inject({ method, url, payload });
@@ -27,9 +29,23 @@ describe('Documents API', () => {
   const create = async (title: string, content: string): Promise<Document> =>
     (await call('POST', '/documents', { title, content })).body as Document;
 
+  const draftOf = async (id: string) => {
+    const [row] = await db
+      .select({
+        content: schema.documents.content,
+        draftContent: schema.documents.draftContent,
+        draftVersion: schema.documents.draftVersion,
+        draftBaseRevision: schema.documents.draftBaseRevision,
+      })
+      .from(schema.documents)
+      .where(eq(schema.documents.id, id));
+
+    return row;
+  };
+
   beforeAll(async () => {
     pglite = new PGlite();
-    const db = drizzle(pglite, { schema });
+    db = drizzle(pglite, { schema });
     await migrate(db, { migrationsFolder });
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -69,6 +85,31 @@ describe('Documents API', () => {
     expect(created.id).toMatch(/^[0-9a-f-]{36}$/);
 
     expect(await call('GET', `/documents/${created.id}`)).toEqual({ status: 200, body: created });
+  });
+
+  it('starts the draft equal to the first revision', async () => {
+    const doc = await create('Brouillon', 'Il était une fois…');
+    expect(await draftOf(doc.id)).toEqual({
+      content: 'Il était une fois…',
+      draftContent: 'Il était une fois…',
+      draftVersion: 1,
+      draftBaseRevision: 1,
+    });
+  });
+
+  it('keeps the draft equal to the saved content on update', async () => {
+    const doc = await create('Essai', 'v1');
+    await call('PUT', `/documents/${doc.id}`, { title: 'Essai', content: 'v2', baseRevision: 1 });
+    expect(await draftOf(doc.id)).toEqual({ content: 'v2', draftContent: 'v2', draftVersion: 2, draftBaseRevision: 2 });
+
+    // A title-only change creates a revision but leaves the draft text, and its version, as they were.
+    await call('PUT', `/documents/${doc.id}`, { title: 'Essai !', content: 'v2', baseRevision: 2 });
+    expect(await draftOf(doc.id)).toEqual({ content: 'v2', draftContent: 'v2', draftVersion: 2, draftBaseRevision: 3 });
+
+    // A no-op save and a rejected save do not touch the draft.
+    await call('PUT', `/documents/${doc.id}`, { title: 'Essai !', content: 'v2', baseRevision: 3 });
+    await call('PUT', `/documents/${doc.id}`, { title: 'Essai', content: 'stale', baseRevision: 1 });
+    expect(await draftOf(doc.id)).toEqual({ content: 'v2', draftContent: 'v2', draftVersion: 2, draftBaseRevision: 3 });
   });
 
   it('validates the payload', async () => {
