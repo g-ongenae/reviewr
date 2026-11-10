@@ -165,6 +165,25 @@ describe('Document titles', () => {
     expect(await revisionsOf(doc.id)).toHaveLength(1);
   });
 
+  it('tells caches that the answer depends on the features header', async () => {
+    const doc = await create({ content: 'texte' });
+
+    for (const headers of [{}, currentClient]) {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/documents/${doc.id}`,
+        headers: { ...headers, origin: 'http://localhost:5173' },
+      });
+      const vary = String(response.headers.vary)
+        .toLowerCase()
+        .split(',')
+        .map((value) => value.trim());
+
+      expect(vary).toContain(clientFeaturesHeader.toLowerCase());
+      expect(vary.filter((value) => value === clientFeaturesHeader.toLowerCase())).toHaveLength(1);
+    }
+  });
+
   it('lets the web app send the features header across origins', async () => {
     const response = await app.inject({
       method: 'OPTIONS',

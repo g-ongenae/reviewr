@@ -13,13 +13,25 @@ export const nullableTitleFeature: string = 'nullable-title';
 export const clientFeatures: readonly string[] = [nullableTitleFeature];
 
 /**
+ * Headers the call would send: those of `init`, or those of a `Request` input when `init` gives none (headers
+ * given in `init` replace the ones of the `Request`, as in `fetch`).
+ */
+const headersOf = (input: Parameters<typeof fetch>[0], init: RequestInit | undefined): Headers => {
+  if (init?.headers === undefined && typeof Request !== 'undefined' && input instanceof Request) {
+    return new Headers(input.headers);
+  }
+
+  return new Headers(init?.headers);
+};
+
+/**
  * Wrap a fetch implementation so every request announces {@link clientFeatures}. Pass the result to
  * `ReviewrClient` in the apps.
  */
 export const withClientFeatures =
   (fetchFn: typeof fetch = globalThis.fetch.bind(globalThis)): typeof fetch =>
   async (input, init) => {
-    const headers: Headers = new Headers(init?.headers);
+    const headers: Headers = headersOf(input, init);
     headers.set(clientFeaturesHeader, clientFeatures.join(','));
 
     return fetchFn(input, { ...init, headers });
