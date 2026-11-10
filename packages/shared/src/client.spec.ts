@@ -44,12 +44,45 @@ describe('ReviewrClient.saveDraft', () => {
 });
 
 describe('conflictOf', () => {
+  const conflict409 = (body: object): ApiError => new ApiError(409, { statusCode: 409, message: 'Conflict', ...body });
+
+  it('returns a well-formed stale_revision body', () => {
+    expect(conflictOf(conflict409({ code: 'stale_revision', revision: 2 }))).toMatchObject({
+      code: 'stale_revision',
+      revision: 2,
+    });
+  });
+
+  it('accepts a draft without a base revision', () => {
+    // eslint-disable-next-line no-null/no-null -- the API sends JSON null
+    const draft: DocumentDraft = { ...serverDraft, baseRevision: null };
+    expect(conflictOf(conflict409({ code: 'draft_conflict', draft }))).toMatchObject({ draft });
+  });
+
   it('ignores errors that are not structured 409s', () => {
     expect(conflictOf(new Error('boom'))).toBeUndefined();
     expect(conflictOf(new ApiError(409, { statusCode: 409, message: 'Conflict' }))).toBeUndefined();
     expect(conflictOf(new ApiError(409, undefined))).toBeUndefined();
+    expect(conflictOf(conflict409({ code: 'unsaved_draft', draft: serverDraft }))).toBeUndefined();
     expect(
-      conflictOf(new ApiError(400, { statusCode: 400, message: 'x', code: 'draft_conflict' } as never)),
+      conflictOf(
+        new ApiError(400, { statusCode: 400, message: 'x', code: 'draft_conflict', draft: serverDraft } as never),
+      ),
     ).toBeUndefined();
+  });
+
+  it.each([
+    ['no draft', { code: 'draft_conflict' }],
+    // eslint-disable-next-line no-null/no-null -- a JSON null
+    ['a null draft', { code: 'draft_conflict', draft: null }],
+    ['a draft without content', { code: 'draft_conflict', draft: { draftVersion: 2, baseRevision: 1 } }],
+    ['a non-integer draftVersion', { code: 'draft_conflict', draft: { ...serverDraft, draftVersion: '2' } }],
+    ['a zero draftVersion', { code: 'draft_conflict', draft: { ...serverDraft, draftVersion: 0 } }],
+    ['a missing baseRevision', { code: 'draft_conflict', draft: { content: 'x', draftVersion: 2 } }],
+    ['a fractional baseRevision', { code: 'draft_conflict', draft: { ...serverDraft, baseRevision: 1.5 } }],
+    ['no revision', { code: 'stale_revision' }],
+    ['a string revision', { code: 'stale_revision', revision: '2' }],
+  ])('rejects a known code with %s', (_case: string, body: object) => {
+    expect(conflictOf(conflict409(body))).toBeUndefined();
   });
 });

@@ -6,9 +6,9 @@ import type {
   Document,
   DocumentDraft,
   DraftConflictBody,
+  Revision,
   RevisionSummary,
   StaleRevisionBody,
-  UnsavedDraftBody,
 } from '@reviewr/shared';
 import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
@@ -120,6 +120,20 @@ describe('Drafts API', () => {
     expect((await saveDraft(doc.id, 'web', 7)).status).toBe(409);
   });
 
+  it('answers a retry of an applied save with the current draft, not a conflict', async () => {
+    const doc = await create('v1');
+    // The first save is applied, but its response is lost: the client retries the same request.
+    expect((await saveDraft(doc.id, 'v2', 1)).status).toBe(200);
+    const retry = await saveDraft(doc.id, 'v2', 1);
+    expect(retry).toEqual({ status: 200, body: { content: 'v2', draftVersion: 2, baseRevision: 1 } });
+    expect((await get(doc.id)).draft).toEqual(retry.body);
+
+    // A stale version with another text is still a conflict.
+    expect((await saveDraft(doc.id, 'v3', 1)).status).toBe(409);
+  });
+
+  // Both requests overlap, but a single PGlite instance runs one transaction at a time: this checks the
+  // version comparison, not the `FOR UPDATE` row lock, which needs real PostgreSQL with two connections.
   it('gives exactly one 409 for two concurrent saves of the same draftVersion', async () => {
     const doc = await create('v1');
     const results = await Promise.all([saveDraft(doc.id, 'one', 1), saveDraft(doc.id, 'two', 1)]);
@@ -153,26 +167,51 @@ describe('Drafts API', () => {
   });
 
   describe('PUT /documents/:id (save + revision)', () => {
-    it('answers 409 instead of overwriting a draft that differs from the head', async () => {
-      const doc = await create('v1');
-      await saveDraft(doc.id, 'autosaved', 1);
+    it('commits a pending draft as a revision before refusing an old client, which can then retry', async () => {
+      const doc = await create('A');
+      await saveDraft(doc.id, 'B', 1);
+      const save = async (content: string, baseRevision: number) =>
+        call('PUT', `/documents/${doc.id}`, { title: 'Brouillon', content, baseRevision });
 
-      const { status, body } = await call('PUT', `/documents/${doc.id}`, {
-        title: 'Brouillon',
-        content: 'old client',
-        baseRevision: 1,
-      });
-      expect(status).toBe(409);
-      expect(body).toMatchObject({
+      // The old client saves C on revision 1: the draft B becomes revision 2, and the save is refused.
+      const refused = await save('C', 1);
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({
         statusCode: 409,
         error: 'Conflict',
-        code: 'unsaved_draft',
-        draft: { content: 'autosaved', draftVersion: 2, baseRevision: 1 },
-      } satisfies Omit<UnsavedDraftBody, 'message'>);
-      expect(await get(doc.id)).toMatchObject({
-        content: 'v1',
-        revision: 1,
-        draft: { content: 'autosaved', draftVersion: 2 },
+        code: 'stale_revision',
+        revision: 2,
+      } satisfies Omit<StaleRevisionBody, 'message'>);
+
+      // "Discard mine" / "keep mine" both start with a GET, which shows B at revision 2.
+      const latest = await get(doc.id);
+      expect(latest).toMatchObject({
+        content: 'B',
+        revision: 2,
+        draft: { content: 'B', draftVersion: 2, baseRevision: 2 },
+      });
+
+      // "Keep mine" retries C on revision 2, and B stays in the history.
+      const kept = await save('C', latest.revision);
+      expect(kept.status).toBe(200);
+      expect(kept.body).toMatchObject({
+        content: 'C',
+        revision: 3,
+        draft: { content: 'C', draftVersion: 3, baseRevision: 3 },
+      });
+      const history = await Promise.all(
+        [1, 2, 3].map(
+          async (revision) => (await call('GET', `/documents/${doc.id}/revisions/${revision}`)).body as Revision,
+        ),
+      );
+      expect(history.map((revision) => revision.content)).toEqual(['A', 'B', 'C']);
+
+      // The autosaving client, still on draft version 2, now learns about C.
+      const next = await saveDraft(doc.id, 'B, suite', 2);
+      expect(next.status).toBe(409);
+      expect(next.body).toMatchObject({
+        code: 'draft_conflict',
+        draft: { content: 'C', draftVersion: 3, baseRevision: 3 },
       });
     });
 

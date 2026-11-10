@@ -89,7 +89,8 @@ export interface SaveDraftInput {
   content: string;
   /**
    * `draftVersion` the edits started from. If the draft was saved elsewhere in the meantime,
-   * the API answers 409 with a `DraftConflictBody` instead of overwriting it.
+   * the API answers 409 with a `DraftConflictBody` instead of overwriting it, unless `content`
+   * already is the stored draft (a retry), which answers the current draft.
    */
   draftVersion: number;
 }
@@ -103,7 +104,8 @@ export interface DraftConflictBody extends ApiErrorBody {
 }
 
 /**
- * 409 of `PUT /documents/:id`: the document was saved since `baseRevision`.
+ * 409 of `PUT /documents/:id`: the document was saved since `baseRevision`, or it had an autosaved draft
+ * that the save would have overwritten, which the server committed as revision `revision` first.
  */
 export interface StaleRevisionBody extends ApiErrorBody {
   code: 'stale_revision';
@@ -112,15 +114,6 @@ export interface StaleRevisionBody extends ApiErrorBody {
 }
 
 /**
- * 409 of `PUT /documents/:id`: an autosaved draft differs from both the head and the saved content,
- * so saving would silently drop it. Carries that draft.
- */
-export interface UnsavedDraftBody extends ApiErrorBody {
-  code: 'unsaved_draft';
-  draft: DocumentDraft;
-}
-
-/**
  * Structured body of a 409 Conflict, discriminated by `code`.
  */
-export type ConflictBody = DraftConflictBody | StaleRevisionBody | UnsavedDraftBody;
+export type ConflictBody = DraftConflictBody | StaleRevisionBody;

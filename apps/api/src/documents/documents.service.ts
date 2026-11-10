@@ -36,6 +36,15 @@ const conflict = (detail: ConflictDetail): ConflictException =>
   new ConflictException({ statusCode: HttpStatus.CONFLICT, error: 'Conflict', ...detail } satisfies ConflictBody);
 
 /**
+ * 409 detail of a save based on a revision that is no longer the head.
+ */
+const staleRevision = (revision: number, baseRevision: number): ConflictDetail => ({
+  code: 'stale_revision',
+  message: `Document was modified elsewhere: it is at revision ${revision}, the edit is based on revision ${baseRevision}`,
+  revision,
+});
+
+/**
  * Narrow an optional row, throwing a 404 when it is missing.
  */
 const assertFound = <T>(row: T | undefined, id: string): T => {
@@ -44,6 +53,45 @@ const assertFound = <T>(row: T | undefined, id: string): T => {
   }
 
   return row;
+};
+
+/** Transaction handle of the database. */
+type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/**
+ * Make `title` and `content` the new head revision of a locked document, and the draft equal to it.
+ * `draftVersion` is bumped only if the draft text changes.
+ */
+const appendRevision = async (
+  tx: Transaction,
+  current: DocumentRow,
+  title: string,
+  content: string,
+): Promise<DocumentRow> => {
+  const now: Date = new Date();
+  const [row] = await tx
+    .update(documents)
+    .set({
+      title,
+      content,
+      revision: current.revision + 1,
+      draftContent: content,
+      draftVersion: current.draftContent === content ? current.draftVersion : current.draftVersion + 1,
+      draftBaseRevision: current.revision + 1,
+      updatedAt: now,
+    })
+    .where(eq(documents.id, current.id))
+    .returning();
+  const updated: DocumentRow = assertFound(row, current.id);
+  await tx.insert(revisions).values({
+    documentId: current.id,
+    revision: updated.revision,
+    title: updated.title,
+    content: updated.content,
+    createdAt: now,
+  });
+
+  return updated;
 };
 
 /**
@@ -114,70 +162,52 @@ export class DocumentsService {
   /**
    * Save a new version of a document.
    *
-   * Fails with 409 if the document was saved since `baseRevision` (optimistic locking), so that
-   * concurrent edits from two devices never silently overwrite each other. Saving identical
+   * Fails with 409 `stale_revision` if the document was saved since `baseRevision` (optimistic locking),
+   * so that concurrent edits from two devices never silently overwrite each other. Saving identical
    * content is a no-op and does not create a revision. Otherwise the draft is replaced by the saved
    * content and based on the new revision; `draftVersion` is bumped only if the draft text changed.
    *
-   * Fails with 409 too if an autosaved draft differs from both the head and the saved content: saving
-   * would drop it without the client having seen it. Saving the draft text itself turns it into a revision.
+   * An autosaved draft that differs from both the head and the saved content is never overwritten: it
+   * is first committed as a revision of its own, then the save fails with 409 `stale_revision` at that
+   * new revision. To a client that knows only revisions this is "changed elsewhere": it reloads the
+   * draft text, or retries on the new revision with the draft kept in the history.
    */
   public async update(id: string, input: UpdateDocumentDto): Promise<Document> {
-    return this.db.transaction(async (tx) => {
+    const result: Document | ConflictDetail = await this.db.transaction(async (tx) => {
       const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
       const current: DocumentRow = assertFound(locked, id);
 
       if (current.revision !== input.baseRevision) {
-        throw conflict({
-          code: 'stale_revision',
-          message: `Document was modified elsewhere: it is at revision ${current.revision}, the edit is based on revision ${input.baseRevision}`,
-          revision: current.revision,
-        });
+        throw conflict(staleRevision(current.revision, input.baseRevision));
       }
       if (current.title === input.title && current.content === input.content) {
         return toDocument(current);
       }
       if (current.draftContent !== current.content && current.draftContent !== input.content) {
-        throw conflict({
-          code: 'unsaved_draft',
-          message: 'Document has an autosaved draft that this save would overwrite',
-          draft: toDocumentDraft(current),
-        });
+        // Returned, not thrown: throwing would roll the promotion of the draft back.
+        const promoted: DocumentRow = await appendRevision(tx, current, current.title, current.draftContent);
+
+        return staleRevision(promoted.revision, input.baseRevision);
       }
 
-      const now: Date = new Date();
-      const [row] = await tx
-        .update(documents)
-        .set({
-          title: input.title,
-          content: input.content,
-          revision: current.revision + 1,
-          draftContent: input.content,
-          draftVersion: current.draftContent === input.content ? current.draftVersion : current.draftVersion + 1,
-          draftBaseRevision: current.revision + 1,
-          updatedAt: now,
-        })
-        .where(eq(documents.id, id))
-        .returning();
-      const updated: DocumentRow = assertFound(row, id);
-      await tx.insert(revisions).values({
-        documentId: id,
-        revision: updated.revision,
-        title: updated.title,
-        content: updated.content,
-        createdAt: now,
-      });
-
-      return toDocument(updated);
+      return toDocument(await appendRevision(tx, current, input.title, input.content));
     });
+
+    if ('code' in result) {
+      throw conflict(result);
+    }
+
+    return result;
   }
 
   /**
    * Autosave the draft of a document. Creates no revision and leaves the head (`content`, `revision`)
    * and the draft's base revision alone.
    *
-   * Fails with 409 if the draft was saved since `draftVersion`, with the current draft in the body so
-   * the client can reconcile without another request. Saving the stored text again is a no-op.
+   * Saving the text already stored answers the current draft and changes nothing, whatever
+   * `draftVersion` it carries: a retry after a lost response must not conflict with itself.
+   * Otherwise it fails with 409 `draft_conflict` if the draft was saved since `draftVersion`, with the
+   * current draft in the body so the client can reconcile without another request.
    * A save moves `updatedAt`, so documents being written rise in the list.
    */
   public async saveDraft(id: string, input: SaveDraftDto): Promise<DocumentDraft> {
@@ -185,15 +215,15 @@ export class DocumentsService {
       const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
       const current: DocumentRow = assertFound(locked, id);
 
+      if (current.draftContent === input.content) {
+        return toDocumentDraft(current);
+      }
       if (current.draftVersion !== input.draftVersion) {
         throw conflict({
           code: 'draft_conflict',
           message: `Draft was modified elsewhere: it is at version ${current.draftVersion}, the edit is based on version ${input.draftVersion}`,
           draft: toDocumentDraft(current),
         });
-      }
-      if (current.draftContent === input.content) {
-        return toDocumentDraft(current);
       }
 
       const [row] = await tx
