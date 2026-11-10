@@ -41,12 +41,13 @@ Done: the author writes on the deployed instance, from the browser and the phone
 
 Small changes on the existing schema, not the commit model:
 
-- `documents`: `title` nullable, `draft_content`, `draft_version` (a counter for conflict detection), `draft_base_revision`. `revisions` gets an optional `name` (the version label, separate from the document title).
+- `documents`: `draft_content`, `draft_version` (a counter for conflict detection), `draft_base_revision`. `revisions` gets an optional `name` (the version label, separate from the document title). The migration is tested on a populated old database. (done)
+- `documents`: `title` nullable, together with the shared types below.
 - `PUT /documents/:id/draft` `{ content, draftVersion }`: autosave, no revision; 409 on a stale `draftVersion`.
 - `POST /documents/:id/revisions` `{ name?, draftVersion, baseRevision }`: snapshots the draft atomically; 409 if either the draft or the head moved. Saving a draft identical to the head is a no-op.
 - `PATCH /documents/:id` (title) and `PATCH /documents/:id/revisions/:n` (version name). Add `PATCH` to CORS.
 - `POST /documents` accepts an empty draft and creates no revision: a document can exist with only a draft.
-- Keep the current `PUT /documents/:id` working as "save draft + create revision" until the new mobile build ships.
+- Keep the current `PUT /documents/:id` working as "save draft + create revision" until the new mobile build ships. It already keeps the draft columns equal to the saved content (done). Left for the draft endpoint: it must not silently overwrite an autosaved draft that differs from the head (for example, answer 409).
 - Shared types: nullable title with a display helper ("Untitled — 30 Oct", from `created_at`), structured 409 bodies.
 
 Web client — an autosave state machine, not just a debounce:
