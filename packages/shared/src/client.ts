@@ -2,9 +2,11 @@ import type {
   ApiErrorBody,
   CreateDocumentInput,
   Document,
+  DocumentDraft,
   DocumentSummary,
   Revision,
   RevisionSummary,
+  SaveDraftInput,
   UpdateDocumentInput,
 } from './types.js';
 import { ApiError } from './api-error.js';
@@ -67,6 +69,14 @@ export class ReviewrClient {
    */
   public async updateDocument(id: string, input: UpdateDocumentInput): Promise<Document> {
     return this.request('PUT', documentPath(id), input);
+  }
+
+  /**
+   * Autosave the draft of a document; creates no revision. Rejects with a 409 `ApiError` whose body is a
+   * `DraftConflictBody` (read it with `conflictOf`) if the draft was saved elsewhere since `draftVersion`.
+   */
+  public async saveDraft(id: string, input: SaveDraftInput): Promise<DocumentDraft> {
+    return this.request('PUT', `${documentPath(id)}/draft`, input);
   }
 
   /**
