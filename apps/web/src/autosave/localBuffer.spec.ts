@@ -419,8 +419,11 @@ describe('openLocalBuffer', () => {
     });
 
     it('stops as "stalled" when a transaction never settles, without running the calls queued behind it', async () => {
+      // Seeded with the normal deadline: on a busy machine a healthy write can take longer than the short one below.
+      const seed = open();
+      expect(await seed.put('doc', { content: 'Once', base: null })).toEqual({ ok: true });
+      await seed.close();
       const buffer = open({ transactionTimeoutMs: 20 });
-      await buffer.put('doc', { content: 'Once', base: null });
       // A transaction that fires neither complete nor abort, whatever is done to it.
       const abort = vi.fn();
       const store = { put: () => ({}), get: () => ({}), getAll: () => ({}) };

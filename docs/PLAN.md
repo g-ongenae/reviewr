@@ -57,7 +57,7 @@ Web client — an autosave state machine, not just a debounce:
 - the Composer creates the document on the first autosave with an idempotency key (retry-safe), and does not lose keystrokes typed while it is being created;
 - local buffer in IndexedDB, restored after a crash or a failed request; it also keeps the base (server draft and `draftVersion` the edits started from):
   - the storage module `apps/web/src/autosave/localBuffer.ts`: writes land in call order, a delete can be conditional on the confirmed text, it never throws into the editor, and its schema is versioned for the outbox (done);
-  - use it from the editor and the Composer: write on every edit, delete once the server confirmed the save, restore on start;
+  - use it from the editor and the Composer: write on every edit, delete once the server confirmed the save, restore on start; when the buffer answers a failure (unavailable, full, stalled), tell the writer the local copy is not being kept, and never reload or discard the text in memory;
   - two tabs editing the same document share one entry, so the buffer keeps only the text written last: give each tab its own entry or a lock;
 - offline mode: an unreachable server (network error, 502/503/504) shows a "Server unreachable" notification, never a blocking error; edits and versions go to an outbox and are sent on reconnect;
 - reconciliation view when both sides moved: three-way word merge of base, mine and theirs, non-overlapping changes applied, conflicts resolved by the writer (mine, theirs, both, edit), the losing side kept as a named version (see [ARCHITECTURE.md](ARCHITECTURE.md#offline-and-reconciliation)):
