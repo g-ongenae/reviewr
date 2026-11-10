@@ -1,0 +1,32 @@
+{
+  "name": "@reviewr/merge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deterministic three-way word merge of base, mine and theirs, shared by the Reviewr web and mobile apps",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@algoan/eslint-config": "^3.0.0",
+    "eslint": "^10.0.0",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.12"
+  }
+}
