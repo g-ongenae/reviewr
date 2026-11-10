@@ -24,6 +24,11 @@
  *   browser supports it (flushed to disk, not only to the OS cache).
  * - **Versioned schema.** The database is upgraded step by step through `localBufferSchema` (one migration per
  *   version). Later versions (the outbox) append a migration; buffered text is kept across upgrades.
+ * - **A stalled transaction stops the buffer, loudly.** A transaction that fires neither `complete` nor `abort` within
+ *   `transactionTimeoutMs` is aborted if it can be, and its call answers `stalled`. Whether it will still commit is
+ *   then unknown, so no later write may run after it (it could commit over newer text): from then on, this buffer
+ *   answers `stalled` to every call, including the ones already queued, until the page opens a new one (a reload).
+ *   The UI can then say that the local copy is not being kept. `close()` still resolves.
  * - **Upgrades are not blocked by this tab.** When another tab opens a newer version, this connection closes itself;
  *   the next call reopens (and fails with `failed` if this tab's code is older than the database).
  *
@@ -63,9 +68,10 @@ export interface BufferEntry {
  * - `unavailable`: IndexedDB is missing, refused to open (private mode, old browser) or never answered;
  * - `blocked`: another tab holds an older version open and does not close it, so the database cannot be upgraded;
  * - `quota`: the storage is full;
- * - `failed`: anything else (a transaction aborted, a database newer than this code…).
+ * - `failed`: anything else (a transaction aborted, a database newer than this code…);
+ * - `stalled`: a transaction never settled; this buffer stopped and answers `stalled` to every later call.
  */
-export type BufferFailureReason = 'unavailable' | 'blocked' | 'quota' | 'failed';
+export type BufferFailureReason = 'unavailable' | 'blocked' | 'quota' | 'failed' | 'stalled';
 
 export interface BufferFailure {
   ok: false;
@@ -119,6 +125,8 @@ export interface LocalBufferOptions {
   schema?: readonly Migration[];
   /** How long to wait for the database to open before giving up as `unavailable`. Defaults to 5 seconds. */
   openTimeoutMs?: number;
+  /** How long a transaction may stay unsettled before the buffer stops as `stalled`. Defaults to 10 seconds. */
+  transactionTimeoutMs?: number;
   /** Defaults to `Date.now`. */
   now?: () => number;
 }
@@ -159,18 +167,40 @@ const toEntry = (record: unknown): BufferEntry | undefined => {
 
 /**
  * Runs `body` in a transaction on the drafts store and resolves with what `result` returns once the transaction
- * completed, or rejects with the error that aborted it.
+ * completed, or rejects with the error that aborted it. If neither happens within `timeoutMs`, it tries to abort the
+ * transaction and rejects as `stalled`.
  */
-const transact = <T>(db: IDBDatabase, mode: IDBTransactionMode, body: (store: IDBObjectStore) => () => T): Promise<T> =>
+const transact = <T>(
+  db: IDBDatabase,
+  mode: IDBTransactionMode,
+  timeoutMs: number,
+  body: (store: IDBObjectStore) => () => T,
+): Promise<T> =>
   new Promise<T>((resolve, reject) => {
     let transaction: IDBTransaction | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       transaction = db.transaction(DRAFTS, mode, mode === 'readwrite' ? { durability: 'strict' } : undefined);
       const tx = transaction;
       const result = body(tx.objectStore(DRAFTS));
-      tx.oncomplete = () => resolve(result());
-      tx.onabort = () => reject(tx.error ?? new DOMException('The transaction was aborted', 'AbortError'));
+      tx.oncomplete = () => {
+        clearTimeout(timer);
+        resolve(result());
+      };
+      tx.onabort = () => {
+        clearTimeout(timer);
+        reject(tx.error ?? new DOMException('The transaction was aborted', 'AbortError'));
+      };
+      timer = setTimeout(() => {
+        try {
+          tx.abort();
+        } catch {
+          // Already finished: still unknown whether it committed, as no event came.
+        }
+        reject(new BufferError('stalled', new Error('An IndexedDB transaction did not settle in time')));
+      }, timeoutMs);
     } catch (error) {
+      clearTimeout(timer);
       try {
         transaction?.abort();
       } catch {
@@ -183,11 +213,19 @@ const transact = <T>(db: IDBDatabase, mode: IDBTransactionMode, body: (store: ID
   });
 
 export const openLocalBuffer = (options: LocalBufferOptions = {}): LocalBuffer => {
-  const { name = 'reviewr', schema = localBufferSchema, openTimeoutMs = 5000, now = () => Date.now() } = options;
+  const {
+    name = 'reviewr',
+    schema = localBufferSchema,
+    openTimeoutMs = 5000,
+    transactionTimeoutMs = 10_000,
+    now = () => Date.now(),
+  } = options;
   const factory = options.indexedDB === undefined ? (globalThis.indexedDB ?? null) : options.indexedDB;
 
   let connection: Promise<IDBDatabase> | undefined;
   let closed = false;
+  /** Set once a transaction did not settle: every later call answers `stalled`. */
+  let stalled: BufferError | undefined;
   /** The end of the queue: every call runs after the previous one settled. */
   let tail: Promise<unknown> = Promise.resolve();
 
@@ -262,17 +300,21 @@ export const openLocalBuffer = (options: LocalBufferOptions = {}): LocalBuffer =
 
   const database = (): Promise<IDBDatabase> => (connection ??= open());
 
+  /** Why a new call is refused right away, if it is. */
+  const refusal = (): BufferError | undefined =>
+    stalled ?? (closed ? new BufferError('unavailable', new Error('The local buffer is closed')) : undefined);
+
   /** Runs `operation` after every call made before it, and turns any failure into a result. */
   const enqueue = <T>(operation: (db: IDBDatabase) => Promise<T>, onFailure: (failure: BufferFailure) => T) => {
-    if (closed) {
-      return Promise.resolve(
-        onFailure(failure(new BufferError('unavailable', new Error('The local buffer is closed')))),
-      );
-    }
+    const refused = refusal();
+    if (refused !== undefined) return Promise.resolve(onFailure(failure(refused)));
     const run = tail.then(async () => {
       try {
+        // Queued behind a transaction that stalled: never run after it.
+        if (stalled !== undefined) throw stalled;
         return await operation(await database());
       } catch (error) {
+        if (error instanceof BufferError && error.reason === 'stalled') stalled = error;
         return onFailure(failure(error));
       }
     });
@@ -284,23 +326,32 @@ export const openLocalBuffer = (options: LocalBufferOptions = {}): LocalBuffer =
     get: (key) =>
       enqueue<GetResult>(
         (db) =>
-          transact(db, 'readonly', (store) => {
+          transact(db, 'readonly', transactionTimeoutMs, (store) => {
             const request = store.get(key);
             return () => ({ ok: true, entry: toEntry(request.result) });
           }),
         (failed) => ({ ...failed, entry: undefined }),
       ),
 
-    put: (key, { content, base }) => {
-      const record: BufferEntry = {
-        key,
-        content,
-        base: base === null ? null : { content: base.content, draftVersion: base.draftVersion },
-        updatedAt: now(),
-      };
+    put: (key, value) => {
+      const refused = refusal();
+      if (refused !== undefined) return Promise.resolve(failure(refused));
+      // Snapshot the value now: the caller may change its object before the write runs.
+      let record: BufferEntry;
+      try {
+        const { content, base } = value;
+        record = {
+          key,
+          content,
+          base: base === null ? null : { content: base.content, draftVersion: base.draftVersion },
+          updatedAt: now(),
+        };
+      } catch (error) {
+        return Promise.resolve(failure(error));
+      }
       return enqueue<PutResult>(
         (db) =>
-          transact(db, 'readwrite', (store) => {
+          transact(db, 'readwrite', transactionTimeoutMs, (store) => {
             store.put(record);
             return () => ({ ok: true });
           }),
@@ -308,27 +359,36 @@ export const openLocalBuffer = (options: LocalBufferOptions = {}): LocalBuffer =
       );
     },
 
-    delete: (key, condition) =>
-      enqueue<DeleteResult>(
+    delete: (key, condition) => {
+      // Snapshot the condition now: the caller may change its object before the delete runs.
+      let ifContent: string | undefined;
+      try {
+        ifContent = condition === undefined ? undefined : condition.ifContent;
+      } catch (error) {
+        return Promise.resolve({ ...failure(error), deleted: false });
+      }
+      const conditional = condition !== undefined;
+      return enqueue<DeleteResult>(
         (db) =>
-          transact(db, 'readwrite', (store) => {
+          transact(db, 'readwrite', transactionTimeoutMs, (store) => {
             let deleted = false;
             const request = store.get(key);
             request.onsuccess = () => {
               if (request.result === undefined) return;
-              if (condition !== undefined && toEntry(request.result)?.content !== condition.ifContent) return;
+              if (conditional && toEntry(request.result)?.content !== ifContent) return;
               store.delete(key);
               deleted = true;
             };
             return () => ({ ok: true, deleted });
           }),
         (failed) => ({ ...failed, deleted: false }),
-      ),
+      );
+    },
 
     list: () =>
       enqueue<ListResult>(
         (db) =>
-          transact(db, 'readonly', (store) => {
+          transact(db, 'readonly', transactionTimeoutMs, (store) => {
             const request = store.getAll();
             return () => {
               const entries = (request.result as unknown[])

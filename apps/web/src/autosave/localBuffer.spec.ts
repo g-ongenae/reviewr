@@ -1,4 +1,4 @@
-import { forceCloseDatabase, IDBFactory, IDBObjectStore } from 'fake-indexeddb';
+import { forceCloseDatabase, IDBDatabase as FakeIDBDatabase, IDBFactory, IDBObjectStore } from 'fake-indexeddb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { localBufferSchema, openLocalBuffer, type LocalBuffer, type LocalBufferOptions } from './localBuffer';
 
@@ -138,6 +138,19 @@ describe('openLocalBuffer', () => {
       expect((await buffer.get('doc')).entry?.content).toBe('Once upon');
     });
 
+    it('uses the condition as it was when called, even if the caller changes it after', async () => {
+      const buffer = open();
+      await buffer.put('doc', { content: 'AB', base: null });
+
+      // "A" was confirmed; the caller reuses its object right after the call.
+      const condition = { ifContent: 'A' };
+      const removed = buffer.delete('doc', condition);
+      condition.ifContent = 'AB';
+
+      expect(await removed).toEqual({ ok: true, deleted: false });
+      expect((await buffer.get('doc')).entry?.content).toBe('AB');
+    });
+
     it('reports that there was nothing to delete', async () => {
       const buffer = open();
 
@@ -171,6 +184,35 @@ describe('openLocalBuffer', () => {
       expect(await written).toEqual({ ok: true });
       await closing;
       expect((await open().get('doc')).entry?.content).toBe('Once');
+    });
+
+    it('answers a failure instead of throwing when the clock throws, and does not read it once closed', async () => {
+      const now = vi.fn((): number => {
+        throw new Error('clock failed');
+      });
+      const buffer = open({ now });
+
+      expect(await buffer.put('doc', { content: 'unsent', base: null })).toMatchObject({ ok: false, reason: 'failed' });
+      await buffer.close();
+      now.mockClear();
+      expect(await buffer.put('doc', { content: 'unsent', base: null })).toMatchObject({
+        ok: false,
+        reason: 'unavailable',
+      });
+      expect(now).not.toHaveBeenCalled();
+    });
+
+    it('answers a failure instead of throwing when reading the value throws', async () => {
+      const buffer = open();
+      const base = {
+        content: 'Once',
+        get draftVersion(): number {
+          throw new Error('getter failed');
+        },
+      };
+
+      expect(await buffer.put('doc', { content: 'unsent', base })).toMatchObject({ ok: false, reason: 'failed' });
+      expect(await buffer.get('doc')).toEqual({ ok: true, entry: undefined });
     });
 
     it('reads back a stored record with a malformed base as having no base', async () => {
@@ -314,6 +356,57 @@ describe('openLocalBuffer', () => {
       expect((await buffer.get('doc')).entry?.content).toBe('Once');
     });
 
+    it('answers "quota" when the write fails asynchronously and aborts its transaction', async () => {
+      const buffer = open();
+      await buffer.put('doc', { content: 'Once', base: null });
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its store through `apply`
+      const realPut = IDBObjectStore.prototype.put;
+      vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (
+        this: IDBObjectStore,
+        ...args: Parameters<IDBObjectStore['put']>
+      ) {
+        // The request is queued normally; it is the storage step, run later, that hits the quota.
+        const raw = (this as unknown as { _rawObjectStore: { storeRecord: () => void } })._rawObjectStore;
+        vi.spyOn(raw, 'storeRecord').mockImplementation(() => {
+          throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        });
+        return realPut.apply(this, args);
+      });
+
+      expect(await buffer.put('doc', { content: 'Once upon', base: null })).toMatchObject({
+        ok: false,
+        reason: 'quota',
+      });
+      vi.restoreAllMocks();
+      expect((await buffer.get('doc')).entry?.content).toBe('Once');
+    });
+
+    it('answers "failed" when the transaction aborts after its put succeeded, and keeps the older text', async () => {
+      const buffer = open();
+      await buffer.put('doc', { content: 'Once', base: null });
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its store through `apply`
+      const realPut = IDBObjectStore.prototype.put;
+      let succeeded = false;
+      vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (
+        this: IDBObjectStore,
+        ...args: Parameters<IDBObjectStore['put']>
+      ) {
+        const request = realPut.apply(this, args);
+        request.addEventListener('success', () => {
+          succeeded = true;
+          this.transaction.abort();
+        });
+        return request;
+      });
+
+      expect(await buffer.put('doc', { content: 'Once upon', base: null })).toMatchObject({
+        ok: false,
+        reason: 'failed',
+      });
+      expect(succeeded).toBe(true);
+      expect((await buffer.get('doc')).entry?.content).toBe('Once');
+    });
+
     it('answers "failed" when a transaction aborts', async () => {
       const buffer = open();
       vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore) {
@@ -323,6 +416,35 @@ describe('openLocalBuffer', () => {
 
       expect(await buffer.put('doc', { content: 'Once', base: null })).toMatchObject({ ok: false, reason: 'failed' });
       expect(await buffer.get('doc')).toEqual({ ok: true, entry: undefined });
+    });
+
+    it('stops as "stalled" when a transaction never settles, without running the calls queued behind it', async () => {
+      const buffer = open({ transactionTimeoutMs: 20 });
+      await buffer.put('doc', { content: 'Once', base: null });
+      // A transaction that fires neither complete nor abort, whatever is done to it.
+      const abort = vi.fn();
+      const store = { put: () => ({}), get: () => ({}), getAll: () => ({}) };
+      const transaction = vi
+        .spyOn(FakeIDBDatabase.prototype, 'transaction')
+        .mockImplementation(() => ({ objectStore: () => store, abort }) as unknown as IDBTransaction);
+
+      const stuck = buffer.put('doc', { content: 'Once upon', base: null });
+      const queuedRead = buffer.get('doc');
+      const queuedWrite = buffer.put('doc', { content: 'Once upon a time', base: null });
+      const queuedList = buffer.list();
+
+      expect(await stuck).toMatchObject({ ok: false, reason: 'stalled' });
+      expect(abort).toHaveBeenCalledTimes(1);
+      expect(await queuedRead).toMatchObject({ ok: false, reason: 'stalled', entry: undefined });
+      expect(await queuedWrite).toMatchObject({ ok: false, reason: 'stalled' });
+      expect(await queuedList).toMatchObject({ ok: false, reason: 'stalled', entries: [] });
+      // Nothing ran after the stalled transaction.
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(await buffer.delete('doc')).toMatchObject({ ok: false, reason: 'stalled', deleted: false });
+      await buffer.close();
+
+      vi.restoreAllMocks();
+      expect((await open().get('doc')).entry?.content).toBe('Once');
     });
 
     it('opens again after the browser closed the connection (storage cleared)', async () => {
