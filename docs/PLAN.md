@@ -44,6 +44,10 @@ Small changes on the existing schema, not the commit model:
 - `documents`: `draft_content`, `draft_version` (a counter for conflict detection), `draft_base_revision`. `revisions` gets an optional `name` (the version label, separate from the document title). The migration is tested on a populated old database. (done)
 - `documents`: `title` nullable, together with the shared types below.
 - `PUT /documents/:id/draft` `{ content, draftVersion }`: autosave, no revision; 409 on a stale `draftVersion`.
+  - the endpoint, `Document.draft` on documents and `ReviewrClient.saveDraft` (done); a save whose text is already the stored draft is answered as saved whatever its `draftVersion`, so a retry after a lost response does not conflict with itself;
+  - the 409 bodies carry a `code` (`draft_conflict` with the server's draft, `stale_revision` with the revision), read with `conflictOf` from the shared package (done);
+  - the old `PUT /documents/:id` no longer overwrites an autosaved draft: it first keeps that draft as a revision, then answers 409, so builds that only know revisions see "changed elsewhere" (done);
+  - later: test the row lock on a real PostgreSQL with two connections (the tests run on PGlite, which runs one transaction at a time); make `Document.draft` required in the shared type once the web uses it.
 - `POST /documents/:id/revisions` `{ name?, draftVersion, baseRevision }`: snapshots the draft atomically; 409 if either the draft or the head moved. Saving a draft identical to the head is a no-op.
 - `PATCH /documents/:id` (title) and `PATCH /documents/:id/revisions/:n` (version name). Add `PATCH` to CORS.
 - `POST /documents` accepts an empty draft and creates no revision: a document can exist with only a draft.
