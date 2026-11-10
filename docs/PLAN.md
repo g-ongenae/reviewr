@@ -52,7 +52,8 @@ Small changes on the existing schema, not the commit model:
 
 Web client — an autosave state machine, not just a debounce:
 
-- one write in flight at a time; edits typed during a request are kept and sent next;
+- one write in flight at a time; edits typed during a request are kept and sent next (done: the framework-free core in `apps/web/src/autosave`, with debounce, retry with backoff, `flush()` and a conflict state, tested with delayed and failed requests);
+- wire the core into the editor and the Composer through `PUT /documents/:id/draft`, with a saved / saving / retrying status; tell permanent failures (a deleted document) apart from temporary ones;
 - the Composer creates the document on the first autosave with an idempotency key (retry-safe), and does not lose keystrokes typed while it is being created;
 - local buffer in IndexedDB, restored after a crash or a failed request; it also keeps the base (server draft and `draftVersion` the edits started from);
 - offline mode: an unreachable server (network error, 502/503/504) shows a "Server unreachable" notification, never a blocking error; edits and versions go to an outbox and are sent on reconnect;
