@@ -1,8 +1,9 @@
 import type { Document, Revision } from '@reviewr/shared';
+import { displayTitle } from '@reviewr/shared';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api, inlineError, queryKeys } from '../api';
-import { displayTitle, formatDate } from '../format';
+import { formatDate } from '../format';
 
 interface Props {
   document: Document;
@@ -54,7 +55,7 @@ export const RevisionHistory = ({ document, onRestore }: Props) => {
           {previewError && <p className="error">{previewError}</p>}
           {preview.data && (
             <>
-              <h3>{displayTitle(preview.data.title)}</h3>
+              <h3>{displayTitle({ title: preview.data.title, createdAt: document.createdAt })}</h3>
               <pre className="preview-content">{preview.data.content}</pre>
               {preview.data.revision !== document.revision && (
                 <button className="primary" onClick={() => preview.data && onRestore(preview.data)}>

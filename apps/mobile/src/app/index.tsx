@@ -1,8 +1,9 @@
+import { displayTitle } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, Stack } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { api, apiUrl, inlineError, queryKeys } from '@/lib/api';
-import { displayTitle, formatDate } from '@/lib/format';
+import { formatDate } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
 
 export default function DocumentListScreen() {
@@ -11,7 +12,7 @@ export default function DocumentListScreen() {
   const documents = useQuery({ queryKey: queryKeys.documents, queryFn: () => api.listDocuments() });
 
   const create = useMutation({
-    mutationFn: () => api.createDocument({ title: '', content: '' }),
+    mutationFn: () => api.createDocument({ content: '' }),
     onSuccess: async (document) => {
       queryClient.setQueryData(queryKeys.document(document.id), document);
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
@@ -59,7 +60,7 @@ export default function DocumentListScreen() {
               onPress={() => router.push({ pathname: '/documents/[id]', params: { id: item.id } })}
             >
               <Text style={[styles.title, { color: theme.text }]} numberOfLines={1}>
-                {displayTitle(item.title)}
+                {displayTitle(item)}
               </Text>
               <Text style={{ color: theme.muted }}>{formatDate(item.updatedAt)}</Text>
             </Pressable>

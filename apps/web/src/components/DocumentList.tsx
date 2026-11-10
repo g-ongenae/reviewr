@@ -1,6 +1,7 @@
+import { displayTitle } from '@reviewr/shared';
 import { useQuery } from '@tanstack/react-query';
 import { api, inlineError, queryKeys } from '../api';
-import { displayTitle, formatDate } from '../format';
+import { formatDate } from '../format';
 
 interface Props {
   selectedId: string | undefined;
@@ -31,7 +32,7 @@ export const DocumentList = ({ selectedId, onSelect }: Props) => {
               className={document.id === selectedId ? 'document-item selected' : 'document-item'}
               onClick={() => onSelect(document.id)}
             >
-              <span className="document-title">{displayTitle(document.title)}</span>
+              <span className="document-title">{displayTitle(document)}</span>
               <span className="muted small">{formatDate(document.updatedAt)}</span>
             </button>
           </li>

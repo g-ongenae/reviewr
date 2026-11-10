@@ -1,9 +1,10 @@
+import { displayTitle } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
-import { displayTitle, formatDate } from '@/lib/format';
+import { formatDate } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
 
 export default function HistoryScreen() {
@@ -13,6 +14,8 @@ export default function HistoryScreen() {
   const [selected, setSelected] = useState<number | undefined>(undefined);
 
   const revisions = useQuery({ queryKey: queryKeys.revisions(id), queryFn: () => api.listRevisions(id) });
+  // Already cached by the document screen; an untitled revision is named after the document's creation day.
+  const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => api.getDocument(id) });
   const preview = useQuery({
     queryKey: queryKeys.revision(id, selected ?? 0),
     queryFn: () => api.getRevision(id, selected ?? 0),
@@ -77,7 +80,8 @@ export default function HistoryScreen() {
                 {item.revision === currentRevision ? ' · current' : ''}
               </Text>
               <Text style={{ color: theme.muted }}>
-                {displayTitle(item.title)} · {formatDate(item.createdAt)}
+                {displayTitle({ title: item.title, createdAt: document.data?.createdAt ?? item.createdAt })} ·{' '}
+                {formatDate(item.createdAt)}
               </Text>
             </Pressable>
             {isSelected && (

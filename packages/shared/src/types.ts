@@ -4,7 +4,7 @@
  */
 export interface DocumentSummary {
   id: string;
-  title: string;
+  title: string | null;
   /** Number of the latest revision (starts at 1, incremented on every content change). */
   revision: number;
   createdAt: string;
@@ -24,7 +24,7 @@ export interface Document extends DocumentSummary {
 export interface RevisionSummary {
   documentId: string;
   revision: number;
-  title: string;
+  title: string | null;
   createdAt: string;
 }
 
@@ -39,7 +39,7 @@ export interface Revision extends RevisionSummary {
  * Payload to create a document.
  */
 export interface CreateDocumentInput {
-  title: string;
+  title?: string | null;
   content: string;
 }
 
@@ -47,7 +47,7 @@ export interface CreateDocumentInput {
  * Payload to save a new version of a document.
  */
 export interface UpdateDocumentInput {
-  title: string;
+  title?: string | null;
   content: string;
   /**
    * Revision the client started editing from. If the document has been saved
