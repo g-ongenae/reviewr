@@ -176,7 +176,8 @@ const transact = <T>(db: IDBDatabase, mode: IDBTransactionMode, body: (store: ID
       } catch {
         // Already finished or aborted.
       }
-      reject(error instanceof Error ? error : new Error(String(error)));
+      // Kept as is: a DOMException carries the name (QuotaExceededError) the result is classified by.
+      reject(error as Error);
     }
   });
 
