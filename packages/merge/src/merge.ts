@@ -50,23 +50,72 @@ export interface MergeResult {
 export type ConflictResolution = 'mine' | 'theirs' | 'both' | { edit: string };
 
 /**
- * A change from one side, in base tokens: `base[start, end)` becomes `tokens`.
+ * A change from one side, in base tokens: `base[start, end)` becomes `tokens`. Over repeated text the same change could
+ * sit elsewhere with the same result (deleting one of two identical sentences): `[spanStart, spanEnd)` covers every
+ * such position.
  */
 interface Edit {
   start: number;
   end: number;
   tokens: string[];
+  spanStart: number;
+  spanEnd: number;
 }
 
 /**
- * The hunks of a diff from the base to one side, as edits carrying that side's tokens.
+ * The range a change can slide over without changing its result, within `[low, high)` (the neighbouring changes of the
+ * same side). The change moves one token at a time: to the left while the token before it equals the last token of
+ * what it removes or inserts, to the right while the token after it equals the first one.
  */
-const toEdits = (hunks: readonly Hunk[], other: readonly string[]): Edit[] =>
-  hunks.map((hunk: Hunk): Edit => ({
-    start: hunk.aStart,
-    end: hunk.aEnd,
-    tokens: other.slice(hunk.bStart, hunk.bEnd),
-  }));
+const slideSpan = (
+  base: readonly string[],
+  edit: Readonly<Omit<Edit, 'spanStart' | 'spanEnd'>>,
+  low: number,
+  high: number,
+): [number, number] => {
+  let { start, end } = edit;
+  let moving: string[] = [...edit.tokens];
+  // While moving left, `moving` is what the edit inserts and `base[start, end)` what it deletes.
+  while (start > low && base[end - 1] === (moving.length > 0 ? moving[moving.length - 1] : base[start - 1])) {
+    if (moving.length > 0) {
+      moving = [base[start - 1] ?? '', ...moving.slice(0, moving.length - 1)];
+    }
+    start--;
+    end--;
+  }
+  const spanStart: number = start;
+  ({ start, end } = edit);
+  moving = [...edit.tokens];
+  while (end < high && base[start] === (moving.length > 0 ? moving[0] : base[end])) {
+    if (moving.length > 0) {
+      moving = [...moving.slice(1), base[end] ?? ''];
+    }
+    start++;
+    end++;
+  }
+
+  return [spanStart, end];
+};
+
+/**
+ * The hunks of a diff from the base to one side, as edits carrying that side's tokens and the span they can slide over.
+ */
+const toEdits = (base: readonly string[], hunks: readonly Hunk[], other: readonly string[]): Edit[] =>
+  hunks.map((hunk: Hunk, index: number): Edit => {
+    const edit: Omit<Edit, 'spanStart' | 'spanEnd'> = {
+      start: hunk.aStart,
+      end: hunk.aEnd,
+      tokens: other.slice(hunk.bStart, hunk.bEnd),
+    };
+    const [spanStart, spanEnd] = slideSpan(
+      base,
+      edit,
+      hunks[index - 1]?.aEnd ?? 0,
+      hunks[index + 1]?.aStart ?? base.length,
+    );
+
+    return { ...edit, spanStart, spanEnd };
+  });
 
 /**
  * The text of `base[start, end)` with the given edits (all inside that range, in order) applied.
@@ -135,7 +184,10 @@ class PartList {
  * or that are only separated by spaces on the same line (two neighbouring words). Changing `la fenêtre` into
  * `une fenêtre` on one side and into `la porte` on the other is a conflict, not `une porte`: the merge never decides
  * on its own how two edits of the same phrase fit together. Changes separated by a punctuation mark, a line break or
- * another word merge cleanly.
+ * another word merge cleanly;
+ * - over repeated text, a change counts everywhere it could be placed with the same result. Deleting one of two
+ * identical sentences `Elle attend.` while the other side changes the first into `Elle part.` is a conflict: nothing
+ * says which sentence was deleted. The same deletion merges cleanly with a change elsewhere.
  *
  * Deterministic: the same three texts always give the same result. Every part's text is taken from the inputs, so
  * joining the parts as one side wrote them gives that side back.
@@ -143,9 +195,10 @@ class PartList {
 export const mergeWords = (base: string, mine: string, theirs: string): MergeResult => {
   const baseTokens: string[] = tokenize(base);
   const mineTokens: string[] = tokenize(mine);
-  const mineEdits: Edit[] = toEdits(diffTokens(baseTokens, mineTokens), mineTokens);
+  const mineEdits: Edit[] = toEdits(baseTokens, diffTokens(baseTokens, mineTokens), mineTokens);
   const theirsTokens: string[] = theirs === mine ? mineTokens : tokenize(theirs);
-  const theirsEdits: Edit[] = theirs === mine ? mineEdits : toEdits(diffTokens(baseTokens, theirsTokens), theirsTokens);
+  const theirsEdits: Edit[] =
+    theirs === mine ? mineEdits : toEdits(baseTokens, diffTokens(baseTokens, theirsTokens), theirsTokens);
   /**
    * The base token index past the spaces at `from`: an edit starting there is adjacent to one ending at `from`.
    */
@@ -163,31 +216,36 @@ export const mergeWords = (base: string, mine: string, theirs: string): MergeRes
   let nextTheirs: number = 0;
 
   while (nextMine < mineEdits.length || nextTheirs < theirsEdits.length) {
-    // Start a region at the next edit of either side, then pull in every edit that overlaps it or is adjacent to it.
+    // Start a region at the next edit of either side, then pull in every edit whose span overlaps the region's spans or
+    // is adjacent to them.
     const firstMine: Edit | undefined = mineEdits[nextMine];
     const firstTheirs: Edit | undefined = theirsEdits[nextTheirs];
-    let end: number = Math.min(firstMine?.start ?? Infinity, firstTheirs?.start ?? Infinity);
-    const start: number = end;
+    let spanEnd: number = Math.min(firstMine?.spanStart ?? Infinity, firstTheirs?.spanStart ?? Infinity);
     const regionMine: Edit[] = [];
     const regionTheirs: Edit[] = [];
     let grew: boolean = true;
     while (grew) {
       grew = false;
       const mineEdit: Edit | undefined = mineEdits[nextMine];
-      if (mineEdit !== undefined && mineEdit.start <= reach(end)) {
+      if (mineEdit !== undefined && mineEdit.spanStart <= reach(spanEnd)) {
         regionMine.push(mineEdit);
-        end = Math.max(end, mineEdit.end);
+        spanEnd = Math.max(spanEnd, mineEdit.spanEnd);
         nextMine++;
         grew = true;
       }
       const theirsEdit: Edit | undefined = theirsEdits[nextTheirs];
-      if (theirsEdit !== undefined && theirsEdit.start <= reach(end)) {
+      if (theirsEdit !== undefined && theirsEdit.spanStart <= reach(spanEnd)) {
         regionTheirs.push(theirsEdit);
-        end = Math.max(end, theirsEdit.end);
+        spanEnd = Math.max(spanEnd, theirsEdit.spanEnd);
         nextTheirs++;
         grew = true;
       }
     }
+    // The spans only decide which changes meet; the region itself is where the diff placed them, so that keeping both
+    // sides of a conflict does not repeat the text they could slide over.
+    const edits: Edit[] = [...regionMine, ...regionTheirs];
+    const start: number = Math.min(...edits.map((edit: Edit): number => edit.start));
+    const end: number = Math.max(...edits.map((edit: Edit): number => edit.end));
 
     list.unchanged(baseTokens.slice(position, start).join(''));
     list.changed(

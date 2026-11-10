@@ -300,10 +300,51 @@ describe('mergeWords fixtures', () => {
     });
   });
 
-  it('keeps emoji whole', () => {
-    const result: MergeResult = mergeWords('Bravo 👍🏽 !', 'Bravo 👍🏿 !', 'Bravo 👍🏽 !!');
+  describe('repeated text', () => {
+    it.each<[string, string, string, string]>([
+      ['a deleted line', 'Elle attend.\nElle attend.\n', 'Elle attend.\n', 'Elle part.\nElle attend.\n'],
+      ['a deleted sentence', 'Oui. Oui.', 'Oui.', 'Non. Oui.'],
+      ['an inserted duplicate line', 'Elle attend.\n', 'Elle attend.\nElle attend.\n', 'Elle part.\n'],
+      ['an inserted duplicate sentence', 'Oui.', 'Oui. Oui.', 'Non.'],
+    ])(
+      'makes %s and an edit of its twin a conflict, whichever side wrote what',
+      (_name: string, base: string, slid: string, edited: string) => {
+        for (const [mine, theirs] of [
+          [slid, edited],
+          [edited, slid],
+        ] as const) {
+          const result: MergeResult = mergeWords(base, mine, theirs);
 
-    expect(resolveMerge(result, [])).toBe('Bravo 👍🏿 !!');
+          expect(result.conflicts).toBe(1);
+          expect(resolveAll(result, 'mine')).toBe(mine);
+          expect(resolveAll(result, 'theirs')).toBe(theirs);
+        }
+      },
+    );
+
+    it('still merges a deleted duplicate with an edit elsewhere', () => {
+      const base: string = 'Elle attend.\nElle attend.\nIl pleut.\n\nLe jour se lève.\n';
+      const result: MergeResult = mergeWords(
+        base,
+        'Elle attend.\nIl pleut.\n\nLe jour se lève.\n',
+        'Elle attend.\nElle attend.\nIl pleut.\n\nLe jour se couche.\n',
+      );
+
+      expect(result.conflicts).toBe(0);
+      expect(resolveMerge(result, [])).toBe('Elle attend.\nIl pleut.\n\nLe jour se couche.\n');
+    });
+
+    it('still merges a deleted duplicate word with an edit in another sentence', () => {
+      const result: MergeResult = mergeWords('Oui oui. Il pleut.', 'Oui. Il pleut.', 'Oui oui. Il neige.');
+
+      expect(resolveMerge(result, [])).toBe('Oui. Il neige.');
+    });
+  });
+
+  it('keeps emoji whole', () => {
+    const result: MergeResult = mergeWords('Bravo 👍🏽 ! Merci', 'Bravo 👍🏿 ! Merci', 'Bravo 👍🏽 ! Merci beaucoup');
+
+    expect(resolveMerge(result, [])).toBe('Bravo 👍🏿 ! Merci beaucoup');
     expect(result.parts).toContainEqual({ kind: 'mine', base: '👍🏽', text: '👍🏿' });
   });
 });
