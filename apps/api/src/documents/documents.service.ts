@@ -65,7 +65,7 @@ type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 const appendRevision = async (
   tx: Transaction,
   current: DocumentRow,
-  title: string,
+  title: DocumentRow['title'],
   content: string,
 ): Promise<DocumentRow> => {
   const now: Date = new Date();
