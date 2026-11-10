@@ -177,7 +177,8 @@ const transact = <T>(db: IDBDatabase, mode: IDBTransactionMode, body: (store: ID
         // Already finished or aborted.
       }
       // Kept as is: a DOMException carries the name (QuotaExceededError) the result is classified by.
-      reject(error as Error);
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- whatever IndexedDB threw
+      reject(error);
     }
   });
 
