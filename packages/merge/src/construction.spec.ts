@@ -91,4 +91,36 @@ describe('mergeWords against edits known by construction', () => {
       expect(mergeWords(paragraphs.join('\n\n'), theirs, mine).conflicts).toBeGreaterThan(0);
     },
   );
+
+  it.each(Array.from({ length: 200 }, (_: unknown, seed: number): number => seed))(
+    'never silently merges a deleted copy among identical sentences with an edit of another copy, seed %i',
+    (seed: number) => {
+      const next: () => number = random(seed + 3000);
+      const copies: number = 2 + Math.floor(next() * 4);
+      const copy: string = randomLine(next, 1 + Math.floor(next() * 3));
+      const separator: string = ['. ', '.\n', ', ', '.\n\n'][Math.floor(next() * 4)] ?? '. ';
+      const sentences: string[] = [
+        randomLine(next, 3),
+        ...Array.from({ length: copies }, (): string => copy),
+        randomLine(next, 3),
+      ];
+      const join = (list: readonly string[]): string => list.join(separator);
+      const pick = (): number => 1 + Math.floor(next() * copies);
+      // Mine deletes one copy and, half the time, also rewrites another copy or the next sentence.
+      const deleted: number = pick();
+      const mineSentences: (string | undefined)[] = [...sentences];
+      if (next() < 0.5) {
+        const nearby: number = Math.min(deleted + 1 + Math.floor(next() * 2), sentences.length - 1);
+        mineSentences[nearby] = 'Non';
+      }
+      mineSentences[deleted] = undefined;
+      const theirsSentences: string[] = [...sentences];
+      theirsSentences[pick()] = 'Si';
+      const mine: string = join(mineSentences.filter((item: string | undefined): item is string => item !== undefined));
+      const theirs: string = join(theirsSentences);
+
+      expect(mergeWords(join(sentences), mine, theirs).conflicts).toBeGreaterThan(0);
+      expect(mergeWords(join(sentences), theirs, mine).conflicts).toBeGreaterThan(0);
+    },
+  );
 });

@@ -272,7 +272,6 @@ describe('mergeWords fixtures', () => {
       const result: MergeResult = mergeWords(base, mine, theirs);
 
       expect(result.conflicts).toBe(0);
-      expect(result.parts).toContainEqual({ kind: 'mine', base: ' ', text: '\n\n' });
       expect(resolveMerge(result, [])).toBe('Il pleuvait.\n\nMarie dormait.\n\nLe jour se levait à peine.');
     });
 
@@ -306,6 +305,8 @@ describe('mergeWords fixtures', () => {
       ['a deleted sentence', 'Oui. Oui.', 'Oui.', 'Non. Oui.'],
       ['an inserted duplicate line', 'Elle attend.\n', 'Elle attend.\nElle attend.\n', 'Elle part.\n'],
       ['an inserted duplicate sentence', 'Oui.', 'Oui. Oui.', 'Non.'],
+      ['a deleted sentence hidden in an edit of its twin', 'Oui. Oui. Oui.', 'Oui. Non.', 'Si. Oui. Oui.'],
+      ['a deleted line hidden in an edit of its twin', 'Oui.\nOui.\nOui.\n', 'Oui.\nNon.\n', 'Si.\nOui.\nOui.\n'],
     ])(
       'makes %s and an edit of its twin a conflict, whichever side wrote what',
       (_name: string, base: string, slid: string, edited: string) => {
@@ -452,6 +453,10 @@ describe('mergeWords performance', () => {
   it('merges a 20,000-word single paragraph with scattered edits quickly', () => {
     const paragraph: string = chapter.replace(/\s+/gu, ' ');
     expect(time(paragraph, randomEdits(next, paragraph, 100), randomEdits(next, paragraph, 100))).toBeLessThan(1000);
+  });
+
+  it('stays bounded on a large insertion of repeated words', () => {
+    expect(time('de '.repeat(20000), 'de '.repeat(30000), `la ${'de '.repeat(19999)}`)).toBeLessThan(2000);
   });
 
   it('stays bounded when one side rewrote everything', () => {

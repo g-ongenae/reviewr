@@ -50,9 +50,9 @@ export interface MergeResult {
 export type ConflictResolution = 'mine' | 'theirs' | 'both' | { edit: string };
 
 /**
- * A change from one side, in base tokens: `base[start, end)` becomes `tokens`. Over repeated text the same change could
- * sit elsewhere with the same result (deleting one of two identical sentences): `[spanStart, spanEnd)` covers every
- * such position.
+ * A change from one side, in base tokens: `base[start, end)` becomes `tokens`. When several alignments of that side
+ * with the base are equally good (deleting one of two identical sentences), `[spanStart, spanEnd)` covers the base
+ * tokens the change could also be read as touching.
  */
 interface Edit {
   start: number;
@@ -63,59 +63,65 @@ interface Edit {
 }
 
 /**
- * The range a change can slide over without changing its result, within `[low, high)` (the neighbouring changes of the
- * same side). The change moves one token at a time: to the left while the token before it equals the last token of
- * what it removes or inserts, to the right while the token after it equals the first one.
+ * Marks a base token that the hunks change, in {@link keptAs}.
  */
-const slideSpan = (
-  base: readonly string[],
-  edit: Readonly<Omit<Edit, 'spanStart' | 'spanEnd'>>,
-  low: number,
-  high: number,
-): [number, number] => {
-  let { start, end } = edit;
-  let moving: string[] = [...edit.tokens];
-  // While moving left, `moving` is what the edit inserts and `base[start, end)` what it deletes.
-  while (start > low && base[end - 1] === (moving.length > 0 ? moving[moving.length - 1] : base[start - 1])) {
-    if (moving.length > 0) {
-      moving = [base[start - 1] ?? '', ...moving.slice(0, moving.length - 1)];
+const changed: number = -1;
+
+/**
+ * For each base token, the index of the side's token it is kept as, or {@link changed}.
+ */
+const keptAs = (baseLength: number, hunks: readonly Hunk[]): Int32Array => {
+  const kept: Int32Array = new Int32Array(baseLength).fill(changed);
+  let position: number = 0;
+  let shift: number = 0;
+  for (const hunk of hunks) {
+    for (; position < hunk.aStart; position++) {
+      kept[position] = position + shift;
     }
-    start--;
-    end--;
+    position = hunk.aEnd;
+    shift = hunk.bEnd - hunk.aEnd;
   }
-  const spanStart: number = start;
-  ({ start, end } = edit);
-  moving = [...edit.tokens];
-  while (end < high && base[start] === (moving.length > 0 ? moving[0] : base[end])) {
-    if (moving.length > 0) {
-      moving = [...moving.slice(1), base[end] ?? ''];
-    }
-    start++;
-    end++;
+  for (; position < baseLength; position++) {
+    kept[position] = position + shift;
   }
 
-  return [spanStart, end];
+  return kept;
 };
 
 /**
- * The hunks of a diff from the base to one side, as edits carrying that side's tokens and the span they can slide over.
+ * One side's changes, aligned with the base preferring the earliest matches. A base token is an anchor when the
+ * alignments preferring the earliest and the latest matches both keep it, as the same token of the side. Each change's
+ * span runs to the anchors around it: everything in between may be what that side changed.
  */
-const toEdits = (base: readonly string[], hunks: readonly Hunk[], other: readonly string[]): Edit[] =>
-  hunks.map((hunk: Hunk, index: number): Edit => {
-    const edit: Omit<Edit, 'spanStart' | 'spanEnd'> = {
-      start: hunk.aStart,
-      end: hunk.aEnd,
-      tokens: other.slice(hunk.bStart, hunk.bEnd),
-    };
-    const [spanStart, spanEnd] = slideSpan(
-      base,
-      edit,
-      hunks[index - 1]?.aEnd ?? 0,
-      hunks[index + 1]?.aStart ?? base.length,
-    );
+const sideEdits = (base: readonly string[], side: readonly string[]): Edit[] => {
+  const earliest: Hunk[] = diffTokens(base, side, 'earliest');
+  const keptEarliest: Int32Array = keptAs(base.length, earliest);
+  const keptLatest: Int32Array = keptAs(base.length, diffTokens(base, side, 'latest'));
+  /** `leftAnchor[i]`: the start of the run of non-anchors that ends at `i`. */
+  const leftAnchor: Int32Array = new Int32Array(base.length + 1);
+  /** `rightAnchor[i]`: the end of the run of non-anchors that starts at `i`. */
+  const rightAnchor: Int32Array = new Int32Array(base.length + 1);
+  /**
+   * Whether both alignments keep the base token at `index` as the same token of the side.
+   */
+  const isAnchor = (index: number): boolean =>
+    keptEarliest[index] !== changed && keptEarliest[index] === keptLatest[index];
+  for (let index: number = 1; index <= base.length; index++) {
+    leftAnchor[index] = isAnchor(index - 1) ? index : (leftAnchor[index - 1] ?? 0);
+  }
+  rightAnchor[base.length] = base.length;
+  for (let index: number = base.length - 1; index >= 0; index--) {
+    rightAnchor[index] = isAnchor(index) ? index : (rightAnchor[index + 1] ?? base.length);
+  }
 
-    return { ...edit, spanStart, spanEnd };
-  });
+  return earliest.map((hunk: Hunk): Edit => ({
+    start: hunk.aStart,
+    end: hunk.aEnd,
+    tokens: side.slice(hunk.bStart, hunk.bEnd),
+    spanStart: leftAnchor[hunk.aStart] ?? hunk.aStart,
+    spanEnd: rightAnchor[hunk.aEnd] ?? hunk.aEnd,
+  }));
+};
 
 /**
  * The text of `base[start, end)` with the given edits (all inside that range, in order) applied.
@@ -185,9 +191,11 @@ class PartList {
  * `une fenêtre` on one side and into `la porte` on the other is a conflict, not `une porte`: the merge never decides
  * on its own how two edits of the same phrase fit together. Changes separated by a punctuation mark, a line break or
  * another word merge cleanly;
- * - over repeated text, a change counts everywhere it could be placed with the same result. Deleting one of two
- * identical sentences `Elle attend.` while the other side changes the first into `Elle part.` is a conflict: nothing
- * says which sentence was deleted. The same deletion merges cleanly with a change elsewhere.
+ * - over repeated text, a change counts everywhere it could have been made. Each side is aligned with the base twice,
+ * preferring the earliest then the latest of equal matches; a change also covers the base text between the nearest
+ * tokens both alignments keep in the same place. Deleting one of two identical sentences `Elle attend.` while the
+ * other side changes the first into `Elle part.` is a conflict: nothing says which sentence was deleted. The same
+ * deletion merges cleanly with a change elsewhere.
  *
  * Deterministic: the same three texts always give the same result. Every part's text is taken from the inputs, so
  * joining the parts as one side wrote them gives that side back.
@@ -195,10 +203,9 @@ class PartList {
 export const mergeWords = (base: string, mine: string, theirs: string): MergeResult => {
   const baseTokens: string[] = tokenize(base);
   const mineTokens: string[] = tokenize(mine);
-  const mineEdits: Edit[] = toEdits(baseTokens, diffTokens(baseTokens, mineTokens), mineTokens);
+  const mineEdits: Edit[] = sideEdits(baseTokens, mineTokens);
   const theirsTokens: string[] = theirs === mine ? mineTokens : tokenize(theirs);
-  const theirsEdits: Edit[] =
-    theirs === mine ? mineEdits : toEdits(baseTokens, diffTokens(baseTokens, theirsTokens), theirsTokens);
+  const theirsEdits: Edit[] = theirs === mine ? mineEdits : sideEdits(baseTokens, theirsTokens);
   /**
    * The base token index past the spaces at `from`: an edit starting there is adjacent to one ending at `from`.
    */

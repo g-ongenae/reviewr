@@ -103,8 +103,10 @@ const myers = (
 /* eslint-enable no-magic-numbers */
 
 /**
- * Diff of `a[aFrom, aTo)` and `b[bFrom, bTo)`: the common ends are skipped first, then Myers runs on what is left. If
- * that is too different, all of it counts as one replacement.
+ * Diff of `a[aFrom, aTo)` and `b[bFrom, bTo)` that prefers the earliest matches: the common start is skipped, then
+ * Myers runs on what is left (its greedy diagonals also match as early as they can). The common end is not skipped
+ * first, as that would prefer the latest matches there. If the rest is too different, it counts as one replacement,
+ * common end excluded.
  */
 const diffRange = (
   a: readonly string[],
@@ -118,32 +120,42 @@ const diffRange = (
   while (aFrom + start < aTo && bFrom + start < bTo && a[aFrom + start] === b[bFrom + start]) {
     start++;
   }
-  let end: number = 0;
-  while (aTo - end > aFrom + start && bTo - end > bFrom + start && a[aTo - end - 1] === b[bTo - end - 1]) {
-    end++;
-  }
-  const [aStart, aEnd, bStart, bEnd] = [aFrom + start, aTo - end, bFrom + start, bTo - end];
-  if (aStart === aEnd && bStart === bEnd) {
+  const [aStart, bStart] = [aFrom + start, bFrom + start];
+  if (aStart === aTo && bStart === bTo) {
     return [];
   }
-  if (aStart === aEnd || bStart === bEnd) {
-    return [{ aStart, aEnd, bStart, bEnd }];
+  if (aStart === aTo || bStart === bTo) {
+    return [{ aStart, aEnd: aTo, bStart, bEnd: bTo }];
+  }
+  const hunks: Hunk[] | undefined = myers(a, b, aStart, aTo, bStart, bTo);
+  if (hunks !== undefined) {
+    return hunks;
+  }
+  let end: number = 0;
+  while (aTo - end > aStart && bTo - end > bStart && a[aTo - end - 1] === b[bTo - end - 1]) {
+    end++;
   }
 
-  return myers(a, b, aStart, aEnd, bStart, bEnd) ?? [{ aStart, aEnd, bStart, bEnd }];
+  return [{ aStart, aEnd: aTo - end, bStart, bEnd: bTo - end }];
 };
 
 /**
  * Lines of a token list: each line is its tokens joined, line break included. `starts` has one more entry than `lines`,
- * the token count, so line `i` is the tokens `starts[i]` to `starts[i + 1]`.
+ * the token count, so line `i` is the tokens `starts[i]` to `starts[i + 1]`. With `reversed` tokens, a line break
+ * starts a line instead of ending it, so the lines are the original lines, reversed.
  */
-const splitLines = (tokens: readonly string[]): { lines: string[]; starts: number[] } => {
+const splitLines = (tokens: readonly string[], reversed: boolean): { lines: string[]; starts: number[] } => {
   const lines: string[] = [];
   const starts: number[] = [0];
   let line: string = '';
   tokens.forEach((token: string, index: number): void => {
+    if (reversed && isLineBreak(token) && index > 0) {
+      lines.push(line);
+      starts.push(index);
+      line = '';
+    }
     line += token;
-    if (isLineBreak(token)) {
+    if (!reversed && isLineBreak(token)) {
       lines.push(line);
       starts.push(index + 1);
       line = '';
@@ -177,12 +189,13 @@ const joinAcrossSpaces = (hunks: readonly Hunk[], a: readonly string[]): Hunk[] 
 };
 
 /**
- * Token-level diff of `a` and `b`. Lines (paragraphs) are compared first, then the tokens inside the lines that differ,
- * which keeps a long chapter with scattered edits fast. Hunks only separated by spaces are joined.
+ * Token-level diff of `a` and `b`, preferring the earliest matches. Lines (paragraphs) are compared first, then the
+ * tokens inside the lines that differ, which keeps a long chapter with scattered edits fast. Hunks only separated by
+ * spaces are joined. `reversed` says the tokens are in reverse order, for the lines.
  */
-export const diffTokens = (a: readonly string[], b: readonly string[]): Hunk[] => {
-  const aLines: { lines: string[]; starts: number[] } = splitLines(a);
-  const bLines: { lines: string[]; starts: number[] } = splitLines(b);
+const diffEarliest = (a: readonly string[], b: readonly string[], reversed: boolean): Hunk[] => {
+  const aLines: { lines: string[]; starts: number[] } = splitLines(a, reversed);
+  const bLines: { lines: string[]; starts: number[] } = splitLines(b, reversed);
   const lineHunks: Hunk[] = diffRange(aLines.lines, bLines.lines, 0, aLines.lines.length, 0, bLines.lines.length);
   const tokenHunks: Hunk[] = lineHunks.flatMap((hunk: Hunk): Hunk[] =>
     diffRange(
@@ -196,4 +209,24 @@ export const diffTokens = (a: readonly string[], b: readonly string[]): Hunk[] =
   );
 
   return joinAcrossSpaces(tokenHunks, a);
+};
+
+/**
+ * Token-level diff of `a` and `b`, as the runs that differ, in order. `earliest` keeps the earliest of several equal
+ * matches (deleting one of two identical sentences deletes the second); `latest` diffs the reversed tokens, so it
+ * keeps the latest (and deletes the first).
+ */
+export const diffTokens = (a: readonly string[], b: readonly string[], prefer: 'earliest' | 'latest'): Hunk[] => {
+  if (prefer === 'earliest') {
+    return diffEarliest(a, b, false);
+  }
+
+  return diffEarliest([...a].reverse(), [...b].reverse(), true)
+    .map((hunk: Hunk): Hunk => ({
+      aStart: a.length - hunk.aEnd,
+      aEnd: a.length - hunk.aStart,
+      bStart: b.length - hunk.bEnd,
+      bEnd: b.length - hunk.bStart,
+    }))
+    .reverse();
 };
