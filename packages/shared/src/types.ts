@@ -16,6 +16,11 @@ export interface DocumentSummary {
  */
 export interface Document extends DocumentSummary {
   content: string;
+  /**
+   * Autosaved text of the document. The API always sends it; it is optional only so clients and
+   * fixtures written before drafts existed keep compiling.
+   */
+  draft?: DocumentDraft;
 }
 
 /**
@@ -65,3 +70,50 @@ export interface ApiErrorBody {
   message: string | string[];
   error?: string;
 }
+
+/**
+ * Autosaved text of a document, not yet a revision.
+ */
+export interface DocumentDraft {
+  content: string;
+  /** Incremented on every change of the draft; send it back with the next save to detect conflicts. */
+  draftVersion: number;
+  /** Revision the draft was started from; null when the document has no revision yet. */
+  baseRevision: number | null;
+}
+
+/**
+ * Payload of `PUT /documents/:id/draft` (autosave).
+ */
+export interface SaveDraftInput {
+  content: string;
+  /**
+   * `draftVersion` the edits started from. If the draft was saved elsewhere in the meantime,
+   * the API answers 409 with a `DraftConflictBody` instead of overwriting it, unless `content`
+   * already is the stored draft (a retry), which answers the current draft.
+   */
+  draftVersion: number;
+}
+
+/**
+ * 409 of `PUT /documents/:id/draft`: the draft moved since `draftVersion`. Carries the server's draft.
+ */
+export interface DraftConflictBody extends ApiErrorBody {
+  code: 'draft_conflict';
+  draft: DocumentDraft;
+}
+
+/**
+ * 409 of `PUT /documents/:id`: the document was saved since `baseRevision`, or it had an autosaved draft
+ * that the save would have overwritten, which the server committed as revision `revision` first.
+ */
+export interface StaleRevisionBody extends ApiErrorBody {
+  code: 'stale_revision';
+  /** Current revision of the document. */
+  revision: number;
+}
+
+/**
+ * Structured body of a 409 Conflict, discriminated by `code`.
+ */
+export type ConflictBody = DraftConflictBody | StaleRevisionBody;

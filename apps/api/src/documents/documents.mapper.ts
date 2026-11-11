@@ -1,4 +1,4 @@
-import type { Document, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
+import type { Document, DocumentDraft, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import type { DocumentRow, RevisionRow } from '../database/schema.js';
 
 /** Columns of a document row read to list documents. */
@@ -19,11 +19,21 @@ export const toDocumentSummary = (row: DocumentSummaryRow): DocumentSummary => (
 });
 
 /**
+ * Extract the draft of a document row.
+ */
+export const toDocumentDraft = (row: DocumentRow): DocumentDraft => ({
+  content: row.draftContent,
+  draftVersion: row.draftVersion,
+  baseRevision: row.draftBaseRevision,
+});
+
+/**
  * Convert a database row to its API representation.
  */
 export const toDocument = (row: DocumentRow): Document => ({
   ...toDocumentSummary(row),
   content: row.content,
+  draft: toDocumentDraft(row),
 });
 
 /**

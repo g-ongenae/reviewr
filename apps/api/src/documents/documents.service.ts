@@ -1,5 +1,12 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import type { Document, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
+import { ConflictException, HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import type {
+  ConflictBody,
+  Document,
+  DocumentDraft,
+  DocumentSummary,
+  Revision,
+  RevisionSummary,
+} from '@reviewr/shared';
 import { and, desc, eq } from 'drizzle-orm';
 import { databaseToken, type Database } from '../database/database.js';
 import { DocumentRow, documents, revisions } from '../database/schema.js';
@@ -7,15 +14,35 @@ import {
   DocumentSummaryRow,
   RevisionSummaryRow,
   toDocument,
+  toDocumentDraft,
   toDocumentSummary,
   toRevision,
   toRevisionSummary,
 } from './documents.mapper.js';
 import { CreateDocumentDto } from './dto/create-document.dto.js';
+import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
 /** Revision number of the first save of a document. */
 const firstRevision: number = 1;
+
+/** A 409 body without the fields every 409 shares, kept discriminated by `code`. */
+type ConflictDetail<T = ConflictBody> = T extends ConflictBody ? Omit<T, 'statusCode' | 'error'> : never;
+
+/**
+ * 409 with a structured body (`code` and the data the client needs to reconcile).
+ */
+const conflict = (detail: ConflictDetail): ConflictException =>
+  new ConflictException({ statusCode: HttpStatus.CONFLICT, error: 'Conflict', ...detail } satisfies ConflictBody);
+
+/**
+ * 409 detail of a save based on a revision that is no longer the head.
+ */
+const staleRevision = (revision: number, baseRevision: number): ConflictDetail => ({
+  code: 'stale_revision',
+  message: `Document was modified elsewhere: it is at revision ${revision}, the edit is based on revision ${baseRevision}`,
+  revision,
+});
 
 /**
  * Narrow an optional row, throwing a 404 when it is missing.
@@ -26,6 +53,45 @@ const assertFound = <T>(row: T | undefined, id: string): T => {
   }
 
   return row;
+};
+
+/** Transaction handle of the database. */
+type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/**
+ * Make `title` and `content` the new head revision of a locked document, and the draft equal to it.
+ * `draftVersion` is bumped only if the draft text changes.
+ */
+const appendRevision = async (
+  tx: Transaction,
+  current: DocumentRow,
+  title: DocumentRow['title'],
+  content: string,
+): Promise<DocumentRow> => {
+  const now: Date = new Date();
+  const [row] = await tx
+    .update(documents)
+    .set({
+      title,
+      content,
+      revision: current.revision + 1,
+      draftContent: content,
+      draftVersion: current.draftContent === content ? current.draftVersion : current.draftVersion + 1,
+      draftBaseRevision: current.revision + 1,
+      updatedAt: now,
+    })
+    .where(eq(documents.id, current.id))
+    .returning();
+  const updated: DocumentRow = assertFound(row, current.id);
+  await tx.insert(revisions).values({
+    documentId: current.id,
+    revision: updated.revision,
+    title: updated.title,
+    content: updated.content,
+    createdAt: now,
+  });
+
+  return updated;
 };
 
 /**
@@ -96,49 +162,77 @@ export class DocumentsService {
   /**
    * Save a new version of a document.
    *
-   * Fails with 409 if the document was saved since `baseRevision` (optimistic locking), so that
-   * concurrent edits from two devices never silently overwrite each other. Saving identical
+   * Fails with 409 `stale_revision` if the document was saved since `baseRevision` (optimistic locking),
+   * so that concurrent edits from two devices never silently overwrite each other. Saving identical
    * content is a no-op and does not create a revision. Otherwise the draft is replaced by the saved
    * content and based on the new revision; `draftVersion` is bumped only if the draft text changed.
+   *
+   * An autosaved draft that differs from both the head and the saved content is never overwritten: it
+   * is first committed as a revision of its own, then the save fails with 409 `stale_revision` at that
+   * new revision. To a client that knows only revisions this is "changed elsewhere": it reloads the
+   * draft text, or retries on the new revision with the draft kept in the history.
    */
   public async update(id: string, input: UpdateDocumentDto): Promise<Document> {
-    return this.db.transaction(async (tx) => {
+    const result: Document | ConflictDetail = await this.db.transaction(async (tx) => {
       const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
       const current: DocumentRow = assertFound(locked, id);
 
       if (current.revision !== input.baseRevision) {
-        throw new ConflictException(
-          `Document was modified elsewhere: it is at revision ${current.revision}, the edit is based on revision ${input.baseRevision}`,
-        );
+        throw conflict(staleRevision(current.revision, input.baseRevision));
       }
       if (current.title === input.title && current.content === input.content) {
         return toDocument(current);
       }
+      if (current.draftContent !== current.content && current.draftContent !== input.content) {
+        // Returned, not thrown: throwing would roll the promotion of the draft back.
+        const promoted: DocumentRow = await appendRevision(tx, current, current.title, current.draftContent);
 
-      const now: Date = new Date();
+        return staleRevision(promoted.revision, input.baseRevision);
+      }
+
+      return toDocument(await appendRevision(tx, current, input.title, input.content));
+    });
+
+    if ('code' in result) {
+      throw conflict(result);
+    }
+
+    return result;
+  }
+
+  /**
+   * Autosave the draft of a document. Creates no revision and leaves the head (`content`, `revision`)
+   * and the draft's base revision alone.
+   *
+   * Saving the text already stored answers the current draft and changes nothing, whatever
+   * `draftVersion` it carries: a retry after a lost response must not conflict with itself.
+   * Otherwise it fails with 409 `draft_conflict` if the draft was saved since `draftVersion`, with the
+   * current draft in the body so the client can reconcile without another request.
+   * A save moves `updatedAt`, so documents being written rise in the list.
+   */
+  public async saveDraft(id: string, input: SaveDraftDto): Promise<DocumentDraft> {
+    return this.db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
+      const current: DocumentRow = assertFound(locked, id);
+
+      if (current.draftContent === input.content) {
+        return toDocumentDraft(current);
+      }
+      if (current.draftVersion !== input.draftVersion) {
+        throw conflict({
+          code: 'draft_conflict',
+          message: `Draft was modified elsewhere: it is at version ${current.draftVersion}, the edit is based on version ${input.draftVersion}`,
+          draft: toDocumentDraft(current),
+        });
+      }
+
       const [row] = await tx
         .update(documents)
-        .set({
-          title: input.title,
-          content: input.content,
-          revision: current.revision + 1,
-          draftContent: input.content,
-          draftVersion: current.draftContent === input.content ? current.draftVersion : current.draftVersion + 1,
-          draftBaseRevision: current.revision + 1,
-          updatedAt: now,
-        })
+        .set({ draftContent: input.content, draftVersion: current.draftVersion + 1, updatedAt: new Date() })
         .where(eq(documents.id, id))
         .returning();
-      const updated: DocumentRow = assertFound(row, id);
-      await tx.insert(revisions).values({
-        documentId: id,
-        revision: updated.revision,
-        title: updated.title,
-        content: updated.content,
-        createdAt: now,
-      });
 
-      return toDocument(updated);
+      return toDocumentDraft(assertFound(row, id));
     });
   }
 

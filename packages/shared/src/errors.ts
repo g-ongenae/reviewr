@@ -1,4 +1,4 @@
-import type { ApiErrorBody } from './types.js';
+import type { ApiErrorBody, ConflictBody, DocumentDraft } from './types.js';
 import { ApiError } from './api-error.js';
 import { NetworkError } from './network-error.js';
 
@@ -6,6 +6,7 @@ const httpBadGateway: number = 502;
 const httpServiceUnavailable: number = 503;
 const httpGatewayTimeout: number = 504;
 const httpInternalServerError: number = 500;
+const httpConflict: number = 409;
 
 /**
  * Statuses a gateway (reverse proxy, load balancer) answers with when the API behind it is down or not responding.
@@ -54,3 +55,48 @@ export const describeError = (error: unknown): string => {
 
   return 'Something went wrong';
 };
+
+/** A counter of the API: an integer >= 1. */
+const isCounter = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1;
+
+/**
+ * Whether a value has the shape of a `DocumentDraft`.
+ */
+const isDraft = (value: unknown): value is DocumentDraft => {
+  if (typeof value !== 'object' || !value) {
+    return false;
+  }
+  const draft: Partial<Record<keyof DocumentDraft, unknown>> = value;
+
+  return (
+    typeof draft.content === 'string' &&
+    isCounter(draft.draftVersion) &&
+    // eslint-disable-next-line no-null/no-null -- the API sends a missing base revision as JSON null
+    (draft.baseRevision === null || isCounter(draft.baseRevision))
+  );
+};
+
+/**
+ * Whether an error body is a well-formed structured 409 body, checked for its own `code`.
+ */
+const isConflictBody = (body: unknown): body is ConflictBody => {
+  if (typeof body !== 'object' || !body) {
+    return false;
+  }
+  const conflict: { code?: unknown; draft?: unknown; revision?: unknown } = body;
+  switch (conflict.code) {
+    case 'draft_conflict':
+      return isDraft(conflict.draft);
+    case 'stale_revision':
+      return isCounter(conflict.revision);
+    default:
+      return false;
+  }
+};
+
+/**
+ * Structured body of a 409 Conflict, narrowed by its `code`; undefined for any other error, including
+ * a 409 from an API too old to send a code and a body whose payload does not match its code.
+ */
+export const conflictOf = (error: unknown): ConflictBody | undefined =>
+  error instanceof ApiError && error.status === httpConflict && isConflictBody(error.body) ? error.body : undefined;

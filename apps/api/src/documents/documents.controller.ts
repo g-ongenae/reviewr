@@ -11,9 +11,10 @@ import {
   Post,
   Put,
 } from '@nestjs/common';
-import type { Document, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
+import type { Document, DocumentDraft, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import { DocumentsService } from './documents.service.js';
 import { CreateDocumentDto } from './dto/create-document.dto.js';
+import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
 /**
@@ -56,6 +57,14 @@ export class DocumentsController {
   @Put(':id')
   public async update(@Param('id', ParseUUIDPipe) id: string, @Body() body: UpdateDocumentDto): Promise<Document> {
     return this.documentsService.update(id, body);
+  }
+
+  /**
+   * PUT /documents/:id/draft
+   */
+  @Put(':id/draft')
+  public async saveDraft(@Param('id', ParseUUIDPipe) id: string, @Body() body: SaveDraftDto): Promise<DocumentDraft> {
+    return this.documentsService.saveDraft(id, body);
   }
 
   /**
