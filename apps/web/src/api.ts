@@ -1,6 +1,14 @@
-import { ApiError, describeError, isServerUnreachable, ReachabilityTracker, ReviewrClient } from '@reviewr/shared';
+import {
+  ApiError,
+  describeError,
+  isServerUnreachable,
+  ReachabilityTracker,
+  ReviewrClient,
+  withClientFeatures,
+} from '@reviewr/shared';
 
-export const api = new ReviewrClient(import.meta.env.VITE_API_URL ?? '/api');
+// Announces that this app understands absent titles (`title: null`); see `withClientFeatures`.
+export const api = new ReviewrClient(import.meta.env.VITE_API_URL ?? '/api', withClientFeatures());
 
 /** Whether the API answered the last request; drives the "Server unreachable" notification. */
 export const reachability = new ReachabilityTracker();

@@ -1,13 +1,22 @@
 import { contentMaxLength, CreateDocumentInput, titleMaxLength } from '@reviewr/shared';
-import { IsString, MaxLength } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsOptional, IsString, MaxLength } from 'class-validator';
 
 /**
  * Body of `POST /documents`.
  */
 export class CreateDocumentDto implements CreateDocumentInput {
+  /**
+   * Null when the document is untitled: the title is absent, null, empty or blank. Older apps send
+   * `''` for an untitled document, so a blank title is stored as NULL rather than rejected.
+   */
+  /* eslint-disable no-null/no-null -- the title column is nullable: NULL means untitled */
+  @Transform(({ value }: { value: unknown }) => (typeof value === 'string' && value.trim().length === 0 ? null : value))
+  @IsOptional()
   @IsString()
   @MaxLength(titleMaxLength)
-  public title: string;
+  public title: string | null = null;
+  /* eslint-enable no-null/no-null */
 
   @IsString()
   @MaxLength(contentMaxLength)

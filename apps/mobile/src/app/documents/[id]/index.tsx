@@ -1,5 +1,5 @@
 import type { Document } from '@reviewr/shared';
-import { contentMaxLength, titleMaxLength } from '@reviewr/shared';
+import { contentMaxLength, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
@@ -31,6 +31,7 @@ export default function DocumentScreen() {
 }
 
 interface Draft {
+  /** As typed: empty when the document is untitled. */
   title: string;
   content: string;
 }
@@ -40,14 +41,14 @@ const Editor = ({ document }: { document: Document }) => {
   const queryClient = useQueryClient();
   // `base` is the server version the draft started from.
   const [base, setBase] = useState<Document>(document);
-  const [draft, setDraft] = useState<Draft>({ title: document.title, content: document.content });
-  const dirty = draft.title !== base.title || draft.content !== base.content;
+  const [draft, setDraft] = useState<Draft>({ title: document.title ?? '', content: document.content });
+  const dirty = titleToSend(draft.title) !== titleToSend(base.title ?? '') || draft.content !== base.content;
 
   // The document changed on the server (e.g. a revision was restored from the history screen):
   // follow it, unless the user has local edits that would be lost.
   if (document.revision !== base.revision && !dirty) {
     setBase(document);
-    setDraft({ title: document.title, content: document.content });
+    setDraft({ title: document.title ?? '', content: document.content });
   }
 
   const onSaved = async (saved: Document) => {
@@ -60,7 +61,8 @@ const Editor = ({ document }: { document: Document }) => {
   };
 
   const save = useMutation({
-    mutationFn: (baseRevision: number) => api.updateDocument(document.id, { ...draft, baseRevision }),
+    mutationFn: (baseRevision: number) =>
+      api.updateDocument(document.id, { title: titleToSend(draft.title), content: draft.content, baseRevision }),
     onSuccess: onSaved,
     onError: (error) => {
       if (!isConflict(error)) {
@@ -76,7 +78,7 @@ const Editor = ({ document }: { document: Document }) => {
           style: 'destructive',
           onPress: () =>
             void api.getDocument(document.id).then(async (latest) => {
-              setDraft({ title: latest.title, content: latest.content });
+              setDraft({ title: latest.title ?? '', content: latest.content });
               await onSaved(latest);
             }),
         },
@@ -135,7 +137,7 @@ const Editor = ({ document }: { document: Document }) => {
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <TextInput
           style={[styles.titleInput, { color: theme.text }]}
-          placeholder="Untitled"
+          placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
           placeholderTextColor={theme.muted}
           value={draft.title}
           maxLength={titleMaxLength}

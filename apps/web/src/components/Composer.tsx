@@ -25,7 +25,7 @@ export const Composer = ({ onCreated, toolbarStart }: Props) => {
   const dirty = content.trim().length > 0;
 
   const create = useMutation({
-    mutationFn: () => api.createDocument({ title: '', content }),
+    mutationFn: () => api.createDocument({ content }),
     onSuccess: async (document) => {
       setUnsavedChanges(false);
       queryClient.setQueryData(queryKeys.document(document.id), document);

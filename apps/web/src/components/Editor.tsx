@@ -1,5 +1,5 @@
 import type { Document } from '@reviewr/shared';
-import { contentMaxLength, titleMaxLength } from '@reviewr/shared';
+import { contentMaxLength, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
@@ -16,18 +16,19 @@ interface Props {
 }
 
 interface Draft {
+  /** As typed: empty when the document is untitled. */
   title: string;
   content: string;
 }
 
 export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState<Draft>({ title: document.title, content: document.content });
+  const [draft, setDraft] = useState<Draft>({ title: document.title ?? '', content: document.content });
   const [showHistory, setShowHistory] = useState(false);
   const [showStats, toggleStats] = useWritingStatsPanel();
   const todayBaseline = useTodayBaseline(document);
   const previousRevision = useLastRevisionBaseline(document);
-  const dirty = draft.title !== document.title || draft.content !== document.content;
+  const dirty = titleToSend(draft.title) !== titleToSend(document.title ?? '') || draft.content !== document.content;
 
   const onSaved = async (saved: Document) => {
     queryClient.setQueryData(queryKeys.document(saved.id), saved);
@@ -38,7 +39,8 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   };
 
   const save = useMutation({
-    mutationFn: (baseRevision: number) => api.updateDocument(document.id, { ...draft, baseRevision }),
+    mutationFn: (baseRevision: number) =>
+      api.updateDocument(document.id, { title: titleToSend(draft.title), content: draft.content, baseRevision }),
     onSuccess: onSaved,
   });
 
@@ -46,7 +48,11 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const overwrite = useMutation({
     mutationFn: async () => {
       const latest = await api.getDocument(document.id);
-      return api.updateDocument(document.id, { ...draft, baseRevision: latest.revision });
+      return api.updateDocument(document.id, {
+        title: titleToSend(draft.title),
+        content: draft.content,
+        baseRevision: latest.revision,
+      });
     },
     onSuccess: async (saved) => {
       save.reset();
@@ -61,7 +67,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
       queryFn: () => api.getDocument(document.id),
       staleTime: 0,
     });
-    setDraft({ title: latest.title, content: latest.content });
+    setDraft({ title: latest.title ?? '', content: latest.content });
     save.reset();
     await onSaved(latest);
   };
@@ -160,7 +166,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
 
         <input
           className="title-input"
-          placeholder="Untitled"
+          placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
           value={draft.title}
           maxLength={titleMaxLength}
           onChange={(event) => setDraft({ ...draft, title: event.target.value })}
@@ -178,7 +184,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
       {showHistory && (
         <RevisionHistory
           document={document}
-          onRestore={(revision) => setDraft({ title: revision.title, content: revision.content })}
+          onRestore={(revision) => setDraft({ title: revision.title ?? '', content: revision.content })}
         />
       )}
     </div>

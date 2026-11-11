@@ -7,7 +7,7 @@ import { integer, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm
  */
 export const documents = pgTable('documents', {
   id: uuid('id').primaryKey().defaultRandom(),
-  title: text('title').notNull(),
+  title: text('title'),
   content: text('content').notNull(),
   revision: integer('revision').notNull().default(1),
   /** Autosaved text, not yet a revision. Equal to `content` when nothing is pending. */
@@ -30,7 +30,7 @@ export const revisions = pgTable(
       .notNull()
       .references(() => documents.id, { onDelete: 'cascade' }),
     revision: integer('revision').notNull(),
-    title: text('title').notNull(),
+    title: text('title'),
     content: text('content').notNull(),
     /** Optional version label, separate from the document title. */
     name: text('name'),
