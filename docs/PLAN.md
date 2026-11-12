@@ -57,7 +57,10 @@ Small changes on the existing schema, not the commit model:
 Web client — an autosave state machine, not just a debounce:
 
 - one write in flight at a time; edits typed during a request are kept and sent next (done: the framework-free core in `apps/web/src/autosave`, with debounce, retry with backoff, `flush()` and a conflict state, tested with delayed and failed requests);
-- wire the core into the editor and the Composer through `PUT /documents/:id/draft`, with a saved / saving / retrying status; tell permanent failures (a deleted document) apart from temporary ones;
+- wire the core into the editor and the Composer through `PUT /documents/:id/draft`, with a saved / saving / retrying status; tell permanent failures (a deleted document) apart from temporary ones:
+  - the editor of an existing document (done): it opens on the draft and saves it as the writer types; a document left before its text was saved keeps being saved in the background; a failure that a retry cannot fix (a deleted document) stops the saves and leaves the text on screen; "Save version" flushes the draft, then creates the version through the old `PUT /documents/:id`;
+  - a draft conflict shows a temporary banner in the editor (discard my text, or keep it and save the other text as a version first), until the reconciliation view is opened there;
+  - later: the Composer; "Save version" through `POST /documents/:id/revisions`; the title saved by a rename instead of "Save version"; offer to save the text as a new document when the document was deleted;
 - the Composer creates the document on the first autosave with an idempotency key (retry-safe), and does not lose keystrokes typed while it is being created;
 - local buffer in IndexedDB, restored after a crash or a failed request; it also keeps the base (server draft and `draftVersion` the edits started from):
   - the storage module `apps/web/src/autosave/localBuffer.ts`: writes land in call order, a delete can be conditional on the confirmed text, it never throws into the editor, and its schema is versioned for the outbox (done);
@@ -69,7 +72,7 @@ Web client — an autosave state machine, not just a debounce:
   - the view, built on the package; "keep both" joins the two texts as they are, so it needs a separator or a hand edit;
   - keep the local text as a named version before every reconciliation, not only for conflicts: a few ambiguous merges can still be silent (listed in `packages/merge/README.md`), in particular when one side changed more than about 1,000 words;
   - run the package's tests on a real Hermes runtime (only the Hermes compiler was checked);
-- flush before "Save version", navigation, `beforeunload` and tab hide;
+- flush before "Save version", navigation, `beforeunload` and tab hide (done in the editor; closing the page can still cut the last request short, until the local buffer is used there);
 - tests with delayed responses, failed requests, typing during creation, and offline edits reconciled against a moved server draft.
 
 Mobile: switch to the draft and revision endpoints; restore goes into the editor as on the web. Same offline outbox (SQLite) and the same merge package; the phone is where offline writing happens most.
