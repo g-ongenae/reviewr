@@ -113,6 +113,25 @@ export interface Autosave {
   dispose(): void;
 }
 
+/**
+ * A short stand-in for a text: its length and a 53-bit hash of its characters (cyrb53). Two different texts with
+ * the same fingerprint are treated as the same text. For refused texts this errs on the safe side: such a text is
+ * shown as refused without having been sent, it stays on screen, and the next change is saved.
+ */
+const fingerprint = (text: string): string => {
+  let high = 0xdeadbeef;
+  let low = 0x41c6ce57;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    high = Math.imul(high ^ code, 2654435761);
+    low = Math.imul(low ^ code, 1597334677);
+  }
+  high = Math.imul(high ^ (high >>> 16), 2246822507) ^ Math.imul(low ^ (low >>> 13), 3266489909);
+  low = Math.imul(low ^ (low >>> 16), 2246822507) ^ Math.imul(high ^ (high >>> 13), 3266489909);
+
+  return `${text.length}:${(4294967296 * (2097151 & low) + (high >>> 0)).toString(36)}`;
+};
+
 const defaultRetryDelayMs = (attempt: number) => Math.min(1000 * 2 ** (attempt - 1), 30_000);
 
 const globalTimers: Timers = {
@@ -151,11 +170,14 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   /** The server's draft while in conflict. */
   let server: Draft | undefined;
   /**
-   * The texts the server refused, kept after the writer moved on: none is ever sent again (and nothing is, after a
-   * `permanent` refusal). `refusal` is the last refusal, which the state shows; `rejected` says whether the machine
-   * shows it, that is whether the local text is a refused one.
+   * The texts the server refused, remembered after the writer moved on: none is ever sent again (and nothing is,
+   * after a `permanent` refusal). Only their fingerprints are kept: a refused text can be a whole document, and a
+   * writer correcting it bit by bit would otherwise leave every refused copy in memory. `refusal` is the last
+   * refusal, which the state shows; `rejected` says whether the machine shows it, that is whether the local text is
+   * a refused one.
    */
   const refused = new Set<string>();
+  const isRefused = (text: string): boolean => refused.size > 0 && refused.has(fingerprint(text));
   let refusal: { error: unknown; permanent: boolean } | undefined;
   let rejected = false;
   /**
@@ -256,7 +278,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   const advance = (mode: 'now' | 'debounce' | 'keep') => {
     if (disposed) return;
     if (!inFlight && server === undefined) reconcile();
-    if (rejected && refusal !== undefined && !refusal.permanent && !refused.has(content)) rejected = false;
+    if (rejected && refusal !== undefined && !refusal.permanent && !isRefused(content)) rejected = false;
 
     if (rejected) {
       clearTimer();
@@ -272,7 +294,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       failures = 0;
       lastError = undefined;
       settleFlushes('saved', false);
-    } else if (refusal !== undefined && (refusal.permanent || refused.has(content))) {
+    } else if (refusal !== undefined && (refusal.permanent || isRefused(content))) {
       clearTimer();
       rejected = true;
       settleFlushes('rejected', true);
@@ -323,7 +345,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         advance('keep');
         return;
       case 'rejected':
-        refused.add(sent.content);
+        refused.add(fingerprint(sent.content));
         refusal = { error: result.error, permanent: result.permanent };
         if (result.permanent) rejected = true;
         // A text the writer changed meanwhile is sent at once; the refused one never is.

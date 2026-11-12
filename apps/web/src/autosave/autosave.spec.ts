@@ -369,6 +369,34 @@ describe('createAutosave', () => {
       expect(server.calls.at(-1)).toEqual({ content: 'Once upon a tide', draftVersion: 1 });
       await server.current().answer({ kind: 'saved', draftVersion: 2 });
     });
+
+    it('remembers every refused text, however long, without sending any of them again', async () => {
+      start();
+      // Whole chapters that differ by their last word only: none may be mistaken for another, or sent twice.
+      const chapter = 'Il était une fois un gardien de phare. '.repeat(2000);
+      const texts = ['un', 'deux', 'trois'].map((word) => `${chapter}${word}`);
+      for (const text of texts) {
+        autosave.edit(text);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(server.calls.at(-1)?.content).toBe(text);
+        await server.current().answer({ kind: 'rejected', error: new Error('413'), permanent: false });
+      }
+      expect(server.calls).toHaveLength(3);
+
+      for (const text of texts) {
+        autosave.edit(text);
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(autosave.getSnapshot()).toMatchObject({ status: 'rejected', content: text });
+      }
+      expect(server.calls).toHaveLength(3);
+
+      // A text never refused, one word away from the refused ones, is saved.
+      autosave.edit(`${chapter}quatre`);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(server.calls).toHaveLength(4);
+      await server.current().answer({ kind: 'saved', draftVersion: 2 });
+      expect(status()).toBe('saved');
+    });
   });
 
   describe('a draft read during a refused request', () => {
