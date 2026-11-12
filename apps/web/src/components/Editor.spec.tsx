@@ -1,4 +1,4 @@
-import type { Document, Revision, RevisionSummary, SaveDraftInput, UpdateDocumentInput } from '@reviewr/shared';
+import type { Document, Revision, SaveDraftInput, UpdateDocumentInput } from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -55,7 +55,17 @@ const appendRevision = (document: Document, title: string | null, content: strin
     },
   };
   db.set(document.id, next);
-  revisions.push({ documentId: document.id, revision: next.revision, title, content, createdAt: next.updatedAt });
+  // Built before the push: `name` (the version label) is being added to `Revision` by the endpoint that saves
+  // versions, and a separate object compiles with the type before and after that change.
+  const revision = {
+    documentId: document.id,
+    revision: next.revision,
+    title,
+    name: null,
+    content,
+    createdAt: next.updatedAt,
+  };
+  revisions.push(revision);
   return next;
 };
 
@@ -409,7 +419,7 @@ describe('Editor autosave', () => {
   });
 
   it('restores a revision into the editor as an edit of the draft', async () => {
-    const summary: RevisionSummary = { documentId: 'doc-1', revision: 1, title: 'Keeper', createdAt: '2026-11-01' };
+    const summary = { documentId: 'doc-1', revision: 1, title: 'Keeper', name: null, createdAt: '2026-11-01' };
     intercept = (call) => {
       if (call.path === '/documents/doc-1/revisions') return reply(200, [summary]);
       if (call.path === '/documents/doc-1/revisions/1') return reply(200, { ...summary, content: 'A dark tide.' });
