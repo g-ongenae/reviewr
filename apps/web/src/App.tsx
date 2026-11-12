@@ -1,3 +1,4 @@
+import { useAutosaveGuard } from './autosave/useAutosave';
 import { Composer } from './components/Composer';
 import { DocumentList } from './components/DocumentList';
 import { DocumentView } from './components/DocumentView';
@@ -10,6 +11,7 @@ import { useSidebar } from './useSidebar';
 export const App = () => {
   const [selectedId, select] = useSelectedDocumentId();
   const [sidebarOpen, toggleSidebar] = useSidebar();
+  useAutosaveGuard();
   const sidebarToggle = <SidebarToggle open={sidebarOpen} onToggle={toggleSidebar} />;
   const navigate = (id: string | undefined) => {
     if (id === selectedId || confirmDiscardChanges()) {

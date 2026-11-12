@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
-import { draftOf, useAutosave } from '../autosave/useAutosave';
+import { cacheDraft, draftOf, useAutosave } from '../autosave/useAutosave';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
@@ -53,6 +53,8 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
 
   const onSaved = async (saved: Document) => {
     queryClient.setQueryData(queryKeys.document(saved.id), saved);
+    // A version save can move the draft's counter: the machine takes it, and keeps what was typed meanwhile.
+    autosave.refresh(draftOf(saved));
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
       queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) }),
@@ -113,25 +115,25 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const keepMine = useMutation({
     mutationFn: async () => {
       const latest = await api.getDocument(document.id);
-      const theirs = draftOf(latest);
-      if (theirs.content !== latest.content) {
-        await onSaved(
-          await api.updateDocument(document.id, {
-            title: latest.title,
-            content: theirs.content,
-            baseRevision: latest.revision,
-          }),
-        );
-      }
-      return theirs;
+      if (draftOf(latest).content === latest.content) return draftOf(latest);
+      const saved = await api.updateDocument(document.id, {
+        title: latest.title,
+        content: draftOf(latest).content,
+        baseRevision: latest.revision,
+      });
+      await onSaved(saved);
+      return draftOf(saved);
     },
-    onSuccess: (theirs) => autosave.resolve(autosave.getSnapshot().content, theirs.draftVersion),
+    // Based on the draft the server has just confirmed, so the local text is sent unless it already is that draft.
+    onSuccess: (confirmed) => autosave.resolve(autosave.getSnapshot().content, confirmed),
   });
 
   /** After a draft conflict: drop the local text and take the other device's draft. */
   const takeTheirs = () => {
     const snapshot = autosave.getSnapshot();
-    if (snapshot.status === 'conflict') autosave.resolve(snapshot.server.content, snapshot.server.draftVersion);
+    if (snapshot.status !== 'conflict') return;
+    autosave.resolve(snapshot.server.content, snapshot.server);
+    cacheDraft(queryClient, document.id, snapshot.server);
   };
 
   const remove = useMutation({
@@ -166,16 +168,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   useEffect(() => setUnsavedChanges(titleDirty || textAtRisk), [titleDirty, textAtRisk]);
   useEffect(() => () => setUnsavedChanges(false), []);
 
-  // Closing the page may cut the request short: save at once, and warn until the server has the text.
-  const onBeforeUnload = useEffectEvent((event: BeforeUnloadEvent) => {
-    void autosave.flush();
-    if (titleDirty || autosave.getSnapshot().status !== 'saved') event.preventDefault();
-  });
-  useEffect(() => {
-    const listener = (event: BeforeUnloadEvent) => onBeforeUnload(event);
-    window.addEventListener('beforeunload', listener);
-    return () => window.removeEventListener('beforeunload', listener);
-  }, []);
+  // Closing the page is guarded for every document at once, by `useAutosaveGuard` in the app.
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
   const actionError = inlineError(save.error ?? remove.error ?? overwrite.error ?? keepMine.error);
@@ -221,9 +214,11 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
         {state.status === 'rejected' ? (
           <div className="banner error" role="alert">
             <span>
-              {isNotFound(state.error)
-                ? 'This document was deleted elsewhere: your text is no longer saved. Copy it before leaving.'
-                : `Your text can no longer be saved (${describeError(state.error)}). Copy it before leaving.`}
+              {state.permanent
+                ? isNotFound(state.error)
+                  ? 'This document was deleted elsewhere: your text is no longer saved. Copy it before leaving.'
+                  : `Your text can no longer be saved (${describeError(state.error)}). Copy it before leaving.`
+                : `The server refused this text (${describeError(state.error)}). Change it to save again.`}
             </span>
           </div>
         ) : state.status === 'conflict' ? (

@@ -19,8 +19,11 @@ export type SaveResult =
   | { kind: 'conflict'; server: Draft }
   /** The request failed (network error, 5xx…). The text is kept and sent again later. */
   | { kind: 'failed'; error: unknown }
-  /** The server refused the draft for good (the document was deleted…): a retry cannot help, so nothing more is sent. */
-  | { kind: 'rejected'; error: unknown };
+  /**
+   * The server refused this draft: sending it again cannot help. When `permanent` (the document was deleted), nothing is
+   * ever sent again; otherwise (too large, invalid) a changed text is sent, never the refused one.
+   */
+  | { kind: 'rejected'; error: unknown; permanent: boolean };
 
 /**
  * Saves `content` as the draft, based on `draftVersion` (the version the content was written from). It is never
@@ -55,8 +58,11 @@ interface CommonState {
 /**
  * What the UI shows, in order of precedence:
  *
- * - `rejected`: the server refused the draft for good. The text is kept, but nothing is ever sent again.
- * - `conflict`: the server's draft moved under the local text. Nothing is sent until `resolve` is called.
+ * - `rejected`: the server refused the draft. The text is kept. Nothing is sent again if `permanent`; otherwise the
+ *   next edit that changes the text leaves this state and is saved as usual.
+ * - `conflict`: the server's draft moved under the local text. Nothing is sent until `resolve` is called. A server
+ *   draft that is still the local text's `base` with a newer counter (a version save moved it) is no conflict: the
+ *   local text is sent again on that counter.
  * - `retrying`: the last request failed. The text is kept and sent again after a backoff (a retry may be in flight).
  *   It stays so even if the text is edited back to `base`: the failed write may have reached the server.
  * - `saving`: a request is in flight. Text typed meanwhile is sent right after it.
@@ -70,7 +76,7 @@ export type AutosaveState = CommonState &
     | { status: 'saving' }
     | { status: 'retrying'; error: unknown; attempt: number }
     | { status: 'conflict'; server: Draft }
-    | { status: 'rejected'; error: unknown }
+    | { status: 'rejected'; error: unknown; permanent: boolean }
   );
 
 /** How a `flush` ended. */
@@ -85,10 +91,18 @@ export interface Autosave {
    */
   flush(): Promise<FlushOutcome>;
   /**
-   * Leaves the conflict state with the reconciled `content`, based on the server's `draftVersion` (the one in the
-   * conflict state), and saves it. Ignored outside the conflict state.
+   * Leaves the conflict state with the reconciled `content`, based on `confirmed`: a draft the server confirmed, content
+   * and version together (from the conflict, or read since), and saves it unless it is that draft. Ignored outside the
+   * conflict state.
    */
-  resolve(content: string, draftVersion: number): void;
+  resolve(content: string, confirmed: Draft): void;
+  /**
+   * Tells the machine about a draft the server confirmed elsewhere (a fresh read, a version save). Older than `base`,
+   * or while a request is in flight, a failure is unresolved, or in conflict or rejected: ignored. With the same text
+   * as `base` (only the counter moved): it becomes the base, and local edits are kept. Otherwise it replaces the text
+   * only when there are no local edits; local edits win, and their next save meets the conflict.
+   */
+  refresh(confirmed: Draft): void;
   /** The current state; the same object until something changes, as `useSyncExternalStore` requires. */
   getSnapshot(): AutosaveState;
   /** Calls `listener` after every state change. Returns the unsubscribe function. */
@@ -109,7 +123,7 @@ const sameState = (a: AutosaveState, b: AutosaveState): boolean => {
   if (a.status !== b.status || a.content !== b.content || a.base !== b.base) return false;
   if (a.status === 'retrying' && b.status === 'retrying') return a.error === b.error && a.attempt === b.attempt;
   if (a.status === 'conflict' && b.status === 'conflict') return a.server === b.server;
-  if (a.status === 'rejected' && b.status === 'rejected') return a.error === b.error;
+  if (a.status === 'rejected' && b.status === 'rejected') return a.error === b.error && a.permanent === b.permanent;
   return true;
 };
 
@@ -133,8 +147,8 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   let lastError: unknown;
   /** The server's draft while in conflict. */
   let server: Draft | undefined;
-  /** Set once the server refused the draft for good: the machine stops sending. */
-  let rejection: { error: unknown } | undefined;
+  /** Set when the server refused `content`: the machine does not send it again. */
+  let rejection: { error: unknown; permanent: boolean; content: string } | undefined;
   let disposed = false;
   const flushes: { seq: number; settle: (outcome: FlushOutcome) => void }[] = [];
   const listeners = new Set<() => void>();
@@ -144,7 +158,9 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
 
   const computeState = (): AutosaveState => {
     const common = { content, base };
-    if (rejection !== undefined) return { ...common, status: 'rejected', error: rejection.error };
+    if (rejection !== undefined) {
+      return { ...common, status: 'rejected', error: rejection.error, permanent: rejection.permanent };
+    }
     if (server !== undefined) return { ...common, status: 'conflict', server };
     if (failures > 0) return { ...common, status: 'retrying', error: lastError, attempt: failures };
     if (inFlight) return { ...common, status: 'saving' };
@@ -210,8 +226,17 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         send();
         return;
       case 'conflict':
-        server = result.server;
         uncertain = false;
+        if (result.server.content === base.content && result.server.draftVersion > base.draftVersion) {
+          // Only the counter moved: the server holds the text the local edits started from, so nothing of anyone's is
+          // overwritten by sending them again on its version.
+          base = result.server;
+          failures = 0;
+          lastError = undefined;
+          send();
+          return;
+        }
+        server = result.server;
         settleFlushes('conflict', true);
         break;
       case 'failed':
@@ -222,7 +247,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         schedule(retryDelayMs(failures));
         break;
       case 'rejected':
-        rejection = { error: result.error };
+        rejection = { error: result.error, permanent: result.permanent, content: sent.content };
         settleFlushes('rejected', true);
         break;
     }
@@ -255,11 +280,22 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     update();
   };
 
+  /** Leaves a non-permanent rejection when the text is no longer the refused one. Returns whether still rejected. */
+  const stillRejected = () => {
+    if (rejection === undefined) return false;
+    if (rejection.permanent || rejection.content === content) return true;
+    rejection = undefined;
+    failures = 0;
+    lastError = undefined;
+    return false;
+  };
+
   return {
     edit(next) {
       if (disposed || next === content) return;
       content = next;
       editSeq++;
+      stillRejected();
       if (server === undefined && rejection === undefined && !inFlight) {
         if (!needsSave()) {
           clearTimer();
@@ -274,7 +310,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
 
     flush() {
       if (disposed) return Promise.resolve('disposed');
-      if (rejection !== undefined) return Promise.resolve('rejected');
+      if (stillRejected()) return Promise.resolve('rejected');
       if (server !== undefined) return Promise.resolve('conflict');
       if (!inFlight && !needsSave()) return Promise.resolve('saved');
       const done = new Promise<FlushOutcome>((settle) => flushes.push({ seq: editSeq, settle }));
@@ -282,15 +318,30 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       return done;
     },
 
-    resolve(next, draftVersion) {
+    resolve(next, confirmed) {
       if (disposed || server === undefined) return;
-      base = { content: server.content, draftVersion };
+      base = confirmed;
       server = undefined;
       failures = 0;
       lastError = undefined;
       content = next;
       editSeq++;
       send();
+      update();
+    },
+
+    refresh(confirmed) {
+      if (disposed || server !== undefined || rejection !== undefined || inFlight || uncertain) return;
+      if (confirmed.draftVersion <= base.draftVersion) return;
+      if (confirmed.content === base.content) {
+        base = confirmed;
+      } else if (content === base.content) {
+        base = confirmed;
+        content = confirmed.content;
+        editSeq++;
+        clearTimer();
+        markClean();
+      }
       update();
     },
 
