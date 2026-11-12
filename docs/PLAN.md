@@ -49,10 +49,12 @@ Small changes on the existing schema, not the commit model:
   - the old `PUT /documents/:id` no longer overwrites an autosaved draft: it first keeps that draft as a revision, then answers 409, so builds that only know revisions see "changed elsewhere" (done);
   - later: test the row lock on a real PostgreSQL with two connections (the tests run on PGlite, which runs one transaction at a time); make `Document.draft` required in the shared type once the web uses it.
 - `POST /documents/:id/revisions` `{ name?, draftVersion, baseRevision }`: snapshots the draft atomically; 409 if either the draft or the head moved. Saving a draft identical to the head is a no-op.
+  - the endpoint, `ReviewrClient.createRevision` and the `name` listed on revisions (done); the same request sent twice after a lost response creates one revision only;
+  - later: a document without a revision yet (`baseRevision` null); decide whether a title changed alone can be saved as a version, since a draft identical to the head is a no-op.
 - `PATCH /documents/:id` (title) and `PATCH /documents/:id/revisions/:n` (version name). Add `PATCH` to CORS.
 - `POST /documents` accepts an empty draft and creates no revision: a document can exist with only a draft.
-- Keep the current `PUT /documents/:id` working as "save draft + create revision" until the new mobile build ships. It already keeps the draft columns equal to the saved content (done). Left for the draft endpoint: it must not silently overwrite an autosaved draft that differs from the head (for example, answer 409).
-- Shared types: structured 409 bodies.
+- Keep the current `PUT /documents/:id` working as "save draft + create revision" until the new mobile build ships. It keeps the draft columns equal to the saved content, and it never overwrites an autosaved draft that differs from the head: it keeps that draft as a revision first, then answers 409 (done).
+- Shared types: structured 409 bodies (done: `draft_conflict` and `stale_revision`, read with `conflictOf`).
 
 Web client — an autosave state machine, not just a debounce:
 
