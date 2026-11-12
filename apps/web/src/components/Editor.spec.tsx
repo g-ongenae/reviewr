@@ -521,6 +521,28 @@ describe('Editor autosave', () => {
     expect(unload().defaultPrevented).toBe(true);
   });
 
+  it('shows a conflict, not "saved", when the writer goes back to the draft while a refused save was pending', async () => {
+    open();
+    intercept = (call) =>
+      call.path.endsWith('/draft') && (call.body as SaveDraftInput).content.length > 20
+        ? reply(413, { statusCode: 413, message: 'Draft too large' })
+        : undefined;
+    hold = (call) => call.path === '/documents/doc-1/draft';
+    type('Once upon a tide, the keeper slept.');
+    await elapse(1000);
+    // Another device writes, a refetch reads it, and the writer goes back to the text they opened.
+    otherDraft('Written on the phone.');
+    await act(() => queryClient.invalidateQueries({ queryKey: queryKeys.document('doc-1') }));
+    type('Once upon a tide.');
+    await elapse();
+
+    await releaseHeld();
+    expect(textarea().value).toBe('Once upon a tide.');
+    expect(status()).toBe('Not saved · changed elsewhere');
+    expect(unload().defaultPrevented).toBe(true);
+    expect(server().draft?.content).toBe('Written on the phone.');
+  });
+
   describe('leaving inside the debounce window still saves', () => {
     it('when the tab is hidden', async () => {
       open();

@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createAutosave, type Autosave, type AutosaveOptions, type Draft, type SaveResult } from './autosave';
+import {
+  createAutosave,
+  type Autosave,
+  type AutosaveOptions,
+  type AutosaveState,
+  type Draft,
+  type SaveResult,
+  type Timers,
+} from './autosave';
 
 interface PendingSave {
   draft: Draft;
@@ -363,6 +371,79 @@ describe('createAutosave', () => {
     });
   });
 
+  describe('a draft read during a refused request', () => {
+    // A/v1; oversized B is sent; another device writes C/v2, which a read hands over while B's answer is pending.
+    const setup = async () => {
+      start({ base: { content: 'A', draftVersion: 1 } });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.refresh({ content: 'C', draftVersion: 2 });
+    };
+
+    it('is a conflict, not "saved", when the writer went back to A before the refusal', async () => {
+      await setup();
+      autosave.edit('A');
+      await server.current().answer({ kind: 'rejected', error: new Error('413'), permanent: false });
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'A', server: { content: 'C' } });
+      await expect(autosave.flush()).resolves.toBe('conflict');
+      expect(server.calls).toHaveLength(1);
+    });
+
+    it('is a conflict, not "saved", when the writer goes back to A after the refusal', async () => {
+      await setup();
+      await server.current().answer({ kind: 'rejected', error: new Error('413'), permanent: false });
+      // C is already weighed: the refused B is in conflict with it.
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'B', server: { content: 'C' } });
+      autosave.edit('A');
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'A', server: { content: 'C' } });
+      await expect(autosave.flush()).resolves.toBe('conflict');
+      expect(server.calls).toHaveLength(1);
+    });
+  });
+
+  describe("a delayed 409 when a newer draft read meanwhile holds this machine's text", () => {
+    // A/v1; B is sent; the server refuses it against C/v2, but that answer is slow; another device writes B/v3.
+    it('takes it as the base when it holds the text sent', async () => {
+      start({ base: { content: 'A', draftVersion: 1 } });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.refresh({ content: 'B', draftVersion: 3 });
+      await server.current().answer({ kind: 'conflict', server: { content: 'C', draftVersion: 2 } });
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'B',
+        base: { content: 'B', draftVersion: 3 },
+      });
+      expect(server.calls).toHaveLength(1);
+    });
+
+    it('takes it as the base when it holds the current text, and sends what remains on it', async () => {
+      start({ base: { content: 'A', draftVersion: 1 } });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.edit('B2');
+      autosave.refresh({ content: 'B2', draftVersion: 3 });
+      await server.current().answer({ kind: 'conflict', server: { content: 'C', draftVersion: 2 } });
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'B2',
+        base: { content: 'B2', draftVersion: 3 },
+      });
+
+      // Holding the text sent while the writer typed on: that text is sent on it.
+      autosave.dispose();
+      start({ base: { content: 'A', draftVersion: 1 } });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.edit('B, then more');
+      autosave.refresh({ content: 'B', draftVersion: 3 });
+      await server.current().answer({ kind: 'conflict', server: { content: 'C', draftVersion: 2 } });
+      expect(server.calls.at(-1)).toEqual({ content: 'B, then more', draftVersion: 3 });
+      await server.current().answer({ kind: 'saved', draftVersion: 4 });
+      expect(status()).toBe('saved');
+    });
+  });
+
   describe('refresh', () => {
     it('adopts a newer confirmed draft when there are no local edits', () => {
       start();
@@ -381,13 +462,17 @@ describe('createAutosave', () => {
       expect(autosave.getSnapshot().content).toBe('Once');
     });
 
-    it('keeps local edits over a different draft, and their save meets the conflict', async () => {
+    it('keeps local edits over a different draft, as a conflict, and sends nothing', async () => {
       start();
       autosave.edit('Once upon a tide');
       autosave.refresh({ content: 'Once upon a time', draftVersion: 4 });
-      expect(autosave.getSnapshot()).toMatchObject({ status: 'unsaved', content: 'Once upon a tide' });
-      await vi.advanceTimersByTimeAsync(500);
-      expect(server.calls).toEqual([{ content: 'Once upon a tide', draftVersion: 1 }]);
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'conflict',
+        content: 'Once upon a tide',
+        server: { content: 'Once upon a time', draftVersion: 4 },
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(server.calls).toEqual([]);
     });
 
     it('takes a counter bump of the base and keeps local edits, sent on the new version', async () => {
@@ -446,16 +531,16 @@ describe('createAutosave', () => {
       autosave.edit('Once upon');
       await vi.advanceTimersByTimeAsync(500);
       autosave.refresh({ content: 'Other', draftVersion: 9 });
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'saving', content: 'Once upon' });
+      // Once the answer is in (a failure), the kept draft is reconciled: another text, so a conflict, no retry.
       await server.current().answer({ kind: 'failed', error: new Error('503') });
-      autosave.refresh({ content: 'Other', draftVersion: 9 });
-      expect(autosave.getSnapshot()).toMatchObject({ status: 'retrying', content: 'Once upon' });
-      // The retry's answer is weighed against it: the server moved on to another text.
-      await vi.advanceTimersByTimeAsync(1000);
-      await server.current().answer({ kind: 'saved', draftVersion: 2 });
       expect(autosave.getSnapshot()).toMatchObject({
         status: 'conflict',
+        content: 'Once upon',
         server: { content: 'Other', draftVersion: 9 },
       });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.calls).toHaveLength(1);
     });
   });
 
@@ -662,5 +747,231 @@ describe('createAutosave', () => {
       expect(status()).toBe('saving');
       expect(listener).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/** A small seeded generator (mulberry32): a failing run is replayed from its seed. */
+const seeded = (seed: number) => {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+};
+
+/**
+ * Random interleavings of local edits, writes from another device, reads handed to `refresh` late and out of order,
+ * and answers (saved, 409, network failure, refusal) delivered with delays, against a fake server with the rules of
+ * `saveDraft`. After every step: `saved` only for the text of the newest confirmed draft given; the text changes only by
+ * an edit, a `resolve`, or a `refresh` of a saved machine; one request at a time; no refused text sent twice. At the
+ * end the run settles, and once the latest read is delivered the machine is saved with the server's text, or keeps its
+ * text in conflict or refused.
+ */
+describe('createAutosave, randomised', () => {
+  const localTexts = ['A', 'B', 'C', 'D', 'too long 1', 'too long 2'];
+  const remoteTexts = ['A', 'B', 'C', 'E'];
+  const tooLong = (text: string) => text.startsWith('too long');
+
+  const run = async (seed: number) => {
+    const random = seeded(seed);
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+    const steps: string[] = [];
+    const fail = (message: string): never => {
+      throw new Error(`seed ${seed}: ${message}\n  ${steps.join('\n  ')}`);
+    };
+
+    // The server, and what the machine has been told: the newest confirmed draft given to it.
+    let draft: Draft = { content: 'A', draftVersion: 1 };
+    let told: Draft = draft;
+    const tell = (confirmed: Draft) => {
+      if (confirmed.draftVersion > told.draftVersion) told = confirmed;
+    };
+    const reads: Draft[] = [];
+    let failureRate = 0.2;
+
+    // Requests: handled by the server when they arrive, answered later.
+    interface Request {
+      sent: Draft;
+      answer?: SaveResult;
+      deliver: (result: SaveResult) => void;
+    }
+    const requests: Request[] = [];
+    const refusedSent = new Set<string>();
+
+    // Timers on a virtual clock.
+    let now = 0;
+    let nextTimer = 0;
+    const due: { at: number; id: number; callback: () => void }[] = [];
+    const timers: Timers = {
+      setTimeout: (callback, ms) => {
+        const id = nextTimer++;
+        due.push({ at: now + ms, id, callback });
+        return id;
+      },
+      clearTimeout: (id) => {
+        const index = due.findIndex((timer) => timer.id === id);
+        if (index >= 0) due.splice(index, 1);
+      },
+    };
+
+    /** A broken rule seen inside `save`, which must not throw (the machine would take it as a failed request). */
+    let violation: string | undefined;
+    const save = (sent: Draft) =>
+      new Promise<SaveResult>((deliver) => {
+        steps.push(`send ${JSON.stringify(sent)}`);
+        if (refusedSent.has(sent.content)) violation ??= `refused text sent again: ${sent.content}`;
+        if (requests.length > 0) violation ??= 'a second request while one is in flight';
+        requests.push({ sent, deliver });
+      });
+
+    const autosave = createAutosave({ base: draft, save, timers, debounceMs: 500, retryDelayMs: () => 1000 });
+    const settleMicrotasks = async () => {
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    };
+
+    const arrive = () => {
+      const request = requests[0];
+      if (request === undefined || request.answer !== undefined) return false;
+      const { sent } = request;
+      let answer: SaveResult;
+      if (random() < failureRate / 2) {
+        answer = { kind: 'failed', error: new Error('lost before the server') };
+      } else {
+        if (tooLong(sent.content)) {
+          answer = { kind: 'rejected', error: new Error('413'), permanent: false };
+        } else if (draft.content === sent.content) {
+          answer = { kind: 'saved', draftVersion: draft.draftVersion };
+        } else if (draft.draftVersion !== sent.draftVersion) {
+          answer = { kind: 'conflict', server: draft };
+        } else {
+          draft = { content: sent.content, draftVersion: draft.draftVersion + 1 };
+          answer = { kind: 'saved', draftVersion: draft.draftVersion };
+        }
+        if (random() < failureRate / 2) answer = { kind: 'failed', error: new Error('answer lost') };
+      }
+      request.answer = answer;
+      steps.push(`server handles ${JSON.stringify(sent)} -> ${answer.kind}`);
+      return true;
+    };
+
+    const answer = () => {
+      const request = requests[0];
+      if (request?.answer === undefined) return false;
+      requests.shift();
+      const result = request.answer;
+      if (result.kind === 'saved') tell({ content: request.sent.content, draftVersion: result.draftVersion });
+      if (result.kind === 'conflict') tell(result.server);
+      // Only a refusal the machine received counts: a lost one may be sent again.
+      if (result.kind === 'rejected') refusedSent.add(request.sent.content);
+      steps.push(`answer ${result.kind}`);
+      request.deliver(result);
+      return true;
+    };
+
+    const tick = (ms: number) => {
+      now += ms;
+      for (const timer of [...due].sort((a, b) => a.at - b.at)) {
+        if (timer.at <= now && due.includes(timer)) {
+          due.splice(due.indexOf(timer), 1);
+          timer.callback();
+        }
+      }
+    };
+
+    const deliverRead = (index: number) => {
+      const [read] = reads.splice(index, 1);
+      if (read === undefined) return;
+      tell(read);
+      autosave.refresh(read);
+    };
+
+    const check = (action: string, before: AutosaveState) => {
+      if (violation !== undefined) fail(violation);
+      const state = autosave.getSnapshot();
+      if (state.status === 'saved' && state.content !== told.content) {
+        fail(`saved with ${JSON.stringify(state.content)}, newest confirmed draft given is ${JSON.stringify(told)}`);
+      }
+      if (state.content !== before.content) {
+        const allowed =
+          action.startsWith('edit') ||
+          action.startsWith('resolve') ||
+          (action.startsWith('deliver read') && before.status === 'saved');
+        if (!allowed) fail(`text changed by "${action}": ${before.content} -> ${state.content}`);
+      }
+    };
+
+    const act = async (action: string, effect: () => void) => {
+      const before = autosave.getSnapshot();
+      steps.push(`${action} [${before.status}, ${JSON.stringify(before.content)}]`);
+      effect();
+      await settleMicrotasks();
+      check(action, before);
+    };
+
+    for (let step = 0; step < 120; step++) {
+      const roll = random();
+      if (roll < 0.2) {
+        const text = pick(localTexts);
+        await act(`edit ${text}`, () => autosave.edit(text));
+      } else if (roll < 0.38) {
+        const ms = pick([100, 500, 1000, 5000]);
+        await act(`wait ${ms}`, () => tick(ms));
+      } else if (roll < 0.5) {
+        await act('arrive', () => void arrive());
+      } else if (roll < 0.62) {
+        await act('answer', () => void answer());
+      } else if (roll < 0.69) {
+        const text = pick(remoteTexts);
+        await act(`other device writes ${text}`, () => {
+          draft = { content: text, draftVersion: draft.draftVersion + 1 };
+        });
+      } else if (roll < 0.77) {
+        await act('read', () => void reads.push(draft));
+      } else if (roll < 0.86) {
+        await act('deliver read', () => deliverRead(Math.floor(random() * reads.length)));
+      } else if (roll < 0.9) {
+        await act('flush', () => void autosave.flush());
+      } else {
+        const state = autosave.getSnapshot();
+        if (state.status === 'conflict') {
+          const mine = random() < 0.5;
+          await act(`resolve ${mine ? 'mine' : 'theirs'}`, () =>
+            autosave.resolve(mine ? state.content : state.server.content, state.server),
+          );
+        }
+      }
+    }
+
+    // The end: no more edits or writes, nothing lost on the network; everything pending is delivered.
+    failureRate = 0;
+    const settleAll = async () => {
+      for (let round = 0; round < 200; round++) {
+        if (requests.length === 0 && due.length === 0 && reads.length === 0) return;
+        if (reads.length > 0) await act('deliver read (end)', () => deliverRead(0));
+        await act('arrive (end)', () => void arrive());
+        await act('answer (end)', () => void answer());
+        await act('wait 60000 (end)', () => tick(60_000));
+      }
+      fail(`does not settle: ${JSON.stringify({ state: autosave.getSnapshot(), draft, requests, due, reads })}`);
+    };
+    await settleAll();
+    const local = autosave.getSnapshot().content;
+    await act('deliver read (the latest, at the end)', () => deliverRead(reads.push(draft) - 1));
+    await settleAll();
+
+    const final = autosave.getSnapshot();
+    const outcome =
+      (final.status === 'saved' && final.content === draft.content) ||
+      (final.status === 'conflict' && final.content === local) ||
+      (final.status === 'rejected' && final.content === local && tooLong(local));
+    if (!outcome) fail(`ends ${final.status} with ${JSON.stringify(final.content)}, server ${JSON.stringify(draft)}`);
+    autosave.dispose();
+  };
+
+  it('keeps its invariants over 400 random runs', async () => {
+    for (let seed = 1; seed <= 400; seed++) await run(seed);
   });
 });

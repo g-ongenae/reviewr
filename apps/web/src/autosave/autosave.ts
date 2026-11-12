@@ -98,11 +98,11 @@ export interface Autosave {
    */
   resolve(content: string, confirmed: Draft): void;
   /**
-   * Tells the machine about a draft the server confirmed elsewhere (a fresh read, a version save). Older than `base`,
-   * or in conflict or rejected: ignored. While a request is in flight or a failure is unresolved: kept, and weighed
-   * against the next answer (a newer other text then is a conflict, never "saved"). With the same text as `base` (only
-   * the counter moved): it becomes the base, and local edits are kept. Otherwise it replaces the text only when there
-   * are no local edits; local edits win, and their next save meets the conflict.
+   * Tells the machine about a draft the server confirmed elsewhere (a fresh read, a version save). Not newer than
+   * `base`: ignored. On a `saved` machine with nothing pending: it replaces the text. Otherwise it is kept and
+   * reconciled as soon as no answer is pending: holding one of this machine's texts (the local text, the base, a text
+   * it sent), it becomes the base and local edits are sent on it; holding another text, it is a conflict, and the
+   * local text stays. Never "saved" for a text older than it.
    */
   refresh(confirmed: Draft): void;
   /** The current state; the same object until something changes, as `useSyncExternalStore` requires. */
@@ -142,22 +142,25 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   let timer: unknown;
   let failures = 0;
   /**
-   * A request failed, so whether the server holds `base` or what was sent is unknown. Until a save succeeds or a
-   * conflict says what the server holds, text equal to `base` is not known to be saved.
+   * A request failed, so whether the server holds `base` or what was sent (`unknownText`) is unknown. Until an answer
+   * or a newer confirmed draft says what the server holds, text equal to `base` is not known to be saved.
    */
   let uncertain = false;
+  let unknownText: string | undefined;
   let lastError: unknown;
   /** The server's draft while in conflict. */
   let server: Draft | undefined;
   /**
-   * The last text the server refused, kept after the writer moved on: it is never sent again (and nothing is, if
-   * `permanent`). `rejected` says whether the machine shows it, that is whether the local text is still that one.
+   * The texts the server refused, kept after the writer moved on: none is ever sent again (and nothing is, after a
+   * `permanent` refusal). `refusal` is the last refusal, which the state shows; `rejected` says whether the machine
+   * shows it, that is whether the local text is a refused one.
    */
-  let refusal: { error: unknown; permanent: boolean; content: string } | undefined;
+  const refused = new Set<string>();
+  let refusal: { error: unknown; permanent: boolean } | undefined;
   let rejected = false;
   /**
-   * The newest draft the server confirmed elsewhere while a request was in flight or its outcome unknown. It is
-   * reconciled with the next answer before the text is called saved.
+   * The newest confirmed draft the machine was told about (a read, a 409) and has not reconciled yet: it may be older
+   * or newer than the answer of a request in flight, so it waits for that answer. `reconcile` consumes it.
    */
   let later: Draft | undefined;
   let disposed = false;
@@ -212,32 +215,76 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     clearTimer();
     timer = timers.setTimeout(() => {
       timer = undefined;
-      send();
+      advance('now');
     }, ms);
   };
 
-  /** The local text matches the server's draft: everything edited so far is saved. */
-  const markClean = () => {
-    savedSeq = editSeq;
-    failures = 0;
-    lastError = undefined;
-    settleFlushes('saved', false);
+  /** Keeps a confirmed draft for `reconcile`, if it is newer than the base and than the one already kept. */
+  const keep = (confirmed: Draft) => {
+    if (confirmed.draftVersion <= base.draftVersion) return;
+    if (later === undefined || confirmed.draftVersion > later.draftVersion) later = confirmed;
   };
 
   /**
-   * Weighs `later` against the base the server has just confirmed. Older: forgotten. The same text, or the local text:
-   * it becomes the base. Another text: the other device wrote after this save, so it is a conflict. Returns whether so.
+   * Consumes `later`, once no answer is pending. Not newer than the base: forgotten. Holding a text of this machine
+   * (the local text, the base, the text just sent or whose save is unknown): it becomes the base, and the local text
+   * is sent on it if it differs. Another text: another device wrote it, so it is a conflict, and the local text stays.
    */
-  const supersededByLater = (): boolean => {
+  const reconcile = (sent?: string) => {
     const confirmed = later;
     later = undefined;
-    if (confirmed === undefined || confirmed.draftVersion <= base.draftVersion) return false;
-    if (confirmed.content === base.content || confirmed.content === content) {
+    if (confirmed === undefined || confirmed.draftVersion <= base.draftVersion) return;
+    const ours = [content, base.content, sent, unknownText];
+    if (ours.includes(confirmed.content)) {
       base = confirmed;
-      return false;
+      uncertain = false;
+      unknownText = undefined;
+      failures = 0;
+      lastError = undefined;
+    } else {
+      server = confirmed;
     }
-    server = confirmed;
-    return true;
+  };
+
+  /**
+   * The one place that decides what comes next, and the only one that calls the text saved. `now` sends at once,
+   * `debounce` (re)starts the debounce, `keep` leaves a pending timer as it is.
+   *
+   * Invariant: the status is `saved` only when the local text is the text of the newest confirmed draft the machine
+   * has been given. So `later` is reconciled first, and nothing is called saved while an answer is pending.
+   */
+  const advance = (mode: 'now' | 'debounce' | 'keep') => {
+    if (disposed) return;
+    if (!inFlight && server === undefined) reconcile();
+    if (rejected && refusal !== undefined && !refusal.permanent && !refused.has(content)) rejected = false;
+
+    if (rejected) {
+      clearTimer();
+      settleFlushes('rejected', true);
+    } else if (server !== undefined) {
+      clearTimer();
+      settleFlushes('conflict', true);
+    } else if (inFlight) {
+      // The text is sent after the answer.
+    } else if (!needsSave()) {
+      clearTimer();
+      savedSeq = editSeq;
+      failures = 0;
+      lastError = undefined;
+      settleFlushes('saved', false);
+    } else if (refusal !== undefined && (refusal.permanent || refused.has(content))) {
+      clearTimer();
+      rejected = true;
+      settleFlushes('rejected', true);
+    } else if (mode === 'now') {
+      clearTimer();
+      inFlight = true;
+      void request({ content, draftVersion: base.draftVersion }, editSeq);
+    } else if (mode === 'debounce' || timer === undefined) {
+      // Also replaces a pending retry: a new edit retries earlier than the backoff would.
+      schedule(debounceMs);
+    }
+    update();
   };
 
   const settle = (sent: Draft, seq: number, result: SaveResult) => {
@@ -245,53 +292,44 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       case 'saved':
         base = { content: sent.content, draftVersion: result.draftVersion };
         uncertain = false;
+        unknownText = undefined;
         failures = 0;
         lastError = undefined;
-        if (supersededByLater()) {
-          settleFlushes('conflict', true);
-          break;
+        reconcile();
+        if (server === undefined) {
+          savedSeq = Math.max(savedSeq, seq);
+          settleFlushes('saved', false);
         }
-        savedSeq = Math.max(savedSeq, seq);
-        settleFlushes('saved', false);
         // Text typed during the request goes right away, based on the version it returned.
-        send();
+        advance('now');
         return;
-      case 'conflict': {
+      case 'conflict':
+        // The text sent did not land: the server holds `result.server`, or a newer draft read meanwhile.
         uncertain = false;
-        const newest = later !== undefined && later.draftVersion > result.server.draftVersion ? later : result.server;
-        later = undefined;
-        if (newest.content === base.content && newest.draftVersion > base.draftVersion) {
-          // Only the counter moved: the server holds the text the local edits started from, so nothing of anyone's is
-          // overwritten by sending them again on its version.
-          base = newest;
-          failures = 0;
-          lastError = undefined;
-          send();
-          return;
-        }
-        server = newest;
-        settleFlushes('conflict', true);
-        break;
-      }
+        unknownText = undefined;
+        failures = 0;
+        lastError = undefined;
+        keep(result.server);
+        reconcile(sent.content);
+        advance('now');
+        return;
       case 'failed':
         failures++;
         uncertain = true;
+        unknownText = sent.content;
         lastError = result.error;
         settleFlushes('failed', true);
         schedule(retryDelayMs(failures));
-        break;
+        advance('keep');
+        return;
       case 'rejected':
-        refusal = { error: result.error, permanent: result.permanent, content: sent.content };
-        if (!result.permanent && content !== sent.content) {
-          // The writer already changed the refused text: save what they have now.
-          send();
-          return;
-        }
-        rejected = true;
-        settleFlushes('rejected', true);
-        break;
+        refused.add(sent.content);
+        refusal = { error: result.error, permanent: result.permanent };
+        if (result.permanent) rejected = true;
+        // A text the writer changed meanwhile is sent at once; the refused one never is.
+        advance('now');
+        return;
     }
-    update();
   };
 
   const request = async (sent: Draft, seq: number) => {
@@ -306,100 +344,44 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     settle(sent, seq, result);
   };
 
-  /**
-   * Sends the latest text now, unless a request is already in flight (it is sent after it), in conflict, or the text is
-   * one the server refused (the machine shows the refusal instead).
-   */
-  const send = () => {
-    if (disposed || inFlight || server !== undefined || rejected) return;
-    clearTimer();
-    if (!needsSave()) {
-      markClean();
-      update();
-      return;
-    }
-    if (refusal !== undefined && (refusal.permanent || refusal.content === content)) {
-      rejected = true;
-      settleFlushes('rejected', true);
-      update();
-      return;
-    }
-    inFlight = true;
-    void request({ content, draftVersion: base.draftVersion }, editSeq);
-    update();
-  };
-
-  /**
-   * Leaves the rejected state when the text is no longer the refused one (the refusal itself is kept). Returns whether
-   * still rejected.
-   */
-  const stillRejected = () => {
-    if (!rejected || refusal === undefined) return false;
-    if (refusal.permanent || refusal.content === content) return true;
-    rejected = false;
-    failures = 0;
-    lastError = undefined;
-    return false;
-  };
-
   return {
     edit(next) {
       if (disposed || next === content) return;
       content = next;
       editSeq++;
-      stillRejected();
-      if (server === undefined && !rejected && !inFlight) {
-        if (!needsSave()) {
-          clearTimer();
-          markClean();
-        } else {
-          // Also replaces a pending retry: a new edit retries earlier than the backoff would.
-          schedule(debounceMs);
-        }
-      }
-      update();
+      advance('debounce');
     },
 
     flush() {
       if (disposed) return Promise.resolve('disposed');
-      if (stillRejected()) return Promise.resolve('rejected');
-      if (server !== undefined) return Promise.resolve('conflict');
-      if (!inFlight && !needsSave()) return Promise.resolve('saved');
       const done = new Promise<FlushOutcome>((settle) => flushes.push({ seq: editSeq, settle }));
-      send();
+      advance('now');
       return done;
     },
 
     resolve(next, confirmed) {
       if (disposed || server === undefined) return;
-      base = confirmed;
       server = undefined;
+      base = confirmed;
       failures = 0;
       lastError = undefined;
       content = next;
       editSeq++;
-      send();
-      update();
+      advance('now');
     },
 
     refresh(confirmed) {
-      if (disposed || server !== undefined || rejected) return;
-      if (confirmed.draftVersion <= base.draftVersion) return;
-      if (inFlight || uncertain) {
-        // The answer to come may be older: weigh this one against it then.
-        if (later === undefined || confirmed.draftVersion > later.draftVersion) later = confirmed;
-        return;
-      }
-      if (confirmed.content === base.content) {
-        base = confirmed;
-      } else if (content === base.content) {
+      if (disposed || confirmed.draftVersion <= base.draftVersion) return;
+      if (snapshot.status === 'saved' && later === undefined) {
+        // No local edits, nothing pending: the newer draft simply replaces the text.
         base = confirmed;
         content = confirmed.content;
         editSeq++;
-        clearTimer();
-        markClean();
+        advance('keep');
+        return;
       }
-      update();
+      keep(confirmed);
+      advance('keep');
     },
 
     getSnapshot: () => snapshot,
