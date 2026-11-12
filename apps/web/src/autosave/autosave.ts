@@ -116,7 +116,8 @@ export interface Autosave {
 /**
  * A short stand-in for a text: its length and a 53-bit hash of its characters (cyrb53). Two different texts with
  * the same fingerprint are treated as the same text. For refused texts this errs on the safe side: such a text is
- * shown as refused without having been sent, it stays on screen, and the next change is saved.
+ * shown as refused without having been sent, it stays on screen, and a later edit whose fingerprint was not refused
+ * is saved as usual.
  */
 const fingerprint = (text: string): string => {
   let high = 0xdeadbeef;
