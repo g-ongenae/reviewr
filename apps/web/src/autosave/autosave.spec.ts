@@ -271,6 +271,43 @@ describe('createAutosave', () => {
     });
   });
 
+  describe('a permanent failure', () => {
+    it('stops sending for good, keeps the text and settles flushes as rejected', async () => {
+      start({ retryDelayMs: () => 1000 });
+      autosave.edit('Once upon');
+      const flushed = autosave.flush();
+      const error = new Error('404');
+      await server.current().answer({ kind: 'rejected', error });
+      await expect(flushed).resolves.toBe('rejected');
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'rejected',
+        error,
+        content: 'Once upon',
+        base: { content: 'Once', draftVersion: 1 },
+      });
+
+      // Neither the backoff, nor an edit, nor a flush sends anything again.
+      autosave.edit('Once upon a tide');
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(autosave.flush()).resolves.toBe('rejected');
+      expect(server.calls).toHaveLength(1);
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'rejected', content: 'Once upon a tide' });
+    });
+
+    it('also stops a retry in progress, and text typed during the request stays unsent', async () => {
+      start({ retryDelayMs: () => 1000 });
+      autosave.edit('Once upon');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().answer({ kind: 'failed', error: new Error('503') });
+      await vi.advanceTimersByTimeAsync(1000);
+      autosave.edit('Once upon a tide');
+      await server.current().answer({ kind: 'rejected', error: new Error('404') });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.calls).toHaveLength(2);
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'rejected', content: 'Once upon a tide' });
+    });
+  });
+
   describe('a failed write whose outcome is unknown', () => {
     // The server may have committed B as version 2 and the response was lost: a revert to A is not saved yet.
     const startOnA = () => start({ base: { content: 'A', draftVersion: 1 }, retryDelayMs: () => 1000 });

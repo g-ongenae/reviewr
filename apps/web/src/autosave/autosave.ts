@@ -18,7 +18,9 @@ export type SaveResult =
   /** The `draftVersion` sent was stale: someone else saved meanwhile. `server` is the server's current draft. */
   | { kind: 'conflict'; server: Draft }
   /** The request failed (network error, 5xx…). The text is kept and sent again later. */
-  | { kind: 'failed'; error: unknown };
+  | { kind: 'failed'; error: unknown }
+  /** The server refused the draft for good (the document was deleted…): a retry cannot help, so nothing more is sent. */
+  | { kind: 'rejected'; error: unknown };
 
 /**
  * Saves `content` as the draft, based on `draftVersion` (the version the content was written from). It is never
@@ -53,6 +55,7 @@ interface CommonState {
 /**
  * What the UI shows, in order of precedence:
  *
+ * - `rejected`: the server refused the draft for good. The text is kept, but nothing is ever sent again.
  * - `conflict`: the server's draft moved under the local text. Nothing is sent until `resolve` is called.
  * - `retrying`: the last request failed. The text is kept and sent again after a backoff (a retry may be in flight).
  *   It stays so even if the text is edited back to `base`: the failed write may have reached the server.
@@ -67,17 +70,18 @@ export type AutosaveState = CommonState &
     | { status: 'saving' }
     | { status: 'retrying'; error: unknown; attempt: number }
     | { status: 'conflict'; server: Draft }
+    | { status: 'rejected'; error: unknown }
   );
 
 /** How a `flush` ended. */
-export type FlushOutcome = 'saved' | 'failed' | 'conflict' | 'disposed';
+export type FlushOutcome = 'saved' | 'failed' | 'conflict' | 'rejected' | 'disposed';
 
 export interface Autosave {
   /** Records the latest text and schedules a save. Never throws. */
   edit(content: string): void;
   /**
    * Saves now, without waiting for the debounce. Settles when everything edited up to this call is saved, or when a
-   * request fails, hits a conflict, or the machine is disposed. Never rejects.
+   * request fails, hits a conflict or is rejected, or the machine is disposed. Never rejects.
    */
   flush(): Promise<FlushOutcome>;
   /**
@@ -105,6 +109,7 @@ const sameState = (a: AutosaveState, b: AutosaveState): boolean => {
   if (a.status !== b.status || a.content !== b.content || a.base !== b.base) return false;
   if (a.status === 'retrying' && b.status === 'retrying') return a.error === b.error && a.attempt === b.attempt;
   if (a.status === 'conflict' && b.status === 'conflict') return a.server === b.server;
+  if (a.status === 'rejected' && b.status === 'rejected') return a.error === b.error;
   return true;
 };
 
@@ -128,6 +133,8 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   let lastError: unknown;
   /** The server's draft while in conflict. */
   let server: Draft | undefined;
+  /** Set once the server refused the draft for good: the machine stops sending. */
+  let rejection: { error: unknown } | undefined;
   let disposed = false;
   const flushes: { seq: number; settle: (outcome: FlushOutcome) => void }[] = [];
   const listeners = new Set<() => void>();
@@ -137,6 +144,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
 
   const computeState = (): AutosaveState => {
     const common = { content, base };
+    if (rejection !== undefined) return { ...common, status: 'rejected', error: rejection.error };
     if (server !== undefined) return { ...common, status: 'conflict', server };
     if (failures > 0) return { ...common, status: 'retrying', error: lastError, attempt: failures };
     if (inFlight) return { ...common, status: 'saving' };
@@ -213,6 +221,10 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         settleFlushes('failed', true);
         schedule(retryDelayMs(failures));
         break;
+      case 'rejected':
+        rejection = { error: result.error };
+        settleFlushes('rejected', true);
+        break;
     }
     update();
   };
@@ -231,7 +243,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
 
   /** Sends the latest text now, unless a request is already in flight (it is sent after it) or in conflict. */
   const send = () => {
-    if (disposed || inFlight || server !== undefined) return;
+    if (disposed || inFlight || server !== undefined || rejection !== undefined) return;
     clearTimer();
     if (!needsSave()) {
       markClean();
@@ -248,7 +260,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       if (disposed || next === content) return;
       content = next;
       editSeq++;
-      if (server === undefined && !inFlight) {
+      if (server === undefined && rejection === undefined && !inFlight) {
         if (!needsSave()) {
           clearTimer();
           markClean();
@@ -262,6 +274,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
 
     flush() {
       if (disposed) return Promise.resolve('disposed');
+      if (rejection !== undefined) return Promise.resolve('rejected');
       if (server !== undefined) return Promise.resolve('conflict');
       if (!inFlight && !needsSave()) return Promise.resolve('saved');
       const done = new Promise<FlushOutcome>((settle) => flushes.push({ seq: editSeq, settle }));

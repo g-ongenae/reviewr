@@ -1,9 +1,11 @@
 import type { Document } from '@reviewr/shared';
-import { contentMaxLength, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
+import { contentMaxLength, describeError, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
-import { api, inlineError, isConflict, queryKeys } from '../api';
+import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
+import type { AutosaveState } from '../autosave/autosave';
+import { draftOf, useAutosave } from '../autosave/useAutosave';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
@@ -15,20 +17,39 @@ interface Props {
   toolbarStart?: ReactNode;
 }
 
-interface Draft {
-  /** As typed: empty when the document is untitled. */
-  title: string;
-  content: string;
-}
+/** What the toolbar says about the text: whether it is on the server, and whether it differs from the last version. */
+const statusText = (state: AutosaveState, revision: number, changedSinceVersion: boolean): string => {
+  switch (state.status) {
+    case 'unsaved':
+      return 'Unsaved changes';
+    case 'saving':
+      return 'Saving…';
+    case 'retrying':
+      return 'Not saved · retrying';
+    case 'conflict':
+      return 'Not saved · changed elsewhere';
+    case 'rejected':
+      return 'Not saved';
+    case 'saved':
+      return changedSinceVersion ? `Draft saved · changed since revision ${revision}` : `Saved · revision ${revision}`;
+  }
+};
 
 export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState<Draft>({ title: document.title ?? '', content: document.content });
+  const { autosave, state, discard } = useAutosave(document);
+  /** As typed: empty when the document is untitled. Not part of the draft: it is saved with the next version. */
+  const [title, setTitle] = useState(document.title ?? '');
+  const { content } = state;
   const [showHistory, setShowHistory] = useState(false);
   const [showStats, toggleStats] = useWritingStatsPanel();
   const todayBaseline = useTodayBaseline(document);
   const previousRevision = useLastRevisionBaseline(document);
-  const dirty = titleToSend(draft.title) !== titleToSend(document.title ?? '') || draft.content !== document.content;
+  const titleDirty = titleToSend(title) !== titleToSend(document.title ?? '');
+  /** Whether "Save version" has something to save. */
+  const changedSinceVersion = titleDirty || content !== document.content;
+  /** Text that leaving the page could lose, even though the autosave keeps trying in the background. */
+  const textAtRisk = state.status === 'retrying' || state.status === 'conflict' || state.status === 'rejected';
 
   const onSaved = async (saved: Document) => {
     queryClient.setQueryData(queryKeys.document(saved.id), saved);
@@ -38,19 +59,31 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     ]);
   };
 
+  /**
+   * Saves a version: the draft first, then the old `PUT`, which turns a draft equal to its content into a revision.
+   * When the draft cannot be saved, nothing more happens: the status says why.
+   */
   const save = useMutation({
-    mutationFn: (baseRevision: number) =>
-      api.updateDocument(document.id, { title: titleToSend(draft.title), content: draft.content, baseRevision }),
-    onSuccess: onSaved,
+    mutationFn: async (): Promise<Document | undefined> => {
+      if ((await autosave.flush()) !== 'saved') return undefined;
+      return api.updateDocument(document.id, {
+        title: titleToSend(title),
+        content: autosave.getSnapshot().base.content,
+        baseRevision: document.revision,
+      });
+    },
+    onSuccess: async (saved) => {
+      if (saved !== undefined) await onSaved(saved);
+    },
   });
 
-  /** After a conflict: keep the local draft and save it on top of the latest version. */
+  /** After a stale revision: save the text as a version on top of the latest one, which stays in the history. */
   const overwrite = useMutation({
     mutationFn: async () => {
       const latest = await api.getDocument(document.id);
       return api.updateDocument(document.id, {
-        title: titleToSend(draft.title),
-        content: draft.content,
+        title: titleToSend(title),
+        content: autosave.getSnapshot().base.content,
         baseRevision: latest.revision,
       });
     },
@@ -60,21 +93,51 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     },
   });
 
-  /** After a conflict: drop the local draft and load the latest version. */
+  /** After a stale revision: drop the local text and title, and load the latest version. */
   const reload = async () => {
     const latest = await queryClient.fetchQuery({
       queryKey: queryKeys.document(document.id),
       queryFn: () => api.getDocument(document.id),
       staleTime: 0,
     });
-    setDraft({ title: latest.title ?? '', content: latest.content });
+    setTitle(latest.title ?? '');
+    autosave.edit(latest.content);
     save.reset();
     await onSaved(latest);
+  };
+
+  /**
+   * After a draft conflict: keep the other device's draft in the history, as a version, then save the local text on
+   * top of it.
+   */
+  const keepMine = useMutation({
+    mutationFn: async () => {
+      const latest = await api.getDocument(document.id);
+      const theirs = draftOf(latest);
+      if (theirs.content !== latest.content) {
+        await onSaved(
+          await api.updateDocument(document.id, {
+            title: latest.title,
+            content: theirs.content,
+            baseRevision: latest.revision,
+          }),
+        );
+      }
+      return theirs;
+    },
+    onSuccess: (theirs) => autosave.resolve(autosave.getSnapshot().content, theirs.draftVersion),
+  });
+
+  /** After a draft conflict: drop the local text and take the other device's draft. */
+  const takeTheirs = () => {
+    const snapshot = autosave.getSnapshot();
+    if (snapshot.status === 'conflict') autosave.resolve(snapshot.server.content, snapshot.server.draftVersion);
   };
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
     onSuccess: async () => {
+      discard();
       setUnsavedChanges(false);
       queryClient.removeQueries({ queryKey: queryKeys.document(document.id) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
@@ -82,13 +145,12 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     },
   });
 
+  const canSave = changedSinceVersion && !save.isPending && state.status !== 'conflict' && state.status !== 'rejected';
   const saveNow = useEffectEvent(() => {
-    if (dirty && !save.isPending) {
-      save.mutate(document.revision);
-    }
+    if (canSave) save.mutate();
   });
 
-  // Ctrl/Cmd + S saves.
+  // Ctrl/Cmd + S saves a version.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
@@ -100,28 +162,37 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Warn before leaving the page or switching document with unsaved changes.
-  useEffect(() => {
-    setUnsavedChanges(dirty);
-    if (!dirty) {
-      return undefined;
-    }
-    const onBeforeUnload = (event: BeforeUnloadEvent) => event.preventDefault();
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [dirty]);
+  // Switching document keeps saving the text in the background: ask only when it is at risk, or for the title.
+  useEffect(() => setUnsavedChanges(titleDirty || textAtRisk), [titleDirty, textAtRisk]);
   useEffect(() => () => setUnsavedChanges(false), []);
 
-  // An unreachable server is reported by the notification; the draft stays here, ready to save again.
-  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error);
-  const status = save.isPending ? 'Saving…' : dirty ? 'Unsaved changes' : `Saved · revision ${document.revision}`;
+  // Closing the page may cut the request short: save at once, and warn until the server has the text.
+  const onBeforeUnload = useEffectEvent((event: BeforeUnloadEvent) => {
+    void autosave.flush();
+    if (titleDirty || autosave.getSnapshot().status !== 'saved') event.preventDefault();
+  });
+  useEffect(() => {
+    const listener = (event: BeforeUnloadEvent) => onBeforeUnload(event);
+    window.addEventListener('beforeunload', listener);
+    return () => window.removeEventListener('beforeunload', listener);
+  }, []);
+
+  // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
+  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error ?? keepMine.error);
+  const status = save.isPending ? 'Saving…' : statusText(state, document.revision, changedSinceVersion);
 
   return (
     <div className="editor-layout">
       <section className="editor">
         <div className="toolbar">
           {toolbarStart}
-          <span className={dirty ? 'status dirty' : 'status'}>{status}</span>
+          <span
+            className={state.status === 'saved' && !save.isPending ? 'status' : 'status dirty'}
+            role="status"
+            title={state.status === 'retrying' ? describeError(state.error) : undefined}
+          >
+            {status}
+          </span>
           <span className="spacer" />
           <WritingStatsToggle open={showStats} onToggle={toggleStats} />
           <button onClick={() => setShowHistory((value) => !value)}>{showHistory ? 'Hide history' : 'History'}</button>
@@ -132,29 +203,40 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           >
             Delete
           </button>
-          <button
-            className="primary"
-            disabled={!dirty || save.isPending}
-            onClick={() => save.mutate(document.revision)}
-            title="Ctrl+S"
-          >
-            Save
+          <button className="primary" disabled={!canSave} onClick={() => save.mutate()} title="Ctrl+S">
+            Save version
           </button>
         </div>
 
         {showStats && (
           <div className="writing-stats-anchor">
             <WritingStatsPanel
-              content={draft.content}
+              content={content}
               baseline={todayBaseline}
               lastRevision={{ content: document.content, previous: previousRevision }}
             />
           </div>
         )}
 
-        {isConflict(save.error) ? (
+        {state.status === 'rejected' ? (
+          <div className="banner error" role="alert">
+            <span>
+              {isNotFound(state.error)
+                ? 'This document was deleted elsewhere: your text is no longer saved. Copy it before leaving.'
+                : `Your text can no longer be saved (${describeError(state.error)}). Copy it before leaving.`}
+            </span>
+          </div>
+        ) : state.status === 'conflict' ? (
+          <div className="banner" role="alert">
+            <span>This text was also changed on another device.</span>
+            <button onClick={takeTheirs}>Discard mine, use the other text</button>
+            <button className="primary" disabled={keepMine.isPending} onClick={() => keepMine.mutate()}>
+              Keep mine, save the other as a version
+            </button>
+          </div>
+        ) : isConflict(save.error) ? (
           <div className="banner">
-            <span>This document was changed elsewhere since you opened it.</span>
+            <span>A newer version was saved elsewhere since you opened this document.</span>
             <button onClick={() => void reload()}>Discard my changes</button>
             <button className="primary" disabled={overwrite.isPending} onClick={() => overwrite.mutate()}>
               Keep my version
@@ -167,16 +249,16 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
         <input
           className="title-input"
           placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
-          value={draft.title}
+          value={title}
           maxLength={titleMaxLength}
-          onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+          onChange={(event) => setTitle(event.target.value)}
         />
         <textarea
           className="content-input"
           placeholder="Start writing…"
-          value={draft.content}
+          value={content}
           maxLength={contentMaxLength}
-          onChange={(event) => setDraft({ ...draft, content: event.target.value })}
+          onChange={(event) => autosave.edit(event.target.value)}
           autoFocus
         />
       </section>
@@ -184,7 +266,10 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
       {showHistory && (
         <RevisionHistory
           document={document}
-          onRestore={(revision) => setDraft({ title: revision.title ?? '', content: revision.content })}
+          onRestore={(revision) => {
+            setTitle(revision.title ?? '');
+            autosave.edit(revision.content);
+          }}
         />
       )}
     </div>
