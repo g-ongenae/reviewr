@@ -128,6 +128,9 @@ export interface CreateRevisionInput {
   name?: string | null;
   /** `draftVersion` of the draft to save. If the draft moved since, the API answers 409 `draft_conflict`. */
   draftVersion: number;
-  /** Head revision the draft is based on. If the head moved since, the API answers 409 `stale_revision`. */
+  /**
+   * Head revision the draft is based on. If the head moved since, the API answers 409 `stale_revision`,
+   * unless the draft already is the head: then there is nothing to save and the document is answered.
+   */
   baseRevision: number;
 }

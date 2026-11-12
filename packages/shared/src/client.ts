@@ -81,10 +81,13 @@ export class ReviewrClient {
   }
 
   /**
-   * Save the server's draft as a new version (revision) and answer the document. Answers the document
-   * unchanged when the draft already is the head. Rejects with a 409 `ApiError` (read it with `conflictOf`):
-   * `draft_conflict` if the draft moved since `draftVersion`, `stale_revision` if the head moved since
-   * `baseRevision`.
+   * Save the server's draft as a new version (revision) and answer the document. Rejects with a 409 `ApiError`
+   * (read it with `conflictOf`): `draft_conflict` if the draft moved since `draftVersion`; otherwise
+   * `stale_revision` if the head moved since `baseRevision`, unless the draft already is the head.
+   *
+   * A success means that the draft text of `draftVersion` is the head (`content`, `revision`). It does not mean
+   * that this call created the revision, nor that `name` was applied: when the draft already was the head,
+   * nothing is created and the name is ignored. Read the revision (`getRevision`, `listRevisions`) for its name.
    */
   public async createRevision(id: string, input: CreateRevisionInput): Promise<Document> {
     return this.request('POST', `${documentPath(id)}/revisions`, input);

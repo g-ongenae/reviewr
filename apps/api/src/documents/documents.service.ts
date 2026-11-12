@@ -249,7 +249,11 @@ export class DocumentsService {
    * creates no revision, and the `name` is ignored (naming an existing version is another endpoint). This
    * makes a retry after a lost response safe: the first call made the draft the head without bumping
    * `draftVersion`, so the retry passes the first check and stops here, although its `baseRevision` is now
-   * one behind. Last, 409 `stale_revision` if the head moved since `baseRevision`.
+   * one behind. (If the draft was saved again meanwhile, the retry gets `draft_conflict`; the version it
+   * asked for is in the history.) Last, 409 `stale_revision` if the head moved since `baseRevision`.
+   *
+   * So a success says that the draft text of `draftVersion` is the head, not that this call created the
+   * revision or applied its `name`.
    */
   public async createRevision(id: string, input: CreateRevisionDto): Promise<Document> {
     return this.db.transaction(async (tx) => {

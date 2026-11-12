@@ -134,6 +134,59 @@ describe('Revisions API', () => {
     expect((await listRevisions(doc.id)).map((rev) => rev.revision)).toEqual([2, 1]);
   });
 
+  it('keeps the first name when the same draft is saved twice under two names', async () => {
+    const doc = await create('v1');
+    await saveDraft(doc.id, 'v2', 1);
+
+    const first = await saveVersion(doc.id, { name: 'Premier', draftVersion: 2, baseRevision: 1 });
+    const second = await saveVersion(doc.id, { name: 'Second', draftVersion: 2, baseRevision: 1 });
+    expect(first.status).toBe(200);
+    // 200 says the draft text is the head, not that this call created the revision or applied its name.
+    expect(second).toEqual(first);
+    expect((await listRevisions(doc.id)).map(({ revision, name }) => ({ revision, name }))).toEqual([
+      { revision: 2, name: 'Premier' },
+      { revision: 1, name: null },
+    ]);
+  });
+
+  it('is a no-op after the old PUT kept the draft as a revision, which stays unnamed', async () => {
+    const doc = await create('A');
+    await saveDraft(doc.id, 'B', 1);
+
+    // A build that only knows revisions saves C on revision 1: the server keeps B as revision 2, then refuses.
+    const put = await call('PUT', `/documents/${doc.id}`, { title: 'Chapitre', content: 'C', baseRevision: 1 });
+    expect(put).toMatchObject({ status: 409, body: { code: 'stale_revision', revision: 2 } });
+
+    const { status, body } = await saveVersion(doc.id, { name: 'Relu', draftVersion: 2, baseRevision: 1 });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      revision: 2,
+      content: 'B',
+      draft: { content: 'B', draftVersion: 2, baseRevision: 2 },
+    });
+    expect((await listRevisions(doc.id)).map(({ revision, name }) => ({ revision, name }))).toEqual([
+      { revision: 2, name: null },
+      { revision: 1, name: null },
+    ]);
+  });
+
+  it('answers 409 draft_conflict to a retry sent after the draft was saved again, with the version kept', async () => {
+    const doc = await create('v1');
+    await saveDraft(doc.id, 'v2', 1);
+    const request = { name: null, draftVersion: 2, baseRevision: 1 };
+    expect((await saveVersion(doc.id, request)).status).toBe(200);
+    await saveDraft(doc.id, 'v3', 2);
+
+    const retry = await saveVersion(doc.id, request);
+    expect(retry).toMatchObject({
+      status: 409,
+      body: { code: 'draft_conflict', draft: { content: 'v3', draftVersion: 3, baseRevision: 2 } },
+    });
+    expect((await listRevisions(doc.id)).map((rev) => rev.revision)).toEqual([2, 1]);
+    const kept = (await call('GET', `/documents/${doc.id}/revisions/2`)).body as Revision;
+    expect(kept).toMatchObject({ content: 'v2', name: null });
+  });
+
   it('answers 409 draft_conflict with the server draft when the draft moved, and creates nothing', async () => {
     const doc = await create('v1');
     await saveDraft(doc.id, 'phone', 1);
