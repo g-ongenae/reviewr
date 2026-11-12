@@ -329,16 +329,37 @@ describe('createAutosave', () => {
       expect(status()).toBe('saved');
     });
 
-    it('lets a flush send text typed during the refused request', async () => {
+    it('goes on with a text corrected while the refused one was in flight, without a flush', async () => {
       start();
       autosave.edit('Once upon a very long tide');
       await vi.advanceTimersByTimeAsync(500);
       autosave.edit('Once upon a tide');
-      await server.current().answer({ kind: 'rejected', error: new Error('400'), permanent: false });
-      const flushed = autosave.flush();
+      await server.current().answer({ kind: 'rejected', error: new Error('413'), permanent: false });
+      await vi.advanceTimersByTimeAsync(5000);
       expect(server.calls.at(-1)).toEqual({ content: 'Once upon a tide', draftVersion: 1 });
       await server.current().answer({ kind: 'saved', draftVersion: 2 });
-      await expect(flushed).resolves.toBe('saved');
+      expect(status()).toBe('saved');
+    });
+
+    it('does not send the refused text again when an edit is undone before the debounce', async () => {
+      start();
+      autosave.edit('Once upon a very long tide');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().answer({ kind: 'rejected', error: new Error('413'), permanent: false });
+
+      for (let cycle = 0; cycle < 3; cycle++) {
+        autosave.edit('Once upon a tide');
+        await vi.advanceTimersByTimeAsync(100);
+        autosave.edit('Once upon a very long tide');
+        await vi.advanceTimersByTimeAsync(5000);
+      }
+      expect(server.calls).toHaveLength(1);
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'rejected', content: 'Once upon a very long tide' });
+
+      autosave.edit('Once upon a tide');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(server.calls.at(-1)).toEqual({ content: 'Once upon a tide', draftVersion: 1 });
+      await server.current().answer({ kind: 'saved', draftVersion: 2 });
     });
   });
 
@@ -378,7 +399,49 @@ describe('createAutosave', () => {
       expect(server.calls).toEqual([{ content: 'Once upon a tide', draftVersion: 2 }]);
     });
 
-    it('is ignored while a request is in flight or after a failure', async () => {
+    it('weighs a newer draft read during a request against its answer: another text is a conflict', async () => {
+      // A/v1; B is saved as v2 but its answer is slow; another device writes C/v3, which a refetch reads.
+      start({ base: { content: 'A', draftVersion: 1 } });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.refresh({ content: 'C', draftVersion: 3 });
+      expect(status()).toBe('saving');
+
+      await server.current().answer({ kind: 'saved', draftVersion: 2 });
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'conflict',
+        content: 'B',
+        base: { content: 'B', draftVersion: 2 },
+        server: { content: 'C', draftVersion: 3 },
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.calls).toHaveLength(1);
+    });
+
+    it('takes a newer draft read during a request when it holds the text sent, or forgets it when older', async () => {
+      start({ base: { content: 'A', draftVersion: 1 } });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.refresh({ content: 'B', draftVersion: 3 });
+      await server.current().answer({ kind: 'saved', draftVersion: 2 });
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'B',
+        base: { content: 'B', draftVersion: 3 },
+      });
+
+      autosave.edit('D');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.refresh({ content: 'Old', draftVersion: 3 });
+      await server.current().answer({ kind: 'saved', draftVersion: 4 });
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'D',
+        base: { content: 'D', draftVersion: 4 },
+      });
+    });
+
+    it('does not change the text while a request is in flight or after a failure', async () => {
       start({ retryDelayMs: () => 1000 });
       autosave.edit('Once upon');
       await vi.advanceTimersByTimeAsync(500);
@@ -386,6 +449,13 @@ describe('createAutosave', () => {
       await server.current().answer({ kind: 'failed', error: new Error('503') });
       autosave.refresh({ content: 'Other', draftVersion: 9 });
       expect(autosave.getSnapshot()).toMatchObject({ status: 'retrying', content: 'Once upon' });
+      // The retry's answer is weighed against it: the server moved on to another text.
+      await vi.advanceTimersByTimeAsync(1000);
+      await server.current().answer({ kind: 'saved', draftVersion: 2 });
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'conflict',
+        server: { content: 'Other', draftVersion: 9 },
+      });
     });
   });
 

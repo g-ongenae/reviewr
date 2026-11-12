@@ -120,10 +120,13 @@ let calls: Call[];
 let intercept: (call: Call) => Response | undefined;
 /** Requests matching `hold` wait until `releaseHeld`, then get the API's answer at that time. */
 let hold: (call: Call) => boolean;
+/** Requests matching `delay` are handled by the API at once, but their answer arrives only at `releaseHeld`. */
+let delay: (call: Call) => boolean;
 let held: (() => void)[];
 
 const releaseHeld = async () => {
   hold = () => false;
+  delay = () => false;
   for (const answer of held.splice(0)) answer();
   await elapse();
 };
@@ -184,6 +187,7 @@ beforeEach(() => {
   calls = [];
   intercept = () => undefined;
   hold = () => false;
+  delay = () => false;
   held = [];
   queryClient = createQueryClient();
   queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false, staleTime: Infinity } });
@@ -204,6 +208,10 @@ beforeEach(() => {
     calls.push(call);
     const answer = () => intercept(call) ?? fakeApi(call);
     if (hold(call)) return new Promise<Response>((resolve) => held.push(() => resolve(answer())));
+    if (delay(call)) {
+      const response = answer();
+      return new Promise<Response>((resolve) => held.push(() => resolve(response)));
+    }
     return Promise.resolve(answer());
   });
 });
@@ -491,6 +499,28 @@ describe('Editor autosave', () => {
     });
   });
 
+  it('shows a conflict, not "saved", when a draft read during a slow save is newer than its answer', async () => {
+    open();
+    delay = (call) => call.path === '/documents/doc-1/draft';
+    type('Written here.');
+    await elapse(1000);
+    expect(server().draft).toMatchObject({ content: 'Written here.', draftVersion: 4 });
+    // The answer is still on its way; another device writes, and a refetch reads it.
+    otherDraft('Written on the phone.');
+    await act(() => queryClient.invalidateQueries({ queryKey: queryKeys.document('doc-1') }));
+    await elapse();
+    expect(status()).toBe('Saving…');
+
+    await releaseHeld();
+    expect(textarea().value).toBe('Written here.');
+    expect(status()).toBe('Not saved · changed elsewhere');
+    expect(queryClient.getQueryData<Document>(queryKeys.document('doc-1'))?.draft).toMatchObject({
+      content: 'Written on the phone.',
+      draftVersion: 5,
+    });
+    expect(unload().defaultPrevented).toBe(true);
+  });
+
   describe('leaving inside the debounce window still saves', () => {
     it('when the tab is hidden', async () => {
       open();
@@ -510,6 +540,44 @@ describe('Editor autosave', () => {
       expect(draftSaves()).toHaveLength(1);
       await elapse();
       expect(unload().defaultPrevented).toBe(false);
+    });
+
+    it('saves a document left earlier on "pagehide", with no editor open', async () => {
+      open();
+      intercept = (call) => (call.path.endsWith('/draft') ? reply(503) : undefined);
+      type('Once upon a tide, the keeper slept.');
+      // An id that opens no editor: only the app's guard is left.
+      open('');
+      await elapse();
+      expect(screen.queryByPlaceholderText('Start writing…')).toBeNull();
+      expect(draftSaves()).toHaveLength(1);
+      // Closing warns, and its own flush fails too.
+      expect(unload().defaultPrevented).toBe(true);
+      await elapse();
+      expect(draftSaves()).toHaveLength(2);
+
+      intercept = () => undefined;
+      window.dispatchEvent(new Event('pagehide'));
+      await elapse();
+      expect(server().draft?.content).toBe('Once upon a tide, the keeper slept.');
+      expect(unload().defaultPrevented).toBe(false);
+    });
+
+    it("removes the guard's listeners when the app goes away", () => {
+      const added = [vi.spyOn(window, 'addEventListener'), vi.spyOn(window.document, 'addEventListener')];
+      const removed = [vi.spyOn(window, 'removeEventListener'), vi.spyOn(window.document, 'removeEventListener')];
+      open();
+      cleanup();
+      const listeners = (spies: typeof added) =>
+        spies
+          .flatMap((spy) => spy.mock.calls)
+          .filter(([type]) => ['pagehide', 'beforeunload', 'visibilitychange'].includes(type))
+          .map(([type, listener]) => [type, listener]);
+      expect(new Set(listeners(added).map(([type]) => type))).toEqual(
+        new Set(['pagehide', 'beforeunload', 'visibilitychange']),
+      );
+      expect(listeners(removed)).toEqual(expect.arrayContaining(listeners(added)));
+      for (const spy of [...added, ...removed]) spy.mockRestore();
     });
 
     it('warns on closing the page while a document left earlier is still unsaved', async () => {

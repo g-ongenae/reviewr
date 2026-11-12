@@ -59,10 +59,11 @@ export const cacheDraft = (queryClient: QueryClient, id: string, { content, draf
 /** A draft was just saved: it goes in the cache, and the document moves up the list, without a request. */
 const cacheSavedDraft = (queryClient: QueryClient, id: string, draft: DocumentDraft) => {
   const updatedAt = new Date().toISOString();
-  queryClient.setQueryData<Document>(
-    queryKeys.document(id),
-    (document) => document && { ...document, draft, updatedAt },
-  );
+  queryClient.setQueryData<Document>(queryKeys.document(id), (document) => {
+    // A slow answer must not move the cached draft back under a newer one read since.
+    if (document === undefined || (document.draft?.draftVersion ?? 0) > draft.draftVersion) return document;
+    return { ...document, draft, updatedAt };
+  });
   queryClient.setQueryData<DocumentSummary[]>(queryKeys.documents, (list) => {
     const summary = list?.find((item) => item.id === id);
     return summary === undefined ? list : [{ ...summary, updatedAt }, ...(list ?? []).filter((item) => item.id !== id)];

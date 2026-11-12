@@ -59,7 +59,8 @@ interface CommonState {
  * What the UI shows, in order of precedence:
  *
  * - `rejected`: the server refused the draft. The text is kept. Nothing is sent again if `permanent`; otherwise the
- *   next edit that changes the text leaves this state and is saved as usual.
+ *   refused text is never sent again, and a changed text (even one typed while the refused request was in flight) is
+ *   saved as usual.
  * - `conflict`: the server's draft moved under the local text. Nothing is sent until `resolve` is called. A server
  *   draft that is still the local text's `base` with a newer counter (a version save moved it) is no conflict: the
  *   local text is sent again on that counter.
@@ -98,9 +99,10 @@ export interface Autosave {
   resolve(content: string, confirmed: Draft): void;
   /**
    * Tells the machine about a draft the server confirmed elsewhere (a fresh read, a version save). Older than `base`,
-   * or while a request is in flight, a failure is unresolved, or in conflict or rejected: ignored. With the same text
-   * as `base` (only the counter moved): it becomes the base, and local edits are kept. Otherwise it replaces the text
-   * only when there are no local edits; local edits win, and their next save meets the conflict.
+   * or in conflict or rejected: ignored. While a request is in flight or a failure is unresolved: kept, and weighed
+   * against the next answer (a newer other text then is a conflict, never "saved"). With the same text as `base` (only
+   * the counter moved): it becomes the base, and local edits are kept. Otherwise it replaces the text only when there
+   * are no local edits; local edits win, and their next save meets the conflict.
    */
   refresh(confirmed: Draft): void;
   /** The current state; the same object until something changes, as `useSyncExternalStore` requires. */
@@ -147,8 +149,17 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   let lastError: unknown;
   /** The server's draft while in conflict. */
   let server: Draft | undefined;
-  /** Set when the server refused `content`: the machine does not send it again. */
-  let rejection: { error: unknown; permanent: boolean; content: string } | undefined;
+  /**
+   * The last text the server refused, kept after the writer moved on: it is never sent again (and nothing is, if
+   * `permanent`). `rejected` says whether the machine shows it, that is whether the local text is still that one.
+   */
+  let refusal: { error: unknown; permanent: boolean; content: string } | undefined;
+  let rejected = false;
+  /**
+   * The newest draft the server confirmed elsewhere while a request was in flight or its outcome unknown. It is
+   * reconciled with the next answer before the text is called saved.
+   */
+  let later: Draft | undefined;
   let disposed = false;
   const flushes: { seq: number; settle: (outcome: FlushOutcome) => void }[] = [];
   const listeners = new Set<() => void>();
@@ -158,8 +169,8 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
 
   const computeState = (): AutosaveState => {
     const common = { content, base };
-    if (rejection !== undefined) {
-      return { ...common, status: 'rejected', error: rejection.error, permanent: rejection.permanent };
+    if (rejected && refusal !== undefined) {
+      return { ...common, status: 'rejected', error: refusal.error, permanent: refusal.permanent };
     }
     if (server !== undefined) return { ...common, status: 'conflict', server };
     if (failures > 0) return { ...common, status: 'retrying', error: lastError, attempt: failures };
@@ -213,6 +224,22 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     settleFlushes('saved', false);
   };
 
+  /**
+   * Weighs `later` against the base the server has just confirmed. Older: forgotten. The same text, or the local text:
+   * it becomes the base. Another text: the other device wrote after this save, so it is a conflict. Returns whether so.
+   */
+  const supersededByLater = (): boolean => {
+    const confirmed = later;
+    later = undefined;
+    if (confirmed === undefined || confirmed.draftVersion <= base.draftVersion) return false;
+    if (confirmed.content === base.content || confirmed.content === content) {
+      base = confirmed;
+      return false;
+    }
+    server = confirmed;
+    return true;
+  };
+
   const settle = (sent: Draft, seq: number, result: SaveResult) => {
     switch (result.kind) {
       case 'saved':
@@ -220,25 +247,32 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         uncertain = false;
         failures = 0;
         lastError = undefined;
+        if (supersededByLater()) {
+          settleFlushes('conflict', true);
+          break;
+        }
         savedSeq = Math.max(savedSeq, seq);
         settleFlushes('saved', false);
         // Text typed during the request goes right away, based on the version it returned.
         send();
         return;
-      case 'conflict':
+      case 'conflict': {
         uncertain = false;
-        if (result.server.content === base.content && result.server.draftVersion > base.draftVersion) {
+        const newest = later !== undefined && later.draftVersion > result.server.draftVersion ? later : result.server;
+        later = undefined;
+        if (newest.content === base.content && newest.draftVersion > base.draftVersion) {
           // Only the counter moved: the server holds the text the local edits started from, so nothing of anyone's is
           // overwritten by sending them again on its version.
-          base = result.server;
+          base = newest;
           failures = 0;
           lastError = undefined;
           send();
           return;
         }
-        server = result.server;
+        server = newest;
         settleFlushes('conflict', true);
         break;
+      }
       case 'failed':
         failures++;
         uncertain = true;
@@ -247,7 +281,13 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         schedule(retryDelayMs(failures));
         break;
       case 'rejected':
-        rejection = { error: result.error, permanent: result.permanent, content: sent.content };
+        refusal = { error: result.error, permanent: result.permanent, content: sent.content };
+        if (!result.permanent && content !== sent.content) {
+          // The writer already changed the refused text: save what they have now.
+          send();
+          return;
+        }
+        rejected = true;
         settleFlushes('rejected', true);
         break;
     }
@@ -266,12 +306,21 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     settle(sent, seq, result);
   };
 
-  /** Sends the latest text now, unless a request is already in flight (it is sent after it) or in conflict. */
+  /**
+   * Sends the latest text now, unless a request is already in flight (it is sent after it), in conflict, or the text is
+   * one the server refused (the machine shows the refusal instead).
+   */
   const send = () => {
-    if (disposed || inFlight || server !== undefined || rejection !== undefined) return;
+    if (disposed || inFlight || server !== undefined || rejected) return;
     clearTimer();
     if (!needsSave()) {
       markClean();
+      update();
+      return;
+    }
+    if (refusal !== undefined && (refusal.permanent || refusal.content === content)) {
+      rejected = true;
+      settleFlushes('rejected', true);
       update();
       return;
     }
@@ -280,11 +329,14 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     update();
   };
 
-  /** Leaves a non-permanent rejection when the text is no longer the refused one. Returns whether still rejected. */
+  /**
+   * Leaves the rejected state when the text is no longer the refused one (the refusal itself is kept). Returns whether
+   * still rejected.
+   */
   const stillRejected = () => {
-    if (rejection === undefined) return false;
-    if (rejection.permanent || rejection.content === content) return true;
-    rejection = undefined;
+    if (!rejected || refusal === undefined) return false;
+    if (refusal.permanent || refusal.content === content) return true;
+    rejected = false;
     failures = 0;
     lastError = undefined;
     return false;
@@ -296,7 +348,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       content = next;
       editSeq++;
       stillRejected();
-      if (server === undefined && rejection === undefined && !inFlight) {
+      if (server === undefined && !rejected && !inFlight) {
         if (!needsSave()) {
           clearTimer();
           markClean();
@@ -331,8 +383,13 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     },
 
     refresh(confirmed) {
-      if (disposed || server !== undefined || rejection !== undefined || inFlight || uncertain) return;
+      if (disposed || server !== undefined || rejected) return;
       if (confirmed.draftVersion <= base.draftVersion) return;
+      if (inFlight || uncertain) {
+        // The answer to come may be older: weigh this one against it then.
+        if (later === undefined || confirmed.draftVersion > later.draftVersion) later = confirmed;
+        return;
+      }
       if (confirmed.content === base.content) {
         base = confirmed;
       } else if (content === base.content) {
