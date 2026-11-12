@@ -41,7 +41,17 @@
   font-size: 0.85rem;
 }
 
-/* Attribution never relies on colour alone: each side has its own underline, removals are struck through. */
+.reconcile-legend li {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.reconcile-legend span {
+  font-weight: 600;
+}
+
+/* Attribution never relies on colour alone: each side has its own line style (solid, dashed, double), used to
+   underline what it added and to strike through what it removed. */
 .reconcile ins {
   text-decoration-line: underline;
   text-decoration-thickness: 2px;
@@ -69,7 +79,24 @@
 
 .reconcile del {
   color: var(--muted);
+  text-decoration-line: line-through;
   text-decoration-thickness: 1px;
+}
+
+.reconcile .by-mine del {
+  text-decoration-style: solid;
+  text-decoration-color: var(--mine);
+  text-decoration-thickness: 2px;
+}
+
+.reconcile .by-theirs del {
+  text-decoration-style: dashed;
+  text-decoration-color: var(--theirs);
+  text-decoration-thickness: 2px;
+}
+
+.reconcile .by-both del {
+  text-decoration-style: double;
 }
 
 .reconcile-text {

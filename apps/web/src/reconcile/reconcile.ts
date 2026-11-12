@@ -161,6 +161,21 @@ export const isResolved = (entry: ConflictEntry): boolean => entry.resolution !=
 export const remaining = (state: Reconciliation): number =>
   state.conflicts.filter((entry) => !isResolved(entry)).length + state.orphans.length;
 
+/** Where the keyboard should go next: an unresolved conflict, an orphan to look at, or Confirm once it is enabled. */
+export type FocusTarget = { conflict: number } | { orphan: number } | 'confirm';
+
+/**
+ * The next thing that blocks the confirmation, searched after conflict `from` first, then from the start, so a
+ * conflict left behind (or marked "Changed again" by a refresh) is never skipped.
+ */
+export const nextFocus = (state: Reconciliation, from: number): FocusTarget => {
+  const open = state.conflicts.flatMap((entry, index) => (isResolved(entry) ? [] : [index]));
+  const conflict = open.find((index) => index > from) ?? open[0];
+  if (conflict !== undefined) return { conflict };
+  if (state.orphans.length > 0) return { orphan: 0 };
+  return 'confirm';
+};
+
 /** The reconciled text, or `undefined` while something remains to be resolved. */
 export const resolvedText = (state: Reconciliation): string | undefined => {
   if (remaining(state) > 0) return undefined;

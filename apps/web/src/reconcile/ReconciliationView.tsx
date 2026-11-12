@@ -6,6 +6,7 @@ import {
   handWritten,
   isResolved,
   keepEarlierChoice,
+  nextFocus,
   recompute,
   remaining,
   resolutionText,
@@ -13,6 +14,7 @@ import {
   resolvedText,
   toParagraphs,
   type ConflictEntry,
+  type FocusTarget,
   type Reconciliation,
 } from './reconcile';
 import './reconcile.css';
@@ -72,13 +74,24 @@ export const ReconciliationView = ({
     focusTarget.current = null;
   });
 
+  /** Applies a change of state and sends the focus to what blocks the confirmation next. */
+  const advance = (next: Reconciliation, from: number) => {
+    setState(next);
+    const target: FocusTarget = nextFocus(next, from);
+    focusTarget.current =
+      target === 'confirm'
+        ? '.reconcile-confirm'
+        : 'conflict' in target
+          ? `[data-conflict="${target.conflict}"] h3`
+          : `[data-orphan="${target.orphan}"] textarea`;
+  };
+
   const choose = (index: number, resolution: ConflictResolution) => {
     const next = resolveConflict(state, index, resolution);
-    setState(next);
     if (resolution === 'mine' || resolution === 'theirs') {
-      const after = next.conflicts.findIndex((entry, i) => i > index && !isResolved(entry));
-      focusTarget.current = after === -1 ? '.reconcile-confirm' : `[data-conflict="${after}"] h3`;
+      advance(next, index);
     } else {
+      setState(next);
       focusTarget.current = `[data-conflict="${index}"] textarea`;
     }
   };
@@ -92,18 +105,17 @@ export const ReconciliationView = ({
           confirm.
         </p>
         <ul className="reconcile-legend" aria-label="Legend">
-          <li className="by-mine">
-            <ins>{labels.mine}</ins>
-          </li>
-          <li className="by-theirs">
-            <ins>{labels.theirs}</ins>
-          </li>
-          <li className="by-both">
-            <ins>Both</ins>
-          </li>
-          <li>
-            <del>Removed</del>
-          </li>
+          {[
+            { side: 'by-mine', label: labels.mine },
+            { side: 'by-theirs', label: labels.theirs },
+            { side: 'by-both', label: 'Both' },
+          ].map(({ side, label }) => (
+            <li key={side} className={side}>
+              <span>{label}</span>
+              <ins>added</ins>
+              <del>removed</del>
+            </li>
+          ))}
         </ul>
       </header>
 
@@ -115,13 +127,18 @@ export const ReconciliationView = ({
       )}
 
       {state.orphans.map((orphan, index) => (
-        <section key={index} className="reconcile-orphan" aria-label="Hand-written text without a place">
+        <section
+          key={index}
+          className="reconcile-orphan"
+          data-orphan={index}
+          aria-label="Hand-written text without a place"
+        >
           <p>
             You wrote this by hand for a passage that has changed again and no longer exists as such. Copy what you need
             into a passage below, then dismiss it.
           </p>
           <textarea readOnly value={orphan} aria-label="Your earlier hand-written text" rows={3} />
-          <button type="button" onClick={() => setState(dismissOrphan(state, index))}>
+          <button type="button" onClick={() => advance(dismissOrphan(state, index), -1)}>
             Dismiss
           </button>
         </section>
@@ -155,7 +172,7 @@ export const ReconciliationView = ({
                   labels={labels}
                   onChoose={(resolution) => choose(index, resolution)}
                   onEdit={(edit) => setState(resolveConflict(state, index, { edit }))}
-                  onKeepEarlier={() => setState(keepEarlierChoice(state, index))}
+                  onKeepEarlier={() => advance(keepEarlierChoice(state, index), index)}
                 />
               );
             })}

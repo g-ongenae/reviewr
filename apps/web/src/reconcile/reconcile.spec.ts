@@ -1,9 +1,11 @@
+import { resolveMerge, type MergeResult } from '@reviewr/merge';
 import { describe, expect, it } from 'vitest';
-import { base, mine, theirs } from './fixtures';
+import { base, closing, merged, middle, mine, opening, theirs } from './fixtures';
 import {
   createReconciliation,
   dismissOrphan,
   keepEarlierChoice,
+  nextFocus,
   recompute,
   remaining,
   resolveConflict,
@@ -14,6 +16,20 @@ import {
 
 const resolveAll = (state: Reconciliation, ...choices: Parameters<typeof resolveConflict>[2][]): Reconciliation =>
   choices.reduce((next, choice, index) => resolveConflict(next, index, choice), state);
+
+/** Rebuilds the text from the paragraph runs, taking this device's side of every conflict. */
+const rebuild = (merge: MergeResult): string => {
+  const conflicts = merge.parts.flatMap((part) => (part.kind === 'conflict' ? [part] : []));
+  return toParagraphs(merge)
+    .map((runs) =>
+      runs
+        .map((run) =>
+          run.kind === 'text' ? run.text : run.kind === 'change' ? run.part.text : conflicts[run.index]?.mine,
+        )
+        .join(''),
+    )
+    .join('\n');
+};
 
 describe('reconciliation state', () => {
   it('applies changes that do not overlap and has nothing to resolve', () => {
@@ -52,14 +68,44 @@ describe('reconciliation state', () => {
     const state = createReconciliation(base, mine, theirs);
 
     expect(resolvedText(resolveAll(state, 'mine', 'mine', 'mine'))).toBe(
-      // Mine everywhere, plus the other device's changes that did not overlap.
-      mine.replace('Le phare', 'Le vieux phare').replace('une lettre', 'une enveloppe'),
+      merged(opening('la gardienne montait'), middle('l’ardoise '), closing('')),
     );
-    const text = resolvedText(resolveAll(state, 'theirs', 'both', { edit: ', effacée' }));
-    expect(text).toContain('Chaque soir, Marthe gravissait les cent');
     // Keep both joins the texts exactly as written: no separator is invented.
-    expect(text).toContain('entre l’ardoise le vert et le bleu');
-    expect(text).toContain('L’écriture était fine, effacée.');
+    expect(resolvedText(resolveAll(state, 'theirs', 'both', { edit: ', effacée' }))).toBe(
+      merged(opening('Marthe gravissait'), middle('l’ardoise le vert '), closing(', effacée')),
+    );
+  });
+
+  it('accepts an empty hand edit, which removes the passage', () => {
+    const state = resolveAll(createReconciliation(base, mine, theirs), { edit: '' }, 'theirs', { edit: '' });
+
+    expect(remaining(state)).toBe(0);
+    expect(resolvedText(state)).toBe(merged(opening(''), middle('le vert '), closing('')));
+  });
+
+  it('resolves a conflict made only of spaces', () => {
+    const state = createReconciliation('Il dit oui.', 'Il dit  oui.', 'Il dit\toui.');
+
+    expect(state.conflicts.map((entry) => [entry.part.mine, entry.part.theirs])).toEqual([['  ', '\t']]);
+    expect(resolvedText(resolveAll(state, 'both'))).toBe('Il dit  \toui.');
+    expect(resolvedText(resolveAll(state, 'theirs'))).toBe('Il dit\toui.');
+  });
+
+  it('keeps line breaks inside changes and conflicts', () => {
+    const clean = createReconciliation('Un.\nDeux.', 'Un.\nDeux.\n\nTrois.', 'Un, puis.\nDeux.');
+    expect(resolvedText(clean)).toBe('Un, puis.\nDeux.\n\nTrois.');
+
+    const state = createReconciliation(
+      'Elle dort.\nIl lit.',
+      'Elle dort.\n\nIl lit. Fin.',
+      'Elle dort. Il lit.\n\nNouveau.',
+    );
+    expect(state.conflicts.map((entry) => [entry.part.mine, entry.part.theirs])).toEqual([
+      ['\n\n', ' '],
+      [' Fin.', '\n\nNouveau.'],
+    ]);
+    expect(resolvedText(resolveAll(state, 'mine', 'both'))).toBe('Elle dort.\n\nIl lit. Fin.\n\nNouveau.');
+    expect(rebuild(state.merge)).toBe('Elle dort.\n\nIl lit. Fin.');
   });
 
   it('keeps a hand edit when the writer switches to another choice', () => {
@@ -93,7 +139,7 @@ describe('reconciliation state', () => {
     state = resolveConflict(state, 2, 'mine');
     expect(remaining(state)).toBe(1);
     state = keepEarlierChoice(state, 1);
-    expect(resolvedText(state)).toContain('entre le bleu-gris et le bleu');
+    expect(resolvedText(state)).toBe(merged(opening('la gardienne montait'), middle('le bleu-gris '), closing('')));
   });
 
   it('never drops a hand edit whose conflict disappeared: it waits until the writer dismisses it', () => {
@@ -114,7 +160,60 @@ describe('reconciliation state', () => {
     expect(resolvedText(state)).toBeUndefined();
 
     state = dismissOrphan(state, 0);
-    expect(resolvedText(state)).toContain('la gardienne montait');
+    expect(resolvedText(state)).toBe(
+      merged(opening('la gardienne montait'), middle('l’ardoise '), closing(', presque effacée par les embruns')),
+    );
+  });
+
+  it('keeps a later hand edit when an earlier conflict disappears and its index changes', () => {
+    let state = resolveConflict(createReconciliation(base, mine, theirs), 1, { edit: 'le bleu-gris ' });
+    state = resolveConflict(state, 2, 'theirs');
+    state = recompute(state, base, mine, theirs.replace('Marthe gravissait', 'Marthe montait'));
+
+    expect(state.conflicts.map((entry) => entry.resolution)).toEqual([{ edit: 'le bleu-gris ' }, 'theirs']);
+    expect(state.conflicts.some((entry) => entry.recheck)).toBe(false);
+    expect(state.orphans).toEqual([]);
+    expect(state.lostChoices).toBe(0);
+    expect(resolvedText(state)).toBe(
+      merged(opening('la gardienne montait'), middle('le bleu-gris '), closing(', presque effacée par les embruns')),
+    );
+  });
+
+  describe('when one conflict splits in two, or two merge into one', () => {
+    const chatBase = 'Le chat dort sur la table.';
+    const chatMine = 'Le chien dort sur la chaise.';
+    const oneConflict = 'Le lion rêve.';
+    const twoConflicts = 'Le lion dort sur la nappe.';
+
+    it('turns the hand edit of a conflict that split into an orphan that blocks the confirmation', () => {
+      let state = resolveConflict(createReconciliation(chatBase, chatMine, oneConflict), 0, { edit: 'renard court' });
+      state = recompute(state, chatBase, chatMine, twoConflicts);
+
+      expect(state.conflicts).toHaveLength(2);
+      expect(state.orphans).toEqual(['renard court']);
+      state = resolveAll(state, 'mine', 'theirs');
+      expect(remaining(state)).toBe(1);
+      expect(resolvedText(state)).toBeUndefined();
+      expect(resolvedText(dismissOrphan(state, 0))).toBe('Le chien dort sur la nappe.');
+    });
+
+    it('turns the hand edits of conflicts that merged into orphans, in order', () => {
+      let state = resolveAll(
+        createReconciliation(chatBase, chatMine, twoConflicts),
+        { edit: 'renard' },
+        {
+          edit: 'nappe bleue',
+        },
+      );
+      state = recompute(state, chatBase, chatMine, oneConflict);
+
+      expect(state.conflicts).toHaveLength(1);
+      expect(state.conflicts[0]?.resolution).toBeUndefined();
+      expect(state.orphans).toEqual(['renard', 'nappe bleue']);
+      state = resolveConflict(state, 0, 'theirs');
+      expect(resolvedText(state)).toBeUndefined();
+      expect(resolvedText(dismissOrphan(dismissOrphan(state, 1), 0))).toBe('Le lion rêve.');
+    });
   });
 
   it('turns hand edits into orphans when the base itself changed', () => {
@@ -125,11 +224,42 @@ describe('reconciliation state', () => {
     expect(state.conflicts.every((entry) => entry.resolution === undefined)).toBe(true);
   });
 
-  it('splits the merged text into lines, keeping the conflicts in place', () => {
-    const lines = toParagraphs(createReconciliation(base, mine, theirs).merge);
+  it('splits the merged text into lines that give the text back, conflicts in place', () => {
+    const paragraphs = toParagraphs(createReconciliation(base, mine, theirs).merge);
+    expect(paragraphs.map((runs) => runs.filter((run) => run.kind === 'conflict').length)).toEqual([1, 0, 1, 0, 1]);
 
-    expect(lines).toHaveLength(5);
-    expect(lines[1]).toEqual([]);
-    expect(lines.map((runs) => runs.filter((run) => run.kind === 'conflict').length)).toEqual([1, 0, 1, 0, 1]);
+    const merge = createReconciliation(base, mine, theirs).merge;
+    expect(rebuild(merge)).toBe(resolveMerge(merge, ['mine', 'mine', 'mine']));
+  });
+
+  it('gives the text back exactly from its lines, with CRLF, tabs, blank lines and trailing spaces', () => {
+    const awkward = 'Titre  \r\n\r\n\tUn retrait.\nDeux  \n\n\n Fin.\t\n';
+    const edited = 'Titre  \r\n\r\n\tUn retrait, modifié.\nDeux  \n\n\n Fin.\t\nAjout.\n';
+    expect(rebuild(createReconciliation(awkward, edited, awkward).merge)).toBe(edited);
+
+    const state = createReconciliation(awkward, edited, awkward.replace('Deux', 'Trois'));
+    const expected = 'Titre  \r\n\r\n\tUn retrait, modifié.\nTrois  \n\n\n Fin.\t\nAjout.\n';
+    expect(state.conflicts).toHaveLength(0);
+    expect(rebuild(state.merge)).toBe(expected);
+    expect(resolvedText(state)).toBe(expected);
+  });
+
+  it('sends the focus after the current conflict first, then back to earlier ones, then to orphans and Confirm', () => {
+    let state = createReconciliation(base, mine, theirs);
+    expect(nextFocus(state, 0)).toEqual({ conflict: 1 });
+
+    state = resolveConflict(resolveConflict(state, 1, 'mine'), 2, 'mine');
+    expect(nextFocus(state, 2)).toEqual({ conflict: 0 });
+
+    state = resolveConflict(state, 0, { edit: 'la gardienne grimpait' });
+    expect(nextFocus(state, 0)).toBe('confirm');
+
+    state = recompute(state, base, mine, theirs.replace('Marthe gravissait', 'Marthe grimpait'));
+    expect(state.conflicts[0]?.recheck).toBe(true);
+    expect(nextFocus(state, 2)).toEqual({ conflict: 0 });
+
+    state = recompute(state, base, mine, theirs.replace('Marthe gravissait', 'Marthe montait'));
+    expect(state.orphans).toEqual(['la gardienne grimpait']);
+    expect(nextFocus(state, 1)).toEqual({ orphan: 0 });
   });
 });
