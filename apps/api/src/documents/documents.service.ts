@@ -9,7 +9,7 @@ import type {
 } from '@reviewr/shared';
 import { and, desc, eq } from 'drizzle-orm';
 import { databaseToken, type Database } from '../database/database.js';
-import { DocumentRow, documents, revisions } from '../database/schema.js';
+import { DocumentRow, documents, RevisionRow, revisions } from '../database/schema.js';
 import {
   DocumentSummaryRow,
   RevisionSummaryRow,
@@ -20,6 +20,7 @@ import {
   toRevisionSummary,
 } from './documents.mapper.js';
 import { CreateDocumentDto } from './dto/create-document.dto.js';
+import { CreateRevisionDto } from './dto/create-revision.dto.js';
 import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
@@ -60,13 +61,14 @@ type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /**
  * Make `title` and `content` the new head revision of a locked document, and the draft equal to it.
- * `draftVersion` is bumped only if the draft text changes.
+ * `draftVersion` is bumped only if the draft text changes. `name` labels the revision (unnamed if omitted).
  */
 const appendRevision = async (
   tx: Transaction,
   current: DocumentRow,
   title: DocumentRow['title'],
   content: string,
+  name?: RevisionRow['name'],
 ): Promise<DocumentRow> => {
   const now: Date = new Date();
   const [row] = await tx
@@ -88,6 +90,7 @@ const appendRevision = async (
     revision: updated.revision,
     title: updated.title,
     content: updated.content,
+    name,
     createdAt: now,
   });
 
@@ -237,6 +240,41 @@ export class DocumentsService {
   }
 
   /**
+   * Save the draft of a document as a new version: a revision holding the draft text, the document's
+   * current title and `name`. The head becomes that revision and the draft is based on it.
+   *
+   * The checks run in this order, under the row lock. First, 409 `draft_conflict` (with the server's draft)
+   * if the draft moved since `draftVersion`: the client sends no text, so it must never be told "saved" for a
+   * text it has not seen. Then a no-op if the draft text already is the head: it answers the document and
+   * creates no revision, and the `name` is ignored (naming an existing version is another endpoint). This
+   * makes a retry after a lost response safe: the first call made the draft the head without bumping
+   * `draftVersion`, so the retry passes the first check and stops here, although its `baseRevision` is now
+   * one behind. Last, 409 `stale_revision` if the head moved since `baseRevision`.
+   */
+  public async createRevision(id: string, input: CreateRevisionDto): Promise<Document> {
+    return this.db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
+      const current: DocumentRow = assertFound(locked, id);
+
+      if (current.draftVersion !== input.draftVersion) {
+        throw conflict({
+          code: 'draft_conflict',
+          message: `Draft was modified elsewhere: it is at version ${current.draftVersion}, the version is based on draft version ${input.draftVersion}`,
+          draft: toDocumentDraft(current),
+        });
+      }
+      if (current.draftContent === current.content) {
+        return toDocument(current);
+      }
+      if (current.revision !== input.baseRevision) {
+        throw conflict(staleRevision(current.revision, input.baseRevision));
+      }
+
+      return toDocument(await appendRevision(tx, current, current.title, current.draftContent, input.name));
+    });
+  }
+
+  /**
    * Delete a document and its whole history.
    */
   public async delete(id: string): Promise<void> {
@@ -257,6 +295,7 @@ export class DocumentsService {
         documentId: revisions.documentId,
         revision: revisions.revision,
         title: revisions.title,
+        name: revisions.name,
         createdAt: revisions.createdAt,
       })
       .from(revisions)

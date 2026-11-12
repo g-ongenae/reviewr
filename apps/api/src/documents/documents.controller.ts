@@ -14,6 +14,7 @@ import {
 import type { Document, DocumentDraft, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import { DocumentsService } from './documents.service.js';
 import { CreateDocumentDto } from './dto/create-document.dto.js';
+import { CreateRevisionDto } from './dto/create-revision.dto.js';
 import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
@@ -82,6 +83,19 @@ export class DocumentsController {
   @Get(':id/revisions')
   public async listRevisions(@Param('id', ParseUUIDPipe) id: string): Promise<RevisionSummary[]> {
     return this.documentsService.listRevisions(id);
+  }
+
+  /**
+   * POST /documents/:id/revisions: save the draft as a version. Answers 200 with the document, whether a
+   * revision was created or the draft already was the head, so a retry gets the same answer as the first call.
+   */
+  @Post(':id/revisions')
+  @HttpCode(HttpStatus.OK)
+  public async createRevision(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: CreateRevisionDto,
+  ): Promise<Document> {
+    return this.documentsService.createRevision(id, body);
   }
 
   /**

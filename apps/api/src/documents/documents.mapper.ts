@@ -5,7 +5,7 @@ import type { DocumentRow, RevisionRow } from '../database/schema.js';
 export type DocumentSummaryRow = Pick<DocumentRow, 'id' | 'title' | 'revision' | 'createdAt' | 'updatedAt'>;
 
 /** Columns of a revision row read to list revisions. */
-export type RevisionSummaryRow = Pick<RevisionRow, 'documentId' | 'revision' | 'title' | 'createdAt'>;
+export type RevisionSummaryRow = Pick<RevisionRow, 'documentId' | 'revision' | 'title' | 'name' | 'createdAt'>;
 
 /**
  * Convert a database row to its API summary representation.
@@ -43,6 +43,7 @@ export const toRevisionSummary = (row: RevisionSummaryRow): RevisionSummary => (
   documentId: row.documentId,
   revision: row.revision,
   title: row.title,
+  name: row.name,
   createdAt: row.createdAt.toISOString(),
 });
 

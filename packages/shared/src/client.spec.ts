@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api-error.js';
 import { ReviewrClient } from './client.js';
 import { conflictOf } from './errors.js';
-import type { ConflictBody, DocumentDraft, DraftConflictBody } from './types.js';
+import type { ConflictBody, CreateRevisionInput, Document, DocumentDraft, DraftConflictBody } from './types.js';
 
 const jsonResponse = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -40,6 +40,29 @@ describe('ReviewrClient.saveDraft', () => {
     if (conflict?.code === 'draft_conflict') {
       expect(conflict.draft).toEqual(serverDraft);
     }
+  });
+});
+
+describe('ReviewrClient.createRevision', () => {
+  it('sends the version to POST /documents/:id/revisions and returns the document', async () => {
+    const document: Document = {
+      id: 'a/b',
+      title: 'Chapitre',
+      revision: 2,
+      content: 'phone',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+      draft: { content: 'phone', draftVersion: 3, baseRevision: 2 },
+    };
+    const fetchFn = vi.fn(async () => jsonResponse(200, document));
+    const client: ReviewrClient = new ReviewrClient('http://api.test/', fetchFn);
+    const input: CreateRevisionInput = { name: 'Relu', draftVersion: 3, baseRevision: 1 };
+
+    await expect(client.createRevision('a/b', input)).resolves.toEqual(document);
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents/a%2Fb/revisions',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(input) }),
+    );
   });
 });
 

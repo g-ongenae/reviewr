@@ -1,6 +1,7 @@
 import type {
   ApiErrorBody,
   CreateDocumentInput,
+  CreateRevisionInput,
   Document,
   DocumentDraft,
   DocumentSummary,
@@ -77,6 +78,16 @@ export class ReviewrClient {
    */
   public async saveDraft(id: string, input: SaveDraftInput): Promise<DocumentDraft> {
     return this.request('PUT', `${documentPath(id)}/draft`, input);
+  }
+
+  /**
+   * Save the server's draft as a new version (revision) and answer the document. Answers the document
+   * unchanged when the draft already is the head. Rejects with a 409 `ApiError` (read it with `conflictOf`):
+   * `draft_conflict` if the draft moved since `draftVersion`, `stale_revision` if the head moved since
+   * `baseRevision`.
+   */
+  public async createRevision(id: string, input: CreateRevisionInput): Promise<Document> {
+    return this.request('POST', `${documentPath(id)}/revisions`, input);
   }
 
   /**

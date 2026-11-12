@@ -19,6 +19,7 @@ const yesterdayVersion: Revision = {
   documentId: 'doc-1',
   revision: 1,
   title: 'The lighthouse keeper',
+  name: null,
   content: 'Once upon a tide, the keeper slept.',
   createdAt: lastWeek,
 };
@@ -31,8 +32,8 @@ const savedToday: Document = {
   updatedAt: now,
 };
 const revisions: RevisionSummary[] = [
-  { documentId: 'doc-1', revision: 2, title: savedToday.title, createdAt: now },
-  { documentId: 'doc-1', revision: 1, title: savedToday.title, createdAt: lastWeek },
+  { documentId: 'doc-1', revision: 2, title: savedToday.title, name: null, createdAt: now },
+  { documentId: 'doc-1', revision: 1, title: savedToday.title, name: null, createdAt: lastWeek },
 ];
 
 const renderWithQueries = (ui: ReactNode) => {
@@ -85,6 +86,7 @@ describe('WritingStatsPanel', () => {
       documentId: 'doc-1',
       revision: 2,
       title: savedToday.title,
+      name: null,
       content: 'Once upon a tide. The keeper slept.',
       createdAt: now,
     };

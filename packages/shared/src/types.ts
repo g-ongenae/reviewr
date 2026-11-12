@@ -30,6 +30,8 @@ export interface RevisionSummary {
   documentId: string;
   revision: number;
   title: string | null;
+  /** Version label given when the version was saved, separate from the title; null when unnamed. */
+  name: string | null;
   createdAt: string;
 }
 
@@ -117,3 +119,15 @@ export interface StaleRevisionBody extends ApiErrorBody {
  * Structured body of a 409 Conflict, discriminated by `code`.
  */
 export type ConflictBody = DraftConflictBody | StaleRevisionBody;
+
+/**
+ * Payload of `POST /documents/:id/revisions`: save the server's draft as a new version.
+ */
+export interface CreateRevisionInput {
+  /** Version label; trimmed, and a blank one is stored as null. Ignored when the draft already is the head. */
+  name?: string | null;
+  /** `draftVersion` of the draft to save. If the draft moved since, the API answers 409 `draft_conflict`. */
+  draftVersion: number;
+  /** Head revision the draft is based on. If the head moved since, the API answers 409 `stale_revision`. */
+  baseRevision: number;
+}
