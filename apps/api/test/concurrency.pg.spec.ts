@@ -114,11 +114,12 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
     // On failure the holder may still be in its transaction: destroy the connection rather than return it to
     // the pool, which rolls back, lets the waiting call finish and keeps the lock out of the next test.
     let failure: Error | undefined;
+    let pending: Promise<Outcome<T>> | undefined;
     try {
       await holder.query('BEGIN');
       await holder.query('SELECT 1 FROM documents WHERE id = $1 FOR UPDATE', [id]);
       let settled: boolean = false;
-      const pending: Promise<Outcome<T>> = settle(call()).finally(() => {
+      pending = settle(call()).finally(() => {
         settled = true;
       });
       await waitForBlocked(1);
@@ -134,6 +135,11 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
       throw error;
     } finally {
       holder.release(failure);
+      if (failure !== undefined) {
+        // Let the call that was waiting finish before the next test, and keep a late rejection from it out of
+        // the run's unhandled errors: the failure reported is the one above.
+        await pending?.catch(() => undefined);
+      }
     }
   };
 
@@ -282,6 +288,8 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
       }
     });
 
+    // An idempotency test, not a lock test: without the lock the calls would write the same row and give the
+    // same answers. The lock of saveDraft is covered by the race above and by the deterministic test.
     it('the same saveDraft sent concurrently is saved once and answered as saved every time', async () => {
       for (let round: number = 0; round < rounds; round += 1) {
         const doc = await create('v1');
@@ -290,7 +298,12 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
         );
 
         expect(results).toEqual(Array(racers).fill({ content: 'v2', draftVersion: 2, baseRevision: 1 }));
-        await checkInvariants(doc.id, ['v2'], []);
+        expect((await service.get(doc.id)).draft).toEqual({ content: 'v2', draftVersion: 2, baseRevision: 1 });
+        await checkInvariants(
+          doc.id,
+          ['v2'],
+          results.map((r) => ({ revision: 1, draftVersion: r.draftVersion })),
+        );
       }
     });
 
