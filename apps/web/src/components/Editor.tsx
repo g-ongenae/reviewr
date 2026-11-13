@@ -184,7 +184,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           <span
             className={state.status === 'saved' && !save.isPending ? 'status' : 'status dirty'}
             role="status"
-            title={state.status === 'retrying' ? describeError(state.error) : undefined}
+            title={state.status === 'retrying' ? describeError(state.error) : status}
           >
             {status}
           </span>
