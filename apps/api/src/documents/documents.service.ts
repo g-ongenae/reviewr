@@ -21,6 +21,8 @@ import {
 } from './documents.mapper.js';
 import { CreateDocumentDto } from './dto/create-document.dto.js';
 import { CreateRevisionDto } from './dto/create-revision.dto.js';
+import { NameRevisionDto } from './dto/name-revision.dto.js';
+import { RenameDocumentDto } from './dto/rename-document.dto.js';
 import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
@@ -277,6 +279,64 @@ export class DocumentsService {
 
       return toDocument(await appendRevision(tx, current, current.title, current.draftContent, input.name));
     });
+  }
+
+  /**
+   * Rename a document. Creates no revision and leaves the content, the draft and `draftVersion` alone: the
+   * title is a label, not text, so the last rename wins. The revisions already saved keep the title they were
+   * saved with (they are snapshots). The next version saved from the draft (`POST /documents/:id/revisions`,
+   * or a draft kept as a revision by the old `PUT`) takes the new title. A rename moves `updatedAt`, like an
+   * autosave, so the list shows it first; sending the title already stored changes nothing.
+   *
+   * Known limit: `PUT /documents/:id` always carries a title and applies it, as before. So an app that loaded
+   * the document before a rename puts the old title back with its next save: the server cannot tell that
+   * title from one the writer chose. This ends for an app once it renames through this endpoint and stops
+   * sending a cached title; builds already installed keep the limit.
+   */
+  public async rename(id: string, input: RenameDocumentDto): Promise<Document> {
+    return this.db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
+      const current: DocumentRow = assertFound(locked, id);
+      if (current.title === input.title) {
+        return toDocument(current);
+      }
+
+      const [row] = await tx
+        .update(documents)
+        .set({ title: input.title, updatedAt: new Date() })
+        .where(eq(documents.id, id))
+        .returning();
+
+      return toDocument(assertFound(row, id));
+    });
+  }
+
+  /**
+   * Set or clear the label of a saved version. Its content and title are immutable and stay as they are, and
+   * the document (including `updatedAt`) is not touched. The last label sent wins.
+   */
+  public async nameRevision(
+    documentId: string,
+    revisionNumber: number,
+    input: NameRevisionDto,
+  ): Promise<RevisionSummary> {
+    const [row] = await this.db
+      .update(revisions)
+      .set({ name: input.name })
+      .where(and(eq(revisions.documentId, documentId), eq(revisions.revision, revisionNumber)))
+      .returning({
+        documentId: revisions.documentId,
+        revision: revisions.revision,
+        title: revisions.title,
+        name: revisions.name,
+        createdAt: revisions.createdAt,
+      });
+    if (row === undefined) {
+      await this.get(documentId);
+      throw new NotFoundException(`Revision ${revisionNumber} of document ${documentId} not found`);
+    }
+
+    return toRevisionSummary(row);
   }
 
   /**

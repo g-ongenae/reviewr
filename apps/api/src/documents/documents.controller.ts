@@ -8,6 +8,7 @@ import {
   Param,
   ParseIntPipe,
   ParseUUIDPipe,
+  Patch,
   Post,
   Put,
 } from '@nestjs/common';
@@ -15,6 +16,8 @@ import type { Document, DocumentDraft, DocumentSummary, Revision, RevisionSummar
 import { DocumentsService } from './documents.service.js';
 import { CreateDocumentDto } from './dto/create-document.dto.js';
 import { CreateRevisionDto } from './dto/create-revision.dto.js';
+import { NameRevisionDto } from './dto/name-revision.dto.js';
+import { RenameDocumentDto } from './dto/rename-document.dto.js';
 import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
@@ -58,6 +61,14 @@ export class DocumentsController {
   @Put(':id')
   public async update(@Param('id', ParseUUIDPipe) id: string, @Body() body: UpdateDocumentDto): Promise<Document> {
     return this.documentsService.update(id, body);
+  }
+
+  /**
+   * PATCH /documents/:id: rename the document, without creating a revision.
+   */
+  @Patch(':id')
+  public async rename(@Param('id', ParseUUIDPipe) id: string, @Body() body: RenameDocumentDto): Promise<Document> {
+    return this.documentsService.rename(id, body);
   }
 
   /**
@@ -107,5 +118,17 @@ export class DocumentsController {
     @Param('revision', ParseIntPipe) revisionNumber: number,
   ): Promise<Revision> {
     return this.documentsService.getRevision(id, revisionNumber);
+  }
+
+  /**
+   * PATCH /documents/:id/revisions/:revision: set or clear the label of a saved version.
+   */
+  @Patch(':id/revisions/:revision')
+  public async nameRevision(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('revision', ParseIntPipe) revisionNumber: number,
+    @Body() body: NameRevisionDto,
+  ): Promise<RevisionSummary> {
+    return this.documentsService.nameRevision(id, revisionNumber, body);
   }
 }

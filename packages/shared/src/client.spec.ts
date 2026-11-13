@@ -2,7 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api-error.js';
 import { ReviewrClient } from './client.js';
 import { conflictOf } from './errors.js';
-import type { ConflictBody, CreateRevisionInput, Document, DocumentDraft, DraftConflictBody } from './types.js';
+import type {
+  ConflictBody,
+  CreateRevisionInput,
+  Document,
+  DocumentDraft,
+  DraftConflictBody,
+  RevisionSummary,
+} from './types.js';
 
 const jsonResponse = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -63,6 +70,68 @@ describe('ReviewrClient.createRevision', () => {
       'http://api.test/documents/a%2Fb/revisions',
       expect.objectContaining({ method: 'POST', body: JSON.stringify(input) }),
     );
+  });
+});
+
+describe('ReviewrClient.renameDocument', () => {
+  it('sends the title to PATCH /documents/:id and returns the document', async () => {
+    const document: Document = {
+      id: 'a/b',
+      title: 'Chapitre 2',
+      revision: 1,
+      content: 'texte',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+    };
+    const fetchFn = vi.fn(async () => jsonResponse(200, document));
+    const client: ReviewrClient = new ReviewrClient('http://api.test/', fetchFn);
+
+    await expect(client.renameDocument('a/b', 'Chapitre 2')).resolves.toEqual(document);
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents/a%2Fb',
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ title: 'Chapitre 2' }) }),
+    );
+  });
+
+  it('sends null to remove the title', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(200, {}));
+    // eslint-disable-next-line no-null/no-null -- null makes the document untitled
+    await new ReviewrClient('http://api.test', fetchFn).renameDocument('id', null);
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents/id',
+      expect.objectContaining({ body: '{"title":null}' }),
+    );
+  });
+});
+
+describe('ReviewrClient.nameRevision', () => {
+  it('sends the label to PATCH /documents/:id/revisions/:revision and returns the summary', async () => {
+    const summary: RevisionSummary = {
+      documentId: 'a/b',
+      revision: 3,
+      title: 'Chapitre',
+      name: 'Relu',
+      createdAt: '2026-11-01T00:00:00.000Z',
+    };
+    const fetchFn = vi.fn(async () => jsonResponse(200, summary));
+    const client: ReviewrClient = new ReviewrClient('http://api.test/', fetchFn);
+
+    await expect(client.nameRevision('a/b', 3, 'Relu')).resolves.toEqual(summary);
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents/a%2Fb/revisions/3',
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ name: 'Relu' }) }),
+    );
+  });
+
+  it('rejects with the status of an unknown revision', async () => {
+    const client: ReviewrClient = new ReviewrClient(
+      'http://api.test',
+      vi.fn(async () => jsonResponse(404, { statusCode: 404, message: 'Revision 9 of document id not found' })),
+    );
+
+    // eslint-disable-next-line no-null/no-null -- null clears the label
+    await expect(client.nameRevision('id', 9, null)).rejects.toMatchObject({ status: 404 });
   });
 });
 

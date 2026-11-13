@@ -5,6 +5,8 @@ import type {
   Document,
   DocumentDraft,
   DocumentSummary,
+  NameRevisionInput,
+  RenameDocumentInput,
   Revision,
   RevisionSummary,
   SaveDraftInput,
@@ -91,6 +93,24 @@ export class ReviewrClient {
    */
   public async createRevision(id: string, input: CreateRevisionInput): Promise<Document> {
     return this.request('POST', `${documentPath(id)}/revisions`, input);
+  }
+
+  /**
+   * Rename a document (null or blank: untitled). Creates no revision and leaves the content and the draft alone.
+   */
+  public async renameDocument(id: string, title: string | null): Promise<Document> {
+    const input: RenameDocumentInput = { title };
+
+    return this.request('PATCH', documentPath(id), input);
+  }
+
+  /**
+   * Set the label of a saved version, or clear it with null or a blank name. Answers the revision's summary.
+   */
+  public async nameRevision(documentId: string, revision: number, name: string | null): Promise<RevisionSummary> {
+    const input: NameRevisionInput = { name };
+
+    return this.request('PATCH', `${documentPath(documentId)}/revisions/${revision}`, input);
   }
 
   /**
