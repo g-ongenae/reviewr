@@ -190,8 +190,39 @@ button.danger {
 }
 
 .status {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 0.9rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.toolbar-action {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.toolbar-action.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Narrow editor (phones, or a desktop squeezed by the history panel): icons only. */
+@container editor (max-width: 560px) {
+  .toolbar {
+    gap: 0.35rem;
+  }
+
+  .toolbar-action {
+    padding: 0.45rem;
+  }
+
+  .toolbar-label {
+    display: none;
+  }
 }
 
 .status.dirty {
@@ -475,6 +506,26 @@ button.danger {
 @media (max-width: 640px) {
   .layout {
     grid-template-columns: 1fr;
+  }
+
+  .editor {
+    padding: 1rem;
+  }
+
+  /* No room for a side panel: history docks under the editor instead. */
+  .editor-layout {
+    flex-direction: column;
+  }
+
+  .editor {
+    min-height: 0;
+  }
+
+  .history {
+    width: auto;
+    max-height: 45%;
+    border-left: 0;
+    border-top: 1px solid var(--border);
   }
 
   .layout:not(.sidebar-collapsed) .content {
