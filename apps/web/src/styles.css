@@ -232,6 +232,7 @@ button.danger {
 
 .banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   margin-top: 0.75rem;
@@ -240,8 +241,9 @@ button.danger {
   background: var(--warning-bg);
 }
 
+/* A long message keeps its width: the actions go under it when they no longer fit beside it. */
 .banner span {
-  flex: 1;
+  flex: 1 1 16rem;
 }
 
 .title-input,

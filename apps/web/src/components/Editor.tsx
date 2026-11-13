@@ -1,13 +1,13 @@
 import type { Document } from '@reviewr/shared';
 import { contentMaxLength, describeError, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
-import { useIsMutating, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
 import { draftOf, useAutosave } from '../autosave/useAutosave';
-import { keepSides } from '../reconcile/keepSides';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
+import { sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
@@ -38,11 +38,19 @@ const statusText = (state: AutosaveState, revision: number, changedSinceVersion:
   }
 };
 
-/** The server's draft moved again while a reconciliation was being saved. */
-class MovedAgain extends Error {}
-
-/** Documents whose reconciled text is being saved: one confirmation at a time, whichever editor started it. */
-const confirming = new Set<string>();
+/** What happened to a merged text that was not applied. */
+const stopText = (stop: Stop): string => {
+  switch (stop.reason) {
+    case 'moved':
+      return 'The other device changed the text again, so your merged text was not applied.';
+    case 'failed': {
+      const error = inlineError(stop.error);
+      return `The merge could not be finished${error ? ` (${error})` : ''}.`;
+    }
+    case 'changed':
+      return 'Your text changed while the merge was being saved, so the merged text was not applied.';
+  }
+};
 
 export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
@@ -119,44 +127,31 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
 
   /** Whether the reconciliation view is open, in place of the text, while the draft is in conflict. */
   const [reconciling, setReconciling] = useState(false);
+  // Once the conflict is resolved, the next one starts with the banner again.
+  if (reconciling && state.status !== 'conflict') setReconciling(false);
 
   /**
-   * Saves a reconciled text: every text it replaces is kept in the history first (see `keepSides`), then the machine
-   * saves it on the draft the server confirmed last. When the server moved meanwhile, the conflict moves to its new
-   * draft, which the view shows, and the result is not applied. While it runs, the text cannot be changed (see `busy`);
-   * should it change anyway, the result is not applied either.
+   * The reconciliation of this document's conflict. It outlives the editor: a confirmation keeps running after the
+   * writer leaves, and its result and how it stopped are shown again when they come back.
    */
-  const reconcileKey = ['documents', document.id, 'reconcile'];
-  const reconcile = useMutation({
-    mutationKey: reconcileKey,
-    mutationFn: async (result: string) => {
-      const snapshot = autosave.getSnapshot();
-      if (snapshot.status !== 'conflict' || confirming.has(document.id)) return;
-      confirming.add(document.id);
-      let outcome;
-      try {
-        outcome = await keepSides(
-          document.id,
-          { mine: snapshot.content, theirs: snapshot.server.content, result },
-          new Date(),
-        );
-      } finally {
-        confirming.delete(document.id);
-      }
-      const current = autosave.getSnapshot();
-      const unchanged = current.status === 'conflict' && current.content === snapshot.content;
-      if (outcome.kind === 'kept' && unchanged) autosave.resolve(result, outcome.confirmed);
-      // The machine takes a moved draft from the cache, as from any read: the view then shows it.
-      queryClient.setQueryData(queryKeys.document(document.id), outcome.document);
-      if (outcome.kind === 'moved') throw new MovedAgain();
-      if (!unchanged) throw new Error('the text changed while the merge was being saved');
-      setReconciling(false);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.revisions(document.id) }),
-      ]);
+  const session = sessionFor({
+    id: document.id,
+    autosave,
+    api,
+    isConflict,
+    onDocument: (saved) => {
+      // The machine takes the draft from the cache, as from any read: after a stop, the view shows the newest text.
+      queryClient.setQueryData(queryKeys.document(saved.id), saved);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });
     },
   });
+  const sessionState = useSyncExternalStore(
+    useCallback((listener: () => void) => session.subscribe(listener), [session]),
+    useCallback(() => session.getSnapshot(), [session]),
+  );
+  /** A merged text is being saved: the texts cannot change until it ends. */
+  const busy = sessionState.running;
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
@@ -194,9 +189,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
   const actionError = inlineError(save.error ?? remove.error ?? overwrite.error);
-  const reconcileError = inlineError(reconcile.error);
-  /** A reconciled text is being saved, by this editor or by one that showed this document before. */
-  const busy = useIsMutating({ mutationKey: reconcileKey }) > 0;
+  const { result: pendingResult, stop } = sessionState;
   /** The view replaces the text only while there is a conflict: once it is resolved, the text comes back. */
   const showReconciliation = reconciling && state.status === 'conflict';
   const historyLabel = showHistory ? 'Hide history' : 'History';
@@ -269,26 +262,32 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
             </span>
           </div>
         ) : state.status === 'conflict' ? (
-          !showReconciliation ? (
-            <div className="banner" role="alert">
-              <span>This text was also changed on another device.</span>
-              <button className="primary" disabled={busy} onClick={() => setReconciling(true)}>
-                {busy ? 'Saving the merged text…' : 'Compare and merge'}
-              </button>
-            </div>
-          ) : busy ? (
+          busy ? (
             <div className="banner" role="status">
               <span>Saving the merged text…</span>
             </div>
+          ) : stop !== undefined && pendingResult !== undefined ? (
+            <div className={stop.reason === 'failed' ? 'banner error' : 'banner'} role="alert">
+              <span>
+                {stopText(stop)}{' '}
+                {showReconciliation
+                  ? 'It is kept below: retry it, or copy what you need and dismiss it.'
+                  : 'It is kept: open the comparison to retry it or copy it.'}{' '}
+                Your text is intact. Some versions may already have been kept in the history.
+              </span>
+              {!showReconciliation && (
+                <button className="primary" onClick={() => setReconciling(true)}>
+                  Compare and merge
+                </button>
+              )}
+            </div>
           ) : (
-            reconcile.isError && (
-              <div className={reconcile.error instanceof MovedAgain ? 'banner' : 'banner error'} role="alert">
-                <span>
-                  {reconcile.error instanceof MovedAgain
-                    ? 'The other device changed the text again, so the merge could not be finished: check the text below, then confirm again.'
-                    : `The merge could not be finished${reconcileError ? ` (${reconcileError})` : ''}. Confirm again to retry.`}{' '}
-                  Your text on screen is intact. Some versions may already have been kept in the history.
-                </span>
+            !showReconciliation && (
+              <div className="banner" role="alert">
+                <span>This text was also changed on another device.</span>
+                <button className="primary" onClick={() => setReconciling(true)}>
+                  Compare and merge
+                </button>
               </div>
             )
           )
@@ -313,13 +312,17 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
               mineLabel="This device"
               theirsLabel="Other device"
               busy={busy}
-              onConfirm={(result) => {
-                if (!busy) reconcile.mutate(result);
-              }}
-              onCancel={() => {
-                reconcile.reset();
-                setReconciling(false);
-              }}
+              previous={
+                pendingResult === undefined || busy
+                  ? undefined
+                  : {
+                      text: pendingResult,
+                      onRetry: () => void session.confirm(pendingResult),
+                      onDismiss: () => session.dismissResult(),
+                    }
+              }
+              onConfirm={(result) => void session.confirm(result)}
+              onCancel={() => setReconciling(false)}
             />
           </div>
         ) : (

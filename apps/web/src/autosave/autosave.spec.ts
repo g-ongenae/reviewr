@@ -609,7 +609,7 @@ describe('createAutosave', () => {
     const startOnA = () => start({ base: { content: 'A', draftVersion: 1 }, retryDelayMs: () => 1000 });
     const theirs: Draft = { content: 'B', draftVersion: 2 };
 
-    it('still sends a revert typed during the request, and the stale version gets a conflict', async () => {
+    it('still sends a revert typed during the request; a 409 holding the lost write makes it the base', async () => {
       startOnA();
       autosave.edit('B');
       await vi.advanceTimersByTimeAsync(500);
@@ -620,8 +620,28 @@ describe('createAutosave', () => {
       await vi.advanceTimersByTimeAsync(1000);
       expect(server.calls.at(-1)).toEqual({ content: 'A', draftVersion: 1 });
       expect(status()).toBe('retrying');
+      // The server did commit B: it is this machine's own text, not another device's, so the revert is sent on it.
       await server.current().answer({ kind: 'conflict', server: theirs });
-      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'A', server: theirs });
+      expect(server.calls.at(-1)).toEqual({ content: 'A', draftVersion: 2 });
+      expect(status()).toBe('saving');
+      await server.current().answer({ kind: 'saved', draftVersion: 3 });
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'A',
+        base: { content: 'A', draftVersion: 3 },
+      });
+    });
+
+    it('is a conflict when the 409 holds another text than the lost write', async () => {
+      startOnA();
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      autosave.edit('A');
+      await server.current().reject(new TypeError('Failed to fetch'));
+      await vi.advanceTimersByTimeAsync(1000);
+      const other: Draft = { content: 'C', draftVersion: 2 };
+      await server.current().answer({ kind: 'conflict', server: other });
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'A', server: other });
     });
 
     it('does not report a revert typed after the failure as saved, and flush sends it', async () => {
@@ -638,9 +658,13 @@ describe('createAutosave', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(outcome).toBeUndefined();
 
+      // B landed: the revert is sent on it, and the flush waits for that answer.
       await server.current().answer({ kind: 'conflict', server: theirs });
-      expect(outcome).toBe('conflict');
-      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'A' });
+      expect(outcome).toBeUndefined();
+      expect(server.calls.at(-1)).toEqual({ content: 'A', draftVersion: 2 });
+      await server.current().answer({ kind: 'saved', draftVersion: 3 });
+      expect(outcome).toBe('saved');
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'saved', content: 'A' });
     });
 
     it('is saved once the revert is confirmed, when the failed write had not landed', async () => {

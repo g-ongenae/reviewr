@@ -293,6 +293,12 @@
   margin: 0;
 }
 
+.reconcile-previous-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-self: flex-end;
+}
+
 .reconcile-footer {
   position: sticky;
   bottom: 0;

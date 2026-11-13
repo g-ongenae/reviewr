@@ -328,13 +328,14 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         advance('now');
         return;
       case 'conflict':
-        // The text sent did not land: the server holds `result.server`, or a newer draft read meanwhile.
+        // The text sent did not land: the server holds `result.server`, or a newer draft read meanwhile. That draft may
+        // be a text of this machine whose answer was lost (`unknownText`): then it is the base, not a conflict.
         uncertain = false;
-        unknownText = undefined;
         failures = 0;
         lastError = undefined;
         keep(result.server);
         reconcile(sent.content);
+        unknownText = undefined;
         advance('now');
         return;
       case 'failed':

@@ -34,6 +34,11 @@ export interface ReconciliationViewProps {
   onCancel: () => void;
   /** The confirmed text is being saved: every choice, hand edit, Cancel and Confirm are frozen until it ends. */
   busy?: boolean;
+  /**
+   * A merged text confirmed earlier and not applied: shown read-only until the writer retries it or dismisses it, and
+   * a new text cannot be confirmed before.
+   */
+  previous?: { text: string; onRetry: () => void; onDismiss: () => void };
 }
 
 interface Labels {
@@ -57,6 +62,7 @@ export const ReconciliationView = ({
   onConfirm,
   onCancel,
   busy = false,
+  previous,
 }: ReconciliationViewProps) => {
   const [state, setState] = useState<Reconciliation>(() => createReconciliation(base, mine, theirs));
   // Derived from props: a new `theirs` merges again during render, keeping what the writer did (see `recompute`).
@@ -129,6 +135,24 @@ export const ReconciliationView = ({
         </p>
       )}
 
+      {previous !== undefined && (
+        <section className="reconcile-orphan reconcile-previous" aria-label="Your merged text, not applied">
+          <p>
+            Your merged text was not applied. Retry it as it is, or copy what you need into the text below, then dismiss
+            it.
+          </p>
+          <textarea readOnly value={previous.text} aria-label="Your merged text" rows={4} />
+          <div className="reconcile-previous-actions">
+            <button type="button" onClick={previous.onDismiss}>
+              Dismiss
+            </button>
+            <button type="button" className="primary" onClick={previous.onRetry}>
+              Retry with this text
+            </button>
+          </div>
+        </section>
+      )}
+
       {state.orphans.map((orphan, index) => (
         <section
           key={index}
@@ -186,11 +210,13 @@ export const ReconciliationView = ({
 
       <footer className="reconcile-footer">
         <span className="reconcile-remaining" role="status">
-          {left === 0
-            ? 'Everything is resolved.'
-            : left === 1
-              ? '1 conflict left to resolve'
-              : `${left} conflicts left to resolve`}
+          {previous !== undefined
+            ? 'Retry or dismiss your merged text first.'
+            : left === 0
+              ? 'Everything is resolved.'
+              : left === 1
+                ? '1 conflict left to resolve'
+                : `${left} conflicts left to resolve`}
         </span>
         <span className="spacer" />
         <button type="button" disabled={busy} onClick={onCancel}>
@@ -199,7 +225,7 @@ export const ReconciliationView = ({
         <button
           type="button"
           className="primary reconcile-confirm"
-          disabled={busy || text === undefined}
+          disabled={busy || text === undefined || previous !== undefined}
           onClick={() => text !== undefined && onConfirm(text)}
         >
           {busy ? 'Saving…' : 'Confirm'}

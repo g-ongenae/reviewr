@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys, reachability } from '../api';
 import { useAutosaveGuard } from '../autosave/useAutosave';
 import { createQueryClient } from '../queryClient';
-import { versionName } from '../reconcile/keepSides';
+import { versionName } from '../reconcile/session';
 import { DocumentView } from './DocumentView';
 
 const fetchMock = vi.mocked(fetch);
@@ -352,6 +352,15 @@ describe('Editor autosave', () => {
       fireEvent.click(within(view()).getByRole('button', { name: 'Confirm' }));
       await elapse();
     };
+    /** The merged text of a stopped confirmation is shown until the writer retries it or dismisses it. */
+    const retry = async () => {
+      fireEvent.click(within(view()).getByRole('button', { name: 'Retry with this text' }));
+      await elapse();
+    };
+    const dismissPrevious = () => {
+      const previous = view().querySelector('.reconcile-previous');
+      if (previous !== null) fireEvent.click(within(previous as HTMLElement).getByRole('button', { name: 'Dismiss' }));
+    };
     const requests = () => calls.map(({ method, path }) => `${method} ${path.replace('/documents/doc-1', '')}`);
     const kept = () => revisions.map(({ name, content }) => [name, content]);
 
@@ -488,6 +497,7 @@ describe('Editor autosave', () => {
         expect(serverTexts()).toContain(theirs);
         if (screen.queryByRole('button', { name: 'Compare and merge' }) !== null) compare();
         expect(view().querySelector('.reconcile-text')?.textContent).toContain('Added by Other device: chante');
+        dismissPrevious();
 
         for (const button of within(view()).getAllByRole('button', { name: 'Keep Other device' })) {
           fireEvent.click(button);
@@ -549,9 +559,10 @@ describe('Editor autosave', () => {
         open('doc-1');
         await elapse();
         expect(textarea()).toHaveProperty('readOnly', true);
-        expect(screen.getByRole('button', { name: 'Saving the merged text…' })).toHaveProperty('disabled', true);
+        expect(screen.getByText('Saving the merged text…')).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'Compare and merge' })).toBeNull();
 
-        // Should the text change anyway, the result is not applied over it.
+        // Should the text change anyway, the result is not applied over it, and stays recoverable.
         type('Le gardien rêve encore.');
         await releaseHeld();
         await elapse(5000);
@@ -560,7 +571,68 @@ describe('Editor autosave', () => {
         expect(server().draft?.content).toBe(mine);
         expect(kept().map(([, content]) => content)).toEqual([theirs, mine]);
         expect(requests().filter((request) => request === 'POST /revisions')).toHaveLength(2);
+        expect(screen.getByRole('alert').textContent).toContain('Your text changed while the merge was being saved');
+        compare();
+        expect(within(view()).getByRole('textbox', { name: 'Your merged text' })).toHaveProperty(
+          'value',
+          'Le gardien rêve et veille. La mer monte.',
+        );
       });
+
+      it.each([
+        {
+          stop: 'fails',
+          banner: 'The merge could not be finished',
+          act: () => {
+            intercept = (call) => (call.method === 'POST' ? reply(503) : undefined);
+          },
+        },
+        {
+          stop: 'meets a new text',
+          banner: 'The other device changed the text again',
+          act: () => otherDraft('Le gardien chante. La mer monte.'),
+        },
+      ])('keeps a confirmed hand edit when the confirmation $stop after the writer left', async ({ banner, act }) => {
+        const merged = 'Le gardien rêve et veille. La mer monte.';
+        await start();
+        open('doc-2');
+        await elapse();
+        open('doc-1');
+        await elapse();
+        act();
+        await releaseHeld();
+        intercept = () => undefined;
+
+        // The editor shown now did not start the confirmation: it still says what happened, and the text is kept.
+        expect(screen.getByRole('alert').textContent).toContain(banner);
+        expect(screen.getByRole('alert').textContent).toContain('It is kept');
+        expect(serverTexts()).toContain(theirs);
+        compare();
+        expect(within(view()).getByRole('textbox', { name: 'Your merged text' })).toHaveProperty('value', merged);
+        expect(within(view()).getByRole('button', { name: 'Confirm' })).toHaveProperty('disabled', true);
+
+        await retry();
+        expect(server().draft?.content).toBe(merged);
+        expect(textarea().value).toBe(merged);
+        expect(serverTexts()).toEqual(expect.arrayContaining([theirs, mine]));
+        expect(status()).toBe('Draft saved · changed since revision ' + server().revision);
+      });
+    });
+
+    it('keeps the other device’s text when that device wrote exactly the local text before the confirmation', async () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      compare();
+      handEdit('rêve et veille');
+      otherDraft(mine);
+      await confirm();
+
+      expect(kept()).toEqual([
+        [local, mine],
+        [other, theirs],
+      ]);
+      expect(server().draft?.content).toBe('Le gardien rêve et veille. La mer monte.');
+      expect(status()).toBe('Draft saved · changed since revision 4');
     });
 
     it('a hand edit keeps both texts, the other device’s first', async () => {
@@ -613,7 +685,7 @@ describe('Editor autosave', () => {
 
       intercept = () => undefined;
       calls = [];
-      await confirm();
+      await retry();
       expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft']);
       expect(kept()).toEqual([
         [other, theirs],
@@ -639,7 +711,7 @@ describe('Editor autosave', () => {
       expect(screen.getByRole('alert').textContent).toContain('The merge could not be finished');
 
       calls = [];
-      await confirm();
+      await retry();
       expect(requests()).toEqual(['GET ', 'PUT /draft', 'POST /revisions', 'PUT /draft']);
       expect(kept()).toEqual([
         [other, theirs],
@@ -660,13 +732,24 @@ describe('Editor autosave', () => {
       };
       await confirm();
 
-      expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft', 'GET ']);
+      // The new text is kept before the local text is written over it, then given back as the draft.
+      expect(requests()).toEqual([
+        'GET ',
+        'POST /revisions',
+        'PUT /draft',
+        'GET ',
+        'POST /revisions',
+        'PUT /draft',
+        'POST /revisions',
+        'PUT /draft',
+      ]);
       expect(screen.getByRole('alert').textContent).toContain('The other device changed the text again');
       expect(view().querySelector('.reconcile-text')?.textContent).toContain('Added by Other device: chante');
       expect(status()).toBe('Not saved · changed elsewhere');
       expect(server().draft?.content).toBe('Le gardien chante. La mer monte.');
 
       calls = [];
+      dismissPrevious();
       await confirm();
       expect(kept()).toEqual([
         [other, theirs],
