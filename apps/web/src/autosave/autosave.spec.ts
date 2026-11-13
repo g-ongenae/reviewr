@@ -503,6 +503,38 @@ describe('createAutosave', () => {
       expect(server.calls).toEqual([]);
     });
 
+    it('in conflict, moves the conflict to a newer draft from another device, not to one holding the local text', async () => {
+      start();
+      autosave.edit('Once upon a tide');
+      autosave.refresh({ content: 'Once upon a time', draftVersion: 4 });
+      autosave.refresh({ content: 'Older', draftVersion: 3 });
+      autosave.refresh({ content: 'Twice upon a time', draftVersion: 5 });
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'conflict',
+        content: 'Once upon a tide',
+        server: { content: 'Twice upon a time', draftVersion: 5 },
+      });
+
+      // The local text saved by a reconciliation still under way: the conflict stays on the other device's text.
+      autosave.refresh({ content: 'Once upon a tide', draftVersion: 6 });
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'conflict',
+        content: 'Once upon a tide',
+        server: { content: 'Twice upon a time', draftVersion: 5 },
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(server.calls).toEqual([]);
+
+      // Resolved on an older draft than that one: the local text it holds becomes the base, nothing is lost or sent.
+      autosave.resolve('Once upon a tide', { content: 'Twice upon a time', draftVersion: 5 });
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'Once upon a tide',
+        base: { content: 'Once upon a tide', draftVersion: 6 },
+      });
+      expect(server.calls).toEqual([]);
+    });
+
     it('takes a counter bump of the base and keeps local edits, sent on the new version', async () => {
       start();
       autosave.edit('Once upon a tide');

@@ -5,7 +5,9 @@ import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useState } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
-import { cacheDraft, draftOf, useAutosave } from '../autosave/useAutosave';
+import { draftOf, useAutosave } from '../autosave/useAutosave';
+import { keepSides } from '../reconcile/keepSides';
+import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
@@ -35,6 +37,9 @@ const statusText = (state: AutosaveState, revision: number, changedSinceVersion:
       return changedSinceVersion ? `Draft saved · changed since revision ${revision}` : `Saved · revision ${revision}`;
   }
 };
+
+/** The server's draft moved again while a reconciliation was being saved. */
+class MovedAgain extends Error {}
 
 export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
@@ -109,33 +114,34 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     await onSaved(latest);
   };
 
-  /**
-   * After a draft conflict: keep the other device's draft in the history, as a version, then save the local text on
-   * top of it.
-   */
-  const keepMine = useMutation({
-    mutationFn: async () => {
-      const latest = await api.getDocument(document.id);
-      if (draftOf(latest).content === latest.content) return draftOf(latest);
-      const saved = await api.updateDocument(document.id, {
-        title: latest.title,
-        content: draftOf(latest).content,
-        baseRevision: latest.revision,
-      });
-      await onSaved(saved);
-      return draftOf(saved);
-    },
-    // Based on the draft the server has just confirmed, so the local text is sent unless it already is that draft.
-    onSuccess: (confirmed) => autosave.resolve(autosave.getSnapshot().content, confirmed),
-  });
+  /** Whether the reconciliation view is open, in place of the text, while the draft is in conflict. */
+  const [reconciling, setReconciling] = useState(false);
 
-  /** After a draft conflict: drop the local text and take the other device's draft. */
-  const takeTheirs = () => {
-    const snapshot = autosave.getSnapshot();
-    if (snapshot.status !== 'conflict') return;
-    autosave.resolve(snapshot.server.content, snapshot.server);
-    cacheDraft(queryClient, document.id, snapshot.server);
-  };
+  /**
+   * Saves a reconciled text: every text it replaces is kept in the history first (see `keepSides`), then the machine
+   * saves it on the draft the server confirmed last. When the server moved meanwhile, the conflict moves to its new
+   * draft, which the view shows, and nothing is saved.
+   */
+  const reconcile = useMutation({
+    mutationFn: async (result: string) => {
+      const snapshot = autosave.getSnapshot();
+      if (snapshot.status !== 'conflict') return;
+      const outcome = await keepSides(
+        document.id,
+        { mine: snapshot.content, theirs: snapshot.server.content, result },
+        new Date(),
+      );
+      if (outcome.kind === 'kept') autosave.resolve(result, outcome.confirmed);
+      // The machine takes a moved draft from the cache, as from any read: the view then shows it.
+      queryClient.setQueryData(queryKeys.document(document.id), outcome.document);
+      if (outcome.kind === 'moved') throw new MovedAgain();
+      setReconciling(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.revisions(document.id) }),
+      ]);
+    },
+  });
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
@@ -172,7 +178,10 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   // Closing the page is guarded for every document at once, by `useAutosaveGuard` in the app.
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
-  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error ?? keepMine.error);
+  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error);
+  const reconcileError = inlineError(reconcile.error);
+  /** The view replaces the text only while there is a conflict: once it is resolved, the text comes back. */
+  const showReconciliation = reconciling && state.status === 'conflict';
   const historyLabel = showHistory ? 'Hide history' : 'History';
   const status = save.isPending ? 'Saving…' : statusText(state, document.revision, changedSinceVersion);
 
@@ -243,13 +252,33 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
             </span>
           </div>
         ) : state.status === 'conflict' ? (
-          <div className="banner" role="alert">
-            <span>This text was also changed on another device.</span>
-            <button onClick={takeTheirs}>Discard mine, use the other text</button>
-            <button className="primary" disabled={keepMine.isPending} onClick={() => keepMine.mutate()}>
-              Keep mine, save the other as a version
-            </button>
-          </div>
+          !showReconciliation ? (
+            <div className="banner" role="alert">
+              <span>This text was also changed on another device.</span>
+              <button className="primary" onClick={() => setReconciling(true)}>
+                Compare and merge
+              </button>
+            </div>
+          ) : reconcile.isPending ? (
+            <div className="banner" role="status">
+              <span>Saving the merged text…</span>
+            </div>
+          ) : reconcile.error instanceof MovedAgain ? (
+            <div className="banner" role="alert">
+              <span>
+                The other device changed the text again. Nothing was saved: check the text below, then confirm.
+              </span>
+            </div>
+          ) : (
+            reconcile.isError && (
+              <div className="banner error" role="alert">
+                <span>
+                  Nothing was saved{reconcileError ? ` (${reconcileError})` : ''}. Your text is safe: confirm again to
+                  retry.
+                </span>
+              </div>
+            )
+          )
         ) : isConflict(save.error) ? (
           <div className="banner">
             <span>A newer version was saved elsewhere since you opened this document.</span>
@@ -262,21 +291,42 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           actionError && <div className="banner error">{actionError}</div>
         )}
 
-        <input
-          className="title-input"
-          placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
-          value={title}
-          maxLength={titleMaxLength}
-          onChange={(event) => setTitle(event.target.value)}
-        />
-        <textarea
-          className="content-input"
-          placeholder="Start writing…"
-          value={content}
-          maxLength={contentMaxLength}
-          onChange={(event) => autosave.edit(event.target.value)}
-          autoFocus
-        />
+        {showReconciliation && state.status === 'conflict' ? (
+          <div className="editor-reconcile">
+            <ReconciliationView
+              base={state.base.content}
+              mine={state.content}
+              theirs={state.server.content}
+              mineLabel="This device"
+              theirsLabel="Other device"
+              onConfirm={(result) => {
+                if (!reconcile.isPending) reconcile.mutate(result);
+              }}
+              onCancel={() => {
+                reconcile.reset();
+                setReconciling(false);
+              }}
+            />
+          </div>
+        ) : (
+          <>
+            <input
+              className="title-input"
+              placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
+              value={title}
+              maxLength={titleMaxLength}
+              onChange={(event) => setTitle(event.target.value)}
+            />
+            <textarea
+              className="content-input"
+              placeholder="Start writing…"
+              value={content}
+              maxLength={contentMaxLength}
+              onChange={(event) => autosave.edit(event.target.value)}
+              autoFocus
+            />
+          </>
+        )}
       </section>
 
       {showHistory && (

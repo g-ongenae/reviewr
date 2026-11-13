@@ -102,7 +102,8 @@ export interface Autosave {
    * `base`: ignored. On a `saved` machine with nothing pending: it replaces the text. Otherwise it is kept and
    * reconciled as soon as no answer is pending: holding one of this machine's texts (the local text, the base, a text
    * it sent), it becomes the base and local edits are sent on it; holding another text, it is a conflict, and the
-   * local text stays. Never "saved" for a text older than it.
+   * local text stays. Never "saved" for a text older than it. In conflict, a draft newer than the server's that does
+   * not hold the local text becomes the server's draft of the conflict.
    */
   refresh(confirmed: Draft): void;
   /** The current state; the same object until something changes, as `useSyncExternalStore` requires. */
@@ -404,6 +405,11 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         return;
       }
       keep(confirmed);
+      // In conflict, a newer draft from another device is the one to reconcile with now. One holding the local text
+      // (a step of a reconciliation that did not finish) is not: it stays kept, for after `resolve`.
+      if (server !== undefined && confirmed.draftVersion > server.draftVersion && confirmed.content !== content) {
+        server = confirmed;
+      }
       advance('keep');
     },
 
