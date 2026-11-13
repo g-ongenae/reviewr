@@ -32,6 +32,8 @@ export interface ReconciliationViewProps {
   /** Receives the reconciled text. Nothing is applied before. */
   onConfirm: (text: string) => void;
   onCancel: () => void;
+  /** The confirmed text is being saved: every choice, hand edit, Cancel and Confirm are frozen until it ends. */
+  busy?: boolean;
 }
 
 interface Labels {
@@ -54,6 +56,7 @@ export const ReconciliationView = ({
   theirsLabel,
   onConfirm,
   onCancel,
+  busy = false,
 }: ReconciliationViewProps) => {
   const [state, setState] = useState<Reconciliation>(() => createReconciliation(base, mine, theirs));
   // Derived from props: a new `theirs` merges again during render, keeping what the writer did (see `recompute`).
@@ -97,7 +100,7 @@ export const ReconciliationView = ({
   };
 
   return (
-    <div className="reconcile" ref={root}>
+    <div className="reconcile" ref={root} aria-busy={busy}>
       <header className="reconcile-header">
         <h2>Both versions changed</h2>
         <p className="muted">
@@ -138,7 +141,7 @@ export const ReconciliationView = ({
             into a passage below, then dismiss it.
           </p>
           <textarea readOnly value={orphan} aria-label="Your earlier hand-written text" rows={3} />
-          <button type="button" onClick={() => advance(dismissOrphan(state, index), -1)}>
+          <button type="button" disabled={busy} onClick={() => advance(dismissOrphan(state, index), -1)}>
             Dismiss
           </button>
         </section>
@@ -170,6 +173,7 @@ export const ReconciliationView = ({
                   total={state.conflicts.length}
                   entry={entry}
                   labels={labels}
+                  busy={busy}
                   onChoose={(resolution) => choose(index, resolution)}
                   onEdit={(edit) => setState(resolveConflict(state, index, { edit }))}
                   onKeepEarlier={() => advance(keepEarlierChoice(state, index), index)}
@@ -189,16 +193,16 @@ export const ReconciliationView = ({
               : `${left} conflicts left to resolve`}
         </span>
         <span className="spacer" />
-        <button type="button" onClick={onCancel}>
+        <button type="button" disabled={busy} onClick={onCancel}>
           Cancel
         </button>
         <button
           type="button"
           className="primary reconcile-confirm"
-          disabled={text === undefined}
+          disabled={busy || text === undefined}
           onClick={() => text !== undefined && onConfirm(text)}
         >
-          Confirm
+          {busy ? 'Saving…' : 'Confirm'}
         </button>
       </footer>
     </div>
@@ -276,13 +280,14 @@ interface ConflictProps {
   total: number;
   entry: ConflictEntry;
   labels: Labels;
+  busy: boolean;
   onChoose: (resolution: ConflictResolution) => void;
   onEdit: (text: string) => void;
   onKeepEarlier: () => void;
 }
 
 /** The choices for one conflict, shown after the paragraph that holds it. */
-const Conflict = ({ index, total, entry, labels, onChoose, onEdit, onKeepEarlier }: ConflictProps) => {
+const Conflict = ({ index, total, entry, labels, busy, onChoose, onEdit, onKeepEarlier }: ConflictProps) => {
   const { part, resolution } = entry;
   const editing = resolution === 'both' || typeof resolution === 'object';
   const titleId = `reconcile-conflict-${index}`;
@@ -310,23 +315,25 @@ const Conflict = ({ index, total, entry, labels, onChoose, onEdit, onKeepEarlier
             type="button"
             className={sideClass[side]}
             aria-pressed={resolution === side}
+            disabled={busy}
             onClick={() => onChoose(side)}
           >
             Keep <span className="reconcile-side-name">{label}</span>
           </button>
         ))}
-        <button type="button" aria-pressed={resolution === 'both'} onClick={() => onChoose('both')}>
+        <button type="button" aria-pressed={resolution === 'both'} disabled={busy} onClick={() => onChoose('both')}>
           Keep both
         </button>
         <button
           type="button"
           aria-pressed={typeof resolution === 'object'}
+          disabled={busy}
           onClick={() => onChoose({ edit: handWritten(entry) ?? current ?? part.mine })}
         >
           Edit by hand
         </button>
         {entry.recheck && resolution !== undefined && (
-          <button type="button" onClick={onKeepEarlier}>
+          <button type="button" disabled={busy} onClick={onKeepEarlier}>
             Keep my earlier choice
           </button>
         )}
@@ -345,6 +352,7 @@ const Conflict = ({ index, total, entry, labels, onChoose, onEdit, onKeepEarlier
           </span>
           <textarea
             value={current}
+            readOnly={busy}
             rows={Math.min(8, Math.max(2, Math.ceil(current.length / 60)))}
             onChange={(event) => onEdit(event.target.value)}
           />

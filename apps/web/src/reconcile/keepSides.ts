@@ -26,13 +26,19 @@ export type KeepOutcome =
   | { kind: 'moved'; document: Document };
 
 /**
- * Before a reconciled text replaces the draft, keeps in the history, as named versions, each text it would erase: the
- * other device's draft, then the local text, when they differ from the result and are not the head already. A version
- * only snapshots the server's draft, so the local text is saved as the draft first.
+ * Before a reconciled text replaces the draft, keeps in the history, as named versions, the texts it would erase: the
+ * other device's draft, then the local text. A version only snapshots the server's draft, so the local text is saved
+ * as the draft first. The rule: a text that is in no revision is made a version before any request overwrites it.
+ *
+ * - The local text needs a version when it differs from the result and is not the head.
+ * - The other device's draft needs one when it is not the head and something overwrites it: the result (when it
+ *   differs from it), or the local text written as the draft, which happens whenever the local text needs a version,
+ *   even when the result is the other device's text.
  *
  * It starts from the server's document and skips what is already done, so a retry after a failure keeps nothing
- * twice: a draft that holds the local text is this sequence's own write, and a text that is the head is kept.
- * Rejects when a request fails; a 409 (the server moved meanwhile) is answered as `moved`.
+ * twice: a text that is the head is kept. A draft that holds the local text is taken as this sequence's own write,
+ * which only happens after the other device's draft was kept (or needed no version). Rejects when a request fails;
+ * a 409 (the server moved meanwhile) is answered as `moved`.
  */
 export const keepSides = async (id: string, sides: Sides, now: Date): Promise<KeepOutcome> => {
   let document = await api.getDocument(id);
@@ -48,11 +54,14 @@ export const keepSides = async (id: string, sides: Sides, now: Date): Promise<Ke
     });
   };
 
+  const keepMine = sides.mine !== sides.result && sides.mine !== document.content;
+  const keepTheirs =
+    draft().content === sides.theirs &&
+    sides.theirs !== document.content &&
+    (sides.theirs !== sides.result || keepMine);
   try {
-    if (draft().content === sides.theirs && sides.theirs !== sides.result && sides.theirs !== document.content) {
-      await snapshot('theirs');
-    }
-    if (sides.mine !== sides.result && sides.mine !== document.content) {
+    if (keepTheirs) await snapshot('theirs');
+    if (keepMine) {
       if (draft().content !== sides.mine) {
         const saved = await api.saveDraft(id, { content: sides.mine, draftVersion: draft().draftVersion });
         document = { ...document, draft: saved };

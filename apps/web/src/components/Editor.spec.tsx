@@ -402,18 +402,165 @@ describe('Editor autosave', () => {
       expect(status()).toBe('Draft saved · changed since revision 3');
     });
 
-    it('keeping the other device’s text keeps only the local text as a version', async () => {
+    it('keeping the other device’s text keeps both texts, the other device’s before the local text is written over it', async () => {
       const mine = 'Le gardien rêve. La mer monte.';
       await conflict(mine);
       compare();
       fireEvent.click(within(view()).getByRole('button', { name: 'Keep Other device' }));
       await confirm();
 
-      expect(requests()).toEqual(['GET ', 'PUT /draft', 'POST /revisions', 'PUT /draft']);
-      expect(kept()).toEqual([[local, mine]]);
+      expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft', 'POST /revisions', 'PUT /draft']);
+      expect(kept()).toEqual([
+        [other, theirs],
+        [local, mine],
+      ]);
       expect(server().draft?.content).toBe(theirs);
       expect(textarea().value).toBe(theirs);
-      expect(status()).toBe('Draft saved · changed since revision 3');
+      expect(status()).toBe('Draft saved · changed since revision 4');
+    });
+
+    /** Every text on the server: the draft and the history. */
+    const serverTexts = () => [server().draft?.content, ...revisions.map((revision) => revision.content)];
+    const choices = [
+      { choice: 'the other device’s text', resolve: () => fireEvent.click(keepOther()) },
+      { choice: 'a hand edit', resolve: () => handEdit('rêve et veille') },
+    ];
+    const keepOther = () => within(view()).getByRole('button', { name: 'Keep Other device' });
+    const handEdit = (text: string) => {
+      fireEvent.click(within(view()).getByRole('button', { name: 'Edit by hand' }));
+      fireEvent.change(within(view()).getByRole('textbox', { name: 'Your text for this passage' }), {
+        target: { value: text },
+      });
+    };
+
+    /**
+     * Checks, after each write the server accepts, that the other device's text is still on the server, and, without
+     * `afterWrite`, that the local text stays there once written: closing the tab at any point loses neither. (With
+     * `afterWrite`, another device may write over the local text: it is still on screen, and kept on the next confirm.)
+     */
+    const watchWrites = (mine: string, afterWrite?: (count: number) => void) => {
+      const violations: string[] = [];
+      let writes = 0;
+      let mineWritten = false;
+      intercept = (call) => {
+        if (call.method === 'GET') return undefined;
+        const response = fakeApi(call);
+        if (!response.ok) return response;
+        writes++;
+        const texts = serverTexts();
+        if (!texts.includes(theirs)) violations.push(`write ${writes}: the other device's text is gone`);
+        mineWritten ||= texts.includes(mine);
+        if (mineWritten && !texts.includes(mine) && afterWrite === undefined)
+          violations.push(`write ${writes}: the local text is gone`);
+        afterWrite?.(writes);
+        return response;
+      };
+      return violations;
+    };
+
+    it.each(choices)('keeps both texts on the server after every write, choosing $choice', async ({ resolve }) => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      const violations = watchWrites(mine);
+      compare();
+      resolve();
+      await confirm();
+
+      expect(violations).toEqual([]);
+      expect(kept().map(([, content]) => content)).toEqual([theirs, mine]);
+    });
+
+    const concurrent = choices.flatMap((choice) => [1, 2, 3].map((write) => ({ ...choice, write })));
+    it.each(concurrent)(
+      'loses nothing when the other device writes right after write $write, choosing $choice',
+      async ({ resolve, write }) => {
+        const mine = 'Le gardien rêve. La mer monte.';
+        const later = 'Le gardien chante. La mer monte.';
+        await conflict(mine);
+        const violations = watchWrites(mine, (count) => count === write && otherDraft(later));
+        compare();
+        resolve();
+        await confirm();
+
+        // The sequence stopped, or the result met the new text on its way: either way, a conflict with it.
+        expect(violations).toEqual([]);
+        expect(status()).toBe('Not saved · changed elsewhere');
+        expect(serverTexts()).toContain(theirs);
+        if (screen.queryByRole('button', { name: 'Compare and merge' }) !== null) compare();
+        expect(view().querySelector('.reconcile-text')?.textContent).toContain('Added by Other device: chante');
+
+        for (const button of within(view()).getAllByRole('button', { name: 'Keep Other device' })) {
+          fireEvent.click(button);
+        }
+        await confirm();
+        expect(status()).toBe('Draft saved · changed since revision ' + server().revision);
+        expect(server().draft?.content).toBe(later);
+        expect(serverTexts()).toEqual(expect.arrayContaining([theirs, mine, later]));
+        expect(violations).toEqual([]);
+      },
+    );
+
+    describe('while a confirmation runs', () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+
+      const start = async () => {
+        await conflict(mine);
+        compare();
+        handEdit('rêve et veille');
+        hold = (call) => call.method === 'POST';
+        await confirm();
+      };
+
+      it('freezes the view, Cancel, and restoring a revision', async () => {
+        const summary = { documentId: 'doc-1', revision: 1, title: 'Le phare', name: null, createdAt: '2026-11-01' };
+        intercept = (call) => {
+          if (call.method !== 'GET') return undefined;
+          if (call.path === '/documents/doc-1/revisions') return reply(200, [summary]);
+          if (call.path === '/documents/doc-1/revisions/1') return reply(200, { ...summary, content: 'Avant.' });
+          return undefined;
+        };
+        await start();
+
+        expect(screen.getByText('Saving the merged text…')).toBeTruthy();
+        const disabled = (name: string) => within(view()).getByRole('button', { name }).hasAttribute('disabled');
+        expect(
+          ['Cancel', 'Saving…', 'Keep This device', 'Keep Other device', 'Keep both', 'Edit by hand'].map(disabled),
+        ).toEqual([true, true, true, true, true, true]);
+        expect(within(view()).getByRole('textbox', { name: 'Your text for this passage' })).toHaveProperty(
+          'readOnly',
+          true,
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'History' }));
+        await elapse();
+        fireEvent.click(screen.getByRole('button', { name: /Revision 1/ }));
+        await elapse();
+        expect(screen.getByRole('button', { name: 'Restore into editor' })).toHaveProperty('disabled', true);
+
+        await releaseHeld();
+        expect(server().draft?.content).toBe('Le gardien rêve et veille. La mer monte.');
+        expect(textarea().value).toBe('Le gardien rêve et veille. La mer monte.');
+      });
+
+      it('runs only once, and does not apply its result over a text changed meanwhile', async () => {
+        await start();
+        // The writer leaves and comes back: the text is read-only until the confirmation ends.
+        open('doc-2');
+        await elapse();
+        open('doc-1');
+        await elapse();
+        expect(textarea()).toHaveProperty('readOnly', true);
+        expect(screen.getByRole('button', { name: 'Saving the merged text…' })).toHaveProperty('disabled', true);
+
+        // Should the text change anyway, the result is not applied over it.
+        type('Le gardien rêve encore.');
+        await releaseHeld();
+        await elapse(5000);
+        expect(textarea().value).toBe('Le gardien rêve encore.');
+        expect(status()).toBe('Not saved · changed elsewhere');
+        expect(server().draft?.content).toBe(mine);
+        expect(kept().map(([, content]) => content)).toEqual([theirs, mine]);
+        expect(requests().filter((request) => request === 'POST /revisions')).toHaveLength(2);
+      });
     });
 
     it('a hand edit keeps both texts, the other device’s first', async () => {
@@ -458,7 +605,7 @@ describe('Editor autosave', () => {
       await confirm();
 
       expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft', 'POST /revisions']);
-      expect(screen.getByRole('alert').textContent).toContain('Nothing was saved');
+      expect(screen.getByRole('alert').textContent).toContain('The merge could not be finished');
       expect(status()).toBe('Not saved · changed elsewhere');
       expect(unload().defaultPrevented).toBe(true);
       // The view still shows the other device's text, not this device's own write.
@@ -489,7 +636,7 @@ describe('Editor autosave', () => {
       };
       await confirm();
       expect(kept()).toEqual([[other, theirs]]);
-      expect(screen.getByRole('alert').textContent).toContain('Nothing was saved');
+      expect(screen.getByRole('alert').textContent).toContain('The merge could not be finished');
 
       calls = [];
       await confirm();
