@@ -62,30 +62,6 @@ const assertFound = <T>(row: T | undefined, id: string): T => {
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /**
- * Title an old-style save (`PUT /documents/:id`, which always sends a title) gives the new revision.
- *
- * Until `PATCH /documents/:id` exists, the title of a document always equals the title of its head revision.
- * When they differ, the document was renamed since its head was saved. A build that only knows the old `PUT`
- * sends back the title it loaded with the content: if that is the head revision's title, it is the title from
- * before the rename, not a new one, so the rename is kept. Any other title is a change made by the writer.
- */
-const titleOfSave = async (
-  tx: Transaction,
-  current: DocumentRow,
-  sent: DocumentRow['title'],
-): Promise<DocumentRow['title']> => {
-  if (sent === current.title) {
-    return sent;
-  }
-  const [head] = await tx
-    .select({ title: revisions.title })
-    .from(revisions)
-    .where(and(eq(revisions.documentId, current.id), eq(revisions.revision, current.revision)));
-
-  return head?.title === sent ? current.title : sent;
-};
-
-/**
  * Make `title` and `content` the new head revision of a locked document, and the draft equal to it.
  * `draftVersion` is bumped only if the draft text changes. `name` labels the revision (unnamed if omitted).
  */
@@ -200,9 +176,6 @@ export class DocumentsService {
    * is first committed as a revision of its own, then the save fails with 409 `stale_revision` at that
    * new revision. To a client that knows only revisions this is "changed elsewhere": it reloads the
    * draft text, or retries on the new revision with the draft kept in the history.
-   *
-   * A save that sends back the title of the head revision after the document was renamed keeps the new
-   * title (see `titleOfSave`).
    */
   public async update(id: string, input: UpdateDocumentDto): Promise<Document> {
     const result: Document | ConflictDetail = await this.db.transaction(async (tx) => {
@@ -212,8 +185,7 @@ export class DocumentsService {
       if (current.revision !== input.baseRevision) {
         throw conflict(staleRevision(current.revision, input.baseRevision));
       }
-      const title: DocumentRow['title'] = await titleOfSave(tx, current, input.title);
-      if (current.title === title && current.content === input.content) {
+      if (current.title === input.title && current.content === input.content) {
         return toDocument(current);
       }
       if (current.draftContent !== current.content && current.draftContent !== input.content) {
@@ -223,7 +195,7 @@ export class DocumentsService {
         return staleRevision(promoted.revision, input.baseRevision);
       }
 
-      return toDocument(await appendRevision(tx, current, title, input.content));
+      return toDocument(await appendRevision(tx, current, input.title, input.content));
     });
 
     if ('code' in result) {
@@ -314,6 +286,10 @@ export class DocumentsService {
    * title is a label, not text, so the last rename wins. The revisions already saved keep the title they were
    * saved with (they are snapshots); the next version saved takes the new title. A rename moves `updatedAt`,
    * like an autosave, so the list shows it first; sending the title already stored changes nothing.
+   *
+   * Known limit: `PUT /documents/:id` always carries a title, so an app that loaded the document before a
+   * rename puts the old title back with its next save. The server cannot tell that title from one the writer
+   * chose, so it applies it, as before. This ends when the apps rename through this endpoint.
    */
   public async rename(id: string, input: RenameDocumentDto): Promise<Document> {
     return this.db.transaction(async (tx) => {

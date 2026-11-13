@@ -245,6 +245,7 @@ describe('Rename API', () => {
 
     it.each([
       ['an empty body', {}],
+      ['no body', undefined],
       ['a number', { name: 42 }],
       ['a name too long', { name: 'x'.repeat(201) }],
       ['an unknown property', { name: 'x', title: 'autre' }],
@@ -272,51 +273,54 @@ describe('Rename API', () => {
   });
 
   describe('the old PUT /documents/:id after a rename', () => {
-    it('keeps the rename when an old build sends back the title it loaded', async () => {
+    it('applies the title it is sent, as before: an app that loaded the old title puts it back', async () => {
+      // Known limit, kept on purpose: the server cannot tell a title loaded before the rename from one the
+      // writer chose, and guessing was wrong both ways. It ends when the apps rename through PATCH.
       const doc = await create('v1', 'Ancien');
       await rename(doc.id, { title: 'Nouveau' });
 
       const saved = await call('PUT', `/documents/${doc.id}`, { title: 'Ancien', content: 'v2', baseRevision: 1 }, {});
 
-      expect(saved).toMatchObject({
-        status: 200,
-        body: { title: 'Nouveau', content: 'v2', revision: 2 },
+      expect(saved).toMatchObject({ status: 200, body: { title: 'Ancien', content: 'v2', revision: 2 } });
+      expect((await listRevisions(doc.id))[0]).toMatchObject({ revision: 2, title: 'Ancien', content: 'v2' });
+    });
+
+    it('applies a title the writer changed, with or without a rename in between', async () => {
+      const renamed = await create('v1', 'Ancien');
+      await rename(renamed.id, { title: 'Nouveau' });
+      const afterRename = await call('PUT', `/documents/${renamed.id}`, {
+        title: 'Troisième',
+        content: 'v2',
+        baseRevision: 1,
       });
-      expect((await listRevisions(doc.id))[0]).toMatchObject({ revision: 2, title: 'Nouveau', content: 'v2' });
+      expect(afterRename.body).toMatchObject({ title: 'Troisième', revision: 2 });
+
+      const plain = await create('v1', 'Ancien');
+      const saved = await call('PUT', `/documents/${plain.id}`, { title: 'Autre', content: 'v1', baseRevision: 1 });
+      expect(saved.body).toMatchObject({ title: 'Autre', revision: 2 });
     });
 
-    it('creates no revision when the only change is the title from before the rename', async () => {
+    it('keeps a pending draft as a revision under the renamed title, then answers 409', async () => {
       const doc = await create('v1', 'Ancien');
-      const renamed = (await rename(doc.id, { title: 'Nouveau' })).body as Document;
-
-      const saved = await call('PUT', `/documents/${doc.id}`, { title: 'Ancien', content: 'v1', baseRevision: 1 });
-
-      expect(saved).toEqual({ status: 200, body: renamed });
-      expect(await listRevisions(doc.id)).toHaveLength(1);
-    });
-
-    it('keeps an untitled rename when an old build sends back the empty title', async () => {
-      const doc = await create('v1', 'Ancien');
-      await rename(doc.id, { title: null });
-
-      const saved = await call('PUT', `/documents/${doc.id}`, { title: 'Ancien', content: 'v2', baseRevision: 1 }, {});
-      expect(saved.body).toMatchObject({ title: '', content: 'v2' });
-      expect((await get(doc.id)).title).toBeNull();
-    });
-
-    it('still applies a title the old build changed', async () => {
-      const doc = await create('v1', 'Ancien');
+      await call('PUT', `/documents/${doc.id}/draft`, { content: 'brouillon', draftVersion: 1 });
       await rename(doc.id, { title: 'Nouveau' });
 
-      const saved = await call('PUT', `/documents/${doc.id}`, { title: 'Troisième', content: 'v2', baseRevision: 1 });
-      expect(saved.body).toMatchObject({ title: 'Troisième', revision: 2 });
+      const saved = await call('PUT', `/documents/${doc.id}`, { title: 'Ancien', content: 'v2', baseRevision: 1 });
+
+      expect(saved).toMatchObject({ status: 409, body: { code: 'stale_revision', revision: 2 } });
+      expect((await listRevisions(doc.id))[0]).toMatchObject({ revision: 2, title: 'Nouveau', content: 'brouillon' });
+      expect(await get(doc.id)).toMatchObject({ title: 'Nouveau', content: 'brouillon', revision: 2 });
     });
 
-    it('still saves a title change without a rename in between', async () => {
+    it('still answers 409 to a save based on an older revision, and keeps the rename', async () => {
       const doc = await create('v1', 'Ancien');
+      await call('PUT', `/documents/${doc.id}`, { title: 'Ancien', content: 'v2', baseRevision: 1 });
+      await rename(doc.id, { title: 'Nouveau' });
 
-      const saved = await call('PUT', `/documents/${doc.id}`, { title: 'Autre', content: 'v1', baseRevision: 1 });
-      expect(saved.body).toMatchObject({ title: 'Autre', revision: 2 });
+      const stale = await call('PUT', `/documents/${doc.id}`, { title: 'Ancien', content: 'v3', baseRevision: 1 });
+
+      expect(stale).toMatchObject({ status: 409, body: { code: 'stale_revision', revision: 2 } });
+      expect(await get(doc.id)).toMatchObject({ title: 'Nouveau', content: 'v2', revision: 2 });
     });
   });
 

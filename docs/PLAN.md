@@ -53,8 +53,7 @@ Small changes on the existing schema, not the commit model:
   - later: a document without a revision yet (`baseRevision` null); decide whether a title changed alone can be saved as a version, since a draft identical to the head is a no-op.
 - `PATCH /documents/:id` (title) and `PATCH /documents/:id/revisions/:n` (version name). Add `PATCH` to CORS.
   - the two endpoints, `ReviewrClient.renameDocument` and `nameRevision`, and `PATCH` in CORS (done); a rename creates no revision, the last one wins, and the next version saved takes the new title;
-  - the old `PUT /documents/:id` keeps a rename made elsewhere when a build sends back the title it had loaded (done);
-  - later: use them in the web and mobile apps (rename from the editor, name versions in the history).
+  - later: use them in the web and mobile apps (rename from the editor, name versions in the history). Until then the old `PUT /documents/:id`, which always carries a title, puts an old title back when an app loaded the document before a rename.
 - `POST /documents` accepts an empty draft and creates no revision: a document can exist with only a draft.
 - Keep the current `PUT /documents/:id` working as "save draft + create revision" until the new mobile build ships. It keeps the draft columns equal to the saved content, and it never overwrites an autosaved draft that differs from the head: it keeps that draft as a revision first, then answers 409 (done).
 - Shared types: structured 409 bodies (done: `draft_conflict` and `stale_revision`, read with `conflictOf`).
