@@ -1,0 +1,329 @@
+/* The reconciliation view: the merged text first, the controls only where a conflict needs them. */
+.reconcile {
+  --mine: var(--accent);
+  --theirs: #2563eb;
+  --mine-bg: color-mix(in srgb, var(--mine) 9%, transparent);
+  --theirs-bg: color-mix(in srgb, var(--theirs) 9%, transparent);
+  --serif: Georgia, 'Iowan Old Style', serif;
+  display: flex;
+  flex-direction: column;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 1.5rem 2rem 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .reconcile {
+    --theirs: #60a5fa;
+    --mine-bg: color-mix(in srgb, var(--mine) 18%, transparent);
+    --theirs-bg: color-mix(in srgb, var(--theirs) 18%, transparent);
+  }
+}
+
+.reconcile-header h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.5rem;
+}
+
+.reconcile-header p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.reconcile-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  margin: 1rem 0 0;
+  padding: 0 0 1rem;
+  list-style: none;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.reconcile-legend li {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.reconcile-legend span {
+  font-weight: 600;
+}
+
+/* Attribution never relies on colour alone: each side has its own line style (solid, dashed, double), used to
+   underline what it added and to strike through what it removed. */
+.reconcile ins {
+  text-decoration-line: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.2em;
+  text-decoration-skip-ink: none;
+  border-radius: 2px;
+}
+
+.reconcile .by-mine ins {
+  text-decoration-style: solid;
+  text-decoration-color: var(--mine);
+  background: var(--mine-bg);
+}
+
+.reconcile .by-theirs ins {
+  text-decoration-style: dashed;
+  text-decoration-color: var(--theirs);
+  background: var(--theirs-bg);
+}
+
+.reconcile .by-both ins {
+  text-decoration-style: double;
+  text-decoration-color: var(--muted);
+}
+
+.reconcile del {
+  color: var(--muted);
+  text-decoration-line: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.reconcile .by-mine del {
+  text-decoration-style: solid;
+  text-decoration-color: var(--mine);
+  text-decoration-thickness: 2px;
+}
+
+.reconcile .by-theirs del {
+  text-decoration-style: dashed;
+  text-decoration-color: var(--theirs);
+  text-decoration-thickness: 2px;
+}
+
+.reconcile .by-both del {
+  text-decoration-style: double;
+}
+
+.reconcile-text {
+  padding: 1.25rem 0 2rem;
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  line-height: 1.7;
+  overflow-wrap: break-word;
+}
+
+.reconcile-text p {
+  margin: 0;
+  min-height: 1.7em;
+  white-space: pre-wrap;
+}
+
+/* A conflict inside the running text: numbered, with both versions until the writer chooses. */
+.reconcile-mark {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.reconcile-mark.resolved {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.reconcile-number {
+  display: inline-block;
+  min-width: 1.3em;
+  margin-right: 0.3em;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.65em;
+  font-weight: 600;
+  line-height: 1.3em;
+  text-align: center;
+  vertical-align: 0.2em;
+}
+
+.reconcile-mark.resolved .reconcile-number {
+  background: var(--muted);
+}
+
+.reconcile-or {
+  color: var(--muted);
+}
+
+.reconcile-conflict {
+  margin: 0.6rem 0 0.4rem;
+  padding: 0.7rem 0.9rem 0.8rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.reconcile-conflict.resolved {
+  border-left-color: var(--border);
+}
+
+.reconcile-conflict h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.reconcile-conflict h3:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
+.reconcile-tag {
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.reconcile-tag.recheck {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reconcile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+.reconcile-side-name {
+  text-decoration-line: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.2em;
+}
+
+.reconcile button.by-mine .reconcile-side-name {
+  text-decoration-color: var(--mine);
+}
+
+.reconcile button.by-theirs .reconcile-side-name {
+  text-decoration-style: dashed;
+  text-decoration-color: var(--theirs);
+}
+
+.reconcile button[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  font-weight: 600;
+}
+
+.reconcile button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.reconcile-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  color: var(--muted);
+}
+
+.reconcile textarea {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.reconcile textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.reconcile-notice {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  background: var(--warning-bg);
+  line-height: 1.45;
+}
+
+.reconcile-recheck {
+  margin: 0.55rem 0 0;
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+
+.reconcile-orphan {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 10px;
+  background: var(--warning-bg);
+}
+
+.reconcile-orphan p {
+  margin: 0;
+}
+
+.reconcile-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.reconcile-remaining {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.reconcile .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .reconcile {
+    padding: 1rem 1rem 0;
+  }
+
+  .reconcile-actions button {
+    flex: 1 1 auto;
+  }
+}

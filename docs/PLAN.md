@@ -69,7 +69,8 @@ Web client — an autosave state machine, not just a debounce:
 - offline mode: an unreachable server (network error, 502/503/504) shows a "Server unreachable" notification, never a blocking error; edits and versions go to an outbox and are sent on reconnect;
 - reconciliation view when both sides moved: three-way word merge of base, mine and theirs, non-overlapping changes applied, conflicts resolved by the writer (mine, theirs, both, edit), the losing side kept as a named version (see [ARCHITECTURE.md](ARCHITECTURE.md#offline-and-reconciliation)):
   - the merge itself: the pure `@reviewr/merge` package, where overlapping, adjacent and ambiguous changes (repeated text) are conflicts (done);
-  - the view, built on the package; "keep both" joins the two texts as they are, so it needs a separator or a hand edit;
+  - the view, built on the package: the standalone component in `apps/web/src/reconcile/` (done), with each change attributed to its side, conflicts resolved by mine, theirs, both or a hand edit ("keep both" opens the hand edit on the two texts joined as they are, so the writer adds the separator), nothing applied before the writer confirms, and a hand edit never dropped when the other side moves again;
+  - later: open the view from the editor on a draft conflict, and save its result against the server's `draftVersion`;
   - keep the local text as a named version before every reconciliation, not only for conflicts: a few ambiguous merges can still be silent (listed in `packages/merge/README.md`), in particular when one side changed more than about 1,000 words;
   - run the package's tests on a real Hermes runtime (only the Hermes compiler was checked);
 - flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short, until the local buffer is used there);

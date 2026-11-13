@@ -297,6 +297,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@reviewr/merge':
+        specifier: workspace:*
+        version: link:../../packages/merge
       '@reviewr/shared':
         specifier: workspace:*
         version: link:../../packages/shared
