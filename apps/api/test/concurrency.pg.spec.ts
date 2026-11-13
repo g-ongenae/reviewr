@@ -28,6 +28,8 @@ const rounds: number = 20;
 const racers: number = 6;
 /** Each race runs `rounds` times; a loaded machine with a slow disk needs more than the default 30 s. */
 const raceTimeout: number = 180_000;
+/** Creating and migrating the database, or waiting for its sessions to close, on the same kind of machine. */
+const setupTimeout: number = 120_000;
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; conflict: ConflictBody };
 
@@ -58,13 +60,33 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
     await runMigrations(url.toString());
     pool = new pg.Pool({ connectionString: url.toString(), max: 10 });
     service = new DocumentsService(drizzle(pool, { schema }));
-  });
+  }, setupTimeout);
 
   afterAll(async () => {
     await pool?.end();
-    await admin?.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await admin?.end();
-  });
+    if (admin === undefined) {
+      return;
+    }
+    // `pool.end()` resolves before the server has closed every session. Dropping the database by force at that
+    // moment terminates them, and the clients, already detached from the pool, report it as unhandled errors
+    // that fail the run. So wait until the sessions are gone, then drop without force: if one is still there
+    // after 10 s, the drop fails and names the database, which is left for a manual cleanup.
+    for (let attempt: number = 0; attempt < 400; attempt += 1) {
+      const { rows } = await admin.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1',
+        [databaseName],
+      );
+      if (rows[0]?.n === 0) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    try {
+      await admin.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
+    } finally {
+      await admin.end();
+    }
+  }, setupTimeout);
 
   /** Wait until `count` sessions of the test database are blocked on a lock. */
   const waitForBlocked = async (count: number): Promise<void> => {
@@ -89,6 +111,9 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
   ): Promise<Outcome<T>> => {
     // A connection of its own: the service's transaction takes another one from the pool.
     const holder: pg.PoolClient = await pool.connect();
+    // On failure the holder may still be in its transaction: destroy the connection rather than return it to
+    // the pool, which rolls back, lets the waiting call finish and keeps the lock out of the next test.
+    let failure: Error | undefined;
     try {
       await holder.query('BEGIN');
       await holder.query('SELECT 1 FROM documents WHERE id = $1 FOR UPDATE', [id]);
@@ -104,8 +129,11 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
       const outcome: Outcome<T> = await pending;
 
       return outcome;
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
+      throw error;
     } finally {
-      holder.release();
+      holder.release(failure);
     }
   };
 
