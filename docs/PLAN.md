@@ -47,7 +47,8 @@ Small changes on the existing schema, not the commit model:
   - the endpoint, `Document.draft` on documents and `ReviewrClient.saveDraft` (done); a save whose text is already the stored draft is answered as saved whatever its `draftVersion`, so a retry after a lost response does not conflict with itself;
   - the 409 bodies carry a `code` (`draft_conflict` with the server's draft, `stale_revision` with the revision), read with `conflictOf` from the shared package (done);
   - the old `PUT /documents/:id` no longer overwrites an autosaved draft: it first keeps that draft as a revision, then answers 409, so builds that only know revisions see "changed elsewhere" (done);
-  - later: test the row lock on a real PostgreSQL with two connections (the tests run on PGlite, which runs one transaction at a time); make `Document.draft` required in the shared type once the web uses it.
+  - the row lock tested on a real PostgreSQL with concurrent connections, in the CI (done): `saveDraft`, `createRevision` and the old `PUT` wait for the row and decide on what was committed, and races between them lose no text and duplicate no revision (the other tests run on PGlite, which runs one transaction at a time);
+  - later: make `Document.draft` required in the shared type, now that the web uses it; the same tests for the rename endpoints.
 - `POST /documents/:id/revisions` `{ name?, draftVersion, baseRevision }`: snapshots the draft atomically; 409 if either the draft or the head moved. Saving a draft identical to the head is a no-op.
   - the endpoint, `ReviewrClient.createRevision` and the `name` listed on revisions (done); the same request sent twice after a lost response creates one revision only;
   - later: a document without a revision yet (`baseRevision` null); decide whether a title changed alone can be saved as a version, since a draft identical to the head is a no-op.
