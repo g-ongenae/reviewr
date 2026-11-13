@@ -174,7 +174,8 @@ button.danger {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 1rem 2rem;
+  --editor-gutter: 2rem;
+  padding: 1rem var(--editor-gutter);
 }
 
 .toolbar {
@@ -190,8 +191,39 @@ button.danger {
 }
 
 .status {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 0.9rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.toolbar-action {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.toolbar-action.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Narrow editor (phones, or a desktop squeezed by the history panel): icons only. */
+@container editor (max-width: 560px) {
+  .toolbar {
+    gap: 0.35rem;
+  }
+
+  .toolbar-action {
+    padding: 0.45rem;
+  }
+
+  .toolbar-label {
+    display: none;
+  }
 }
 
 .status.dirty {
@@ -235,10 +267,10 @@ button.danger {
   resize: none;
   /* Bleed past the editor padding so the scrollbar sits at the window edge;
      the padding keeps the text in a centred 48rem column. */
-  width: calc(100% + 4rem);
+  width: calc(100% + 2 * var(--editor-gutter));
   max-width: none;
-  margin: 0 -2rem -1rem;
-  padding: 0 max(2rem, calc((100% - 48rem) / 2 + 2rem)) 1rem;
+  margin: 0 calc(-1 * var(--editor-gutter)) -1rem;
+  padding: 0 max(var(--editor-gutter), calc((100% - 48rem) / 2 + var(--editor-gutter))) 1rem;
   font-family: Georgia, 'Iowan Old Style', serif;
   font-size: 1.15rem;
   line-height: 1.7;
@@ -475,6 +507,26 @@ button.danger {
 @media (max-width: 640px) {
   .layout {
     grid-template-columns: 1fr;
+  }
+
+  .editor {
+    --editor-gutter: 1rem;
+  }
+
+  /* No room for a side panel: history docks under the editor instead. */
+  .editor-layout {
+    flex-direction: column;
+  }
+
+  .editor {
+    min-height: 0;
+  }
+
+  .history {
+    width: auto;
+    max-height: 45%;
+    border-left: 0;
+    border-top: 1px solid var(--border);
   }
 
   .layout:not(.sidebar-collapsed) .content {

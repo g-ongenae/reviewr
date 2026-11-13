@@ -9,6 +9,7 @@ import { cacheDraft, draftOf, useAutosave } from '../autosave/useAutosave';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
+import { HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
 import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
 interface Props {
@@ -172,6 +173,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
   const actionError = inlineError(save.error ?? remove.error ?? overwrite.error ?? keepMine.error);
+  const historyLabel = showHistory ? 'Hide history' : 'History';
   const status = save.isPending ? 'Saving…' : statusText(state, document.revision, changedSinceVersion);
 
   return (
@@ -182,22 +184,41 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           <span
             className={state.status === 'saved' && !save.isPending ? 'status' : 'status dirty'}
             role="status"
-            title={state.status === 'retrying' ? describeError(state.error) : undefined}
+            title={state.status === 'retrying' ? describeError(state.error) : status}
           >
             {status}
           </span>
           <span className="spacer" />
           <WritingStatsToggle open={showStats} onToggle={toggleStats} />
-          <button onClick={() => setShowHistory((value) => !value)}>{showHistory ? 'Hide history' : 'History'}</button>
           <button
-            className="danger"
+            className={showHistory ? 'toolbar-action active' : 'toolbar-action'}
+            onClick={() => setShowHistory((value) => !value)}
+            aria-label={historyLabel}
+            aria-expanded={showHistory}
+            title={historyLabel}
+          >
+            <HistoryIcon />
+            <span className="toolbar-label">History</span>
+          </button>
+          <button
+            className="toolbar-action danger"
             disabled={remove.isPending}
             onClick={() => window.confirm('Delete this document and its whole history?') && remove.mutate()}
+            aria-label="Delete"
+            title="Delete"
           >
-            Delete
+            <TrashIcon />
+            <span className="toolbar-label">Delete</span>
           </button>
-          <button className="primary" disabled={!canSave} onClick={() => save.mutate()} title="Ctrl+S">
-            Save version
+          <button
+            className="toolbar-action primary"
+            disabled={!canSave}
+            onClick={() => save.mutate()}
+            aria-label="Save version"
+            title="Save version (Ctrl+S)"
+          >
+            <SaveIcon />
+            <span className="toolbar-label">Save version</span>
           </button>
         </div>
 
