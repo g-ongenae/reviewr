@@ -284,12 +284,14 @@ export class DocumentsService {
   /**
    * Rename a document. Creates no revision and leaves the content, the draft and `draftVersion` alone: the
    * title is a label, not text, so the last rename wins. The revisions already saved keep the title they were
-   * saved with (they are snapshots); the next version saved takes the new title. A rename moves `updatedAt`,
-   * like an autosave, so the list shows it first; sending the title already stored changes nothing.
+   * saved with (they are snapshots). The next version saved from the draft (`POST /documents/:id/revisions`,
+   * or a draft kept as a revision by the old `PUT`) takes the new title. A rename moves `updatedAt`, like an
+   * autosave, so the list shows it first; sending the title already stored changes nothing.
    *
-   * Known limit: `PUT /documents/:id` always carries a title, so an app that loaded the document before a
-   * rename puts the old title back with its next save. The server cannot tell that title from one the writer
-   * chose, so it applies it, as before. This ends when the apps rename through this endpoint.
+   * Known limit: `PUT /documents/:id` always carries a title and applies it, as before. So an app that loaded
+   * the document before a rename puts the old title back with its next save: the server cannot tell that
+   * title from one the writer chose. This ends for an app once it renames through this endpoint and stops
+   * sending a cached title; builds already installed keep the limit.
    */
   public async rename(id: string, input: RenameDocumentDto): Promise<Document> {
     return this.db.transaction(async (tx) => {
