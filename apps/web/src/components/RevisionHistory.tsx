@@ -8,10 +8,12 @@ import { formatDate } from '../format';
 interface Props {
   document: Document;
   onRestore: (revision: Revision) => void;
+  /** Restoring is not possible now (a merge is being saved). */
+  restoreDisabled?: boolean;
 }
 
 /** Lists past revisions; selecting one previews it and offers to restore it into the editor. */
-export const RevisionHistory = ({ document, onRestore }: Props) => {
+export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }: Props) => {
   const [selected, setSelected] = useState<number | undefined>(undefined);
   const revisions = useQuery({
     queryKey: queryKeys.revisions(document.id),
@@ -58,7 +60,11 @@ export const RevisionHistory = ({ document, onRestore }: Props) => {
               <h3>{displayTitle({ title: preview.data.title, createdAt: document.createdAt })}</h3>
               <pre className="preview-content">{preview.data.content}</pre>
               {preview.data.revision !== document.revision && (
-                <button className="primary" onClick={() => preview.data && onRestore(preview.data)}>
+                <button
+                  className="primary"
+                  disabled={restoreDisabled}
+                  onClick={() => preview.data && onRestore(preview.data)}
+                >
                   Restore into editor
                 </button>
               )}

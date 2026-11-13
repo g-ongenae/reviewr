@@ -44,18 +44,6 @@ export const toSaveResult = (error: unknown): SaveResult => {
   return { kind: 'failed', error };
 };
 
-/** Puts a draft the server confirmed in the cache, so reopening the document shows it. */
-export const cacheDraft = (queryClient: QueryClient, id: string, { content, draftVersion }: Draft) => {
-  queryClient.setQueryData<Document>(
-    queryKeys.document(id),
-    (document) =>
-      document && {
-        ...document,
-        draft: { content, draftVersion, baseRevision: document.draft?.baseRevision ?? document.revision },
-      },
-  );
-};
-
 /** A draft was just saved: it goes in the cache, and the document moves up the list, without a request. */
 const cacheSavedDraft = (queryClient: QueryClient, id: string, draft: DocumentDraft) => {
   const updatedAt = new Date().toISOString();

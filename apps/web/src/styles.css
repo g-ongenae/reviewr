@@ -232,6 +232,7 @@ button.danger {
 
 .banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   margin-top: 0.75rem;
@@ -240,8 +241,9 @@ button.danger {
   background: var(--warning-bg);
 }
 
+/* A long message keeps its width: the actions go under it when they no longer fit beside it. */
 .banner span {
-  flex: 1;
+  flex: 1 1 16rem;
 }
 
 .title-input,
@@ -274,6 +276,21 @@ button.danger {
   font-family: Georgia, 'Iowan Old Style', serif;
   font-size: 1.15rem;
   line-height: 1.7;
+}
+
+/* The reconciliation view, in place of the text: it scrolls on its own, edge to edge like the text area, so its
+   footer stays at the bottom of the editor. */
+.editor-reconcile {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 calc(-1 * var(--editor-gutter)) -1rem;
+}
+
+/* Its text in the same column as the text area's. */
+.editor-reconcile .reconcile {
+  max-width: calc(48rem + 2 * var(--editor-gutter));
+  padding-inline: var(--editor-gutter);
 }
 
 /* Writing stats: a strip above the text, or a card floating beside it when the margins are wide enough. */

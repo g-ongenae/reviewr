@@ -1,11 +1,12 @@
-import type { Document, Revision, SaveDraftInput, UpdateDocumentInput } from '@reviewr/shared';
+import type { CreateRevisionInput, Document, Revision, SaveDraftInput, UpdateDocumentInput } from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
 import { QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys, reachability } from '../api';
 import { useAutosaveGuard } from '../autosave/useAutosave';
 import { createQueryClient } from '../queryClient';
+import { versionName } from '../reconcile/session';
 import { DocumentView } from './DocumentView';
 
 const fetchMock = vi.mocked(fetch);
@@ -41,7 +42,12 @@ let db: Map<string, Document>;
 let revisions: Revision[];
 
 /** `appendRevision` of the API: a new head, the draft equal to it, its counter moved only if its text changed. */
-const appendRevision = (document: Document, title: string | null, content: string): Document => {
+const appendRevision = (
+  document: Document,
+  title: string | null,
+  content: string,
+  name: string | null = null,
+): Document => {
   const draft = document.draft ?? { content: document.content, draftVersion: 1, baseRevision: null };
   const next: Document = {
     ...document,
@@ -55,24 +61,20 @@ const appendRevision = (document: Document, title: string | null, content: strin
     },
   };
   db.set(document.id, next);
-  // Built before the push: `name` (the version label) is being added to `Revision` by the endpoint that saves
-  // versions, and a separate object compiles with the type before and after that change.
-  const revision = {
-    documentId: document.id,
-    revision: next.revision,
-    title,
-    name: null,
-    content,
-    createdAt: next.updatedAt,
-  };
-  revisions.push(revision);
+  revisions.push({ documentId: document.id, revision: next.revision, title, name, content, createdAt: next.updatedAt });
   return next;
 };
 
 const staleRevision = (revision: number) =>
   reply(409, { statusCode: 409, message: 'Conflict', code: 'stale_revision', revision });
 
-/** The API's rules for `GET /documents/:id`, `PUT /documents/:id/draft` and `PUT /documents/:id`. */
+const draftConflict = (draft: Document['draft']) =>
+  reply(409, { statusCode: 409, message: 'Conflict', code: 'draft_conflict', draft });
+
+/**
+ * The API's rules for `GET /documents/:id`, `PUT /documents/:id/draft`, `PUT /documents/:id` and
+ * `POST /documents/:id/revisions`.
+ */
 const fakeApi = ({ method, path, body }: Call): Response => {
   const [, , id, sub] = path.split('/');
   const document = id === undefined ? undefined : db.get(id);
@@ -83,9 +85,7 @@ const fakeApi = ({ method, path, body }: Call): Response => {
   if (method === 'PUT' && sub === 'draft') {
     const input = body as SaveDraftInput;
     if (draft.content === input.content) return reply(200, draft);
-    if (draft.draftVersion !== input.draftVersion) {
-      return reply(409, { statusCode: 409, message: 'Conflict', code: 'draft_conflict', draft });
-    }
+    if (draft.draftVersion !== input.draftVersion) return draftConflict(draft);
     const saved = { ...draft, content: input.content, draftVersion: draft.draftVersion + 1 };
     db.set(document.id, { ...document, draft: saved });
     return reply(200, saved);
@@ -98,6 +98,13 @@ const fakeApi = ({ method, path, body }: Call): Response => {
       return staleRevision(appendRevision(document, document.title, draft.content).revision);
     }
     return reply(200, appendRevision(document, input.title ?? null, input.content));
+  }
+  if (method === 'POST' && sub === 'revisions') {
+    const input = body as CreateRevisionInput;
+    if (draft.draftVersion !== input.draftVersion) return draftConflict(draft);
+    if (draft.content === document.content) return reply(200, document);
+    if (document.revision !== input.baseRevision) return staleRevision(document.revision);
+    return reply(200, appendRevision(document, document.title, draft.content, input.name ?? null));
   }
   return notFound();
 };
@@ -167,7 +174,8 @@ const elapse = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
 
 const textarea = () => screen.getByPlaceholderText<HTMLTextAreaElement>('Start writing…');
 const type = (value: string) => fireEvent.change(textarea(), { target: { value } });
-const status = () => screen.getByRole('status').textContent;
+/** The toolbar's status, the first on the page. */
+const status = () => screen.getAllByRole('status')[0]?.textContent;
 const unload = () => {
   const event = new Event('beforeunload', { cancelable: true });
   window.dispatchEvent(event);
@@ -204,7 +212,8 @@ beforeEach(() => {
       body: typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined,
     };
     // The writing stats read past revisions on their own: leave them out of what the tests check.
-    if (call.path.includes('/revisions')) return Promise.resolve(intercept(call) ?? reply(200, []));
+    if (call.method === 'GET' && call.path.includes('/revisions'))
+      return Promise.resolve(intercept(call) ?? reply(200, []));
     calls.push(call);
     const answer = () => intercept(call) ?? fakeApi(call);
     if (hold(call)) return new Promise<Response>((resolve) => held.push(() => resolve(answer())));
@@ -318,56 +327,437 @@ describe('Editor autosave', () => {
   });
 
   describe('when the draft was changed on another device', () => {
-    const mine = 'Once upon a tide, on this device.';
-    const theirs = 'Once upon a time, on another device.';
+    const base = 'Le gardien dort. La mer monte.';
+    const theirs = 'Le gardien veille. La mer monte.';
+    const other = versionName('theirs', new Date());
+    const local = versionName('mine', new Date());
 
-    const conflict = async () => {
+    /** The document opens on `base`; another device saves `theirs`; this one types `mine`, and gets the conflict. */
+    const conflict = async (mine: string) => {
+      db.set('doc-1', fresh('doc-1', 'Le phare', base));
+      queryClient.setQueryData(queryKeys.document('doc-1'), server());
       open();
       otherDraft(theirs);
       type(mine);
       await elapse(1000);
       expect(status()).toBe('Not saved · changed elsewhere');
       expect(screen.getByRole('alert').textContent).toContain('This text was also changed on another device.');
+      calls = [];
     };
 
-    it('"Discard mine" takes the other text, sends nothing, and reopening shows it', async () => {
-      await conflict();
-      fireEvent.click(screen.getByRole('button', { name: 'Discard mine, use the other text' }));
+    const view = () =>
+      screen.getByRole('heading', { name: 'Both versions changed' }).closest('.reconcile') as HTMLElement;
+    const compare = () => fireEvent.click(screen.getByRole('button', { name: 'Compare and merge' }));
+    const confirm = async () => {
+      fireEvent.click(within(view()).getByRole('button', { name: 'Confirm' }));
+      await elapse();
+    };
+    /** The merged text of a stopped confirmation is shown until the writer retries it or dismisses it. */
+    const retry = async () => {
+      fireEvent.click(within(view()).getByRole('button', { name: 'Retry with this text' }));
+      await elapse();
+    };
+    const dismissPrevious = () => {
+      const previous = view().querySelector('.reconcile-previous');
+      if (previous !== null) fireEvent.click(within(previous as HTMLElement).getByRole('button', { name: 'Dismiss' }));
+    };
+    const requests = () => calls.map(({ method, path }) => `${method} ${path.replace('/documents/doc-1', '')}`);
+    const kept = () => revisions.map(({ name, content }) => [name, content]);
+
+    it('opens the view in place of the text, on the base, the local text and the other device’s draft', async () => {
+      await conflict('Le gardien dort. La mer descend.');
+      compare();
+      expect(screen.queryByPlaceholderText('Start writing…')).toBeNull();
+      const text = view().querySelector('.reconcile-text')?.textContent;
+      expect(text).toContain('Removed by Other device: dort');
+      expect(text).toContain('Added by Other device: veille');
+      expect(text).toContain('Removed by This device: monte');
+      expect(text).toContain('Added by This device: descend');
+      expect(within(view()).getByRole('status').textContent).toBe('Everything is resolved.');
+      // Nothing is sent before the writer confirms.
       await elapse(5000);
-      expect(textarea().value).toBe(theirs);
-      expect(status()).toBe('Draft saved · changed since revision 2');
-      expect(draftSaves()).toHaveLength(1);
-
-      open('doc-2');
-      await elapse();
-      open('doc-1');
-      await elapse();
-      expect(textarea().value).toBe(theirs);
+      expect(calls).toEqual([]);
     });
 
-    it('"Keep mine" saves the other text as a version first, then the local text on top of it', async () => {
-      await conflict();
-      fireEvent.click(screen.getByRole('button', { name: 'Keep mine, save the other as a version' }));
-      await elapse();
+    it('with no conflict, keeps both texts as versions, then saves the merged text on the confirmed counter', async () => {
+      const mine = 'Le gardien dort. La mer descend.';
+      await conflict(mine);
+      compare();
+      await confirm();
 
-      expect(revisions.map((revision) => revision.content)).toEqual([theirs]);
-      expect(server().draft?.content).toBe(mine);
-      expect(textarea().value).toBe(mine);
+      expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft', 'POST /revisions', 'PUT /draft']);
+      expect(calls.at(-1)?.body).toEqual({ content: 'Le gardien veille. La mer descend.', draftVersion: 5 });
+      expect(kept()).toEqual([
+        [other, theirs],
+        [local, mine],
+      ]);
+      expect(server().draft?.content).toBe('Le gardien veille. La mer descend.');
+      expect(textarea().value).toBe('Le gardien veille. La mer descend.');
       expect(screen.queryByRole('alert')).toBeNull();
+      expect(status()).toBe('Draft saved · changed since revision 4');
+      expect(unload().defaultPrevented).toBe(false);
+    });
+
+    it('keeping this device’s text keeps only the other text as a version', async () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      compare();
+      fireEvent.click(within(view()).getByRole('button', { name: 'Keep This device' }));
+      await confirm();
+
+      expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft']);
+      expect(kept()).toEqual([[other, theirs]]);
+      expect(server().draft?.content).toBe(mine);
       expect(status()).toBe('Draft saved · changed since revision 3');
     });
 
-    it('"Keep mine" saves the local text even when it became the conflict text and the draft moved again', async () => {
-      await conflict();
-      // The writer types the other text by hand; then the other device moves on.
-      type(theirs);
-      otherDraft('Once upon a time, later.');
-      fireEvent.click(screen.getByRole('button', { name: 'Keep mine, save the other as a version' }));
-      await elapse();
+    it('keeping the other device’s text keeps both texts, the other device’s before the local text is written over it', async () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      compare();
+      fireEvent.click(within(view()).getByRole('button', { name: 'Keep Other device' }));
+      await confirm();
 
-      expect(revisions.map((revision) => revision.content)).toEqual(['Once upon a time, later.']);
+      expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft', 'POST /revisions', 'PUT /draft']);
+      expect(kept()).toEqual([
+        [other, theirs],
+        [local, mine],
+      ]);
       expect(server().draft?.content).toBe(theirs);
-      expect(status()).toBe('Draft saved · changed since revision 3');
+      expect(textarea().value).toBe(theirs);
+      expect(status()).toBe('Draft saved · changed since revision 4');
+    });
+
+    /** Every text on the server: the draft and the history. */
+    const serverTexts = () => [server().draft?.content, ...revisions.map((revision) => revision.content)];
+    const choices = [
+      { choice: 'the other device’s text', resolve: () => fireEvent.click(keepOther()) },
+      { choice: 'a hand edit', resolve: () => handEdit('rêve et veille') },
+    ];
+    const keepOther = () => within(view()).getByRole('button', { name: 'Keep Other device' });
+    const handEdit = (text: string) => {
+      fireEvent.click(within(view()).getByRole('button', { name: 'Edit by hand' }));
+      fireEvent.change(within(view()).getByRole('textbox', { name: 'Your text for this passage' }), {
+        target: { value: text },
+      });
+    };
+
+    /**
+     * Checks, after each write the server accepts, that the other device's text is still on the server, and, without
+     * `afterWrite`, that the local text stays there once written: closing the tab at any point loses neither. (With
+     * `afterWrite`, another device may write over the local text: it is still on screen, and kept on the next confirm.)
+     */
+    const watchWrites = (mine: string, afterWrite?: (count: number) => void) => {
+      const violations: string[] = [];
+      let writes = 0;
+      let mineWritten = false;
+      intercept = (call) => {
+        if (call.method === 'GET') return undefined;
+        const response = fakeApi(call);
+        if (!response.ok) return response;
+        writes++;
+        const texts = serverTexts();
+        if (!texts.includes(theirs)) violations.push(`write ${writes}: the other device's text is gone`);
+        mineWritten ||= texts.includes(mine);
+        if (mineWritten && !texts.includes(mine) && afterWrite === undefined)
+          violations.push(`write ${writes}: the local text is gone`);
+        afterWrite?.(writes);
+        return response;
+      };
+      return violations;
+    };
+
+    it.each(choices)('keeps both texts on the server after every write, choosing $choice', async ({ resolve }) => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      const violations = watchWrites(mine);
+      compare();
+      resolve();
+      await confirm();
+
+      expect(violations).toEqual([]);
+      expect(kept().map(([, content]) => content)).toEqual([theirs, mine]);
+    });
+
+    const concurrent = choices.flatMap((choice) => [1, 2, 3].map((write) => ({ ...choice, write })));
+    it.each(concurrent)(
+      'loses nothing when the other device writes right after write $write, choosing $choice',
+      async ({ resolve, write }) => {
+        const mine = 'Le gardien rêve. La mer monte.';
+        const later = 'Le gardien chante. La mer monte.';
+        await conflict(mine);
+        const violations = watchWrites(mine, (count) => count === write && otherDraft(later));
+        compare();
+        resolve();
+        await confirm();
+
+        // The sequence stopped, or the result met the new text on its way: either way, a conflict with it.
+        expect(violations).toEqual([]);
+        expect(status()).toBe('Not saved · changed elsewhere');
+        expect(serverTexts()).toContain(theirs);
+        if (screen.queryByRole('button', { name: 'Compare and merge' }) !== null) compare();
+        expect(view().querySelector('.reconcile-text')?.textContent).toContain('Added by Other device: chante');
+        dismissPrevious();
+
+        for (const button of within(view()).getAllByRole('button', { name: 'Keep Other device' })) {
+          fireEvent.click(button);
+        }
+        await confirm();
+        expect(status()).toBe('Draft saved · changed since revision ' + server().revision);
+        expect(server().draft?.content).toBe(later);
+        expect(serverTexts()).toEqual(expect.arrayContaining([theirs, mine, later]));
+        expect(violations).toEqual([]);
+      },
+    );
+
+    describe('while a confirmation runs', () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+
+      const start = async () => {
+        await conflict(mine);
+        compare();
+        handEdit('rêve et veille');
+        hold = (call) => call.method === 'POST';
+        await confirm();
+      };
+
+      it('freezes the view, Cancel, and restoring a revision', async () => {
+        const summary = { documentId: 'doc-1', revision: 1, title: 'Le phare', name: null, createdAt: '2026-11-01' };
+        intercept = (call) => {
+          if (call.method !== 'GET') return undefined;
+          if (call.path === '/documents/doc-1/revisions') return reply(200, [summary]);
+          if (call.path === '/documents/doc-1/revisions/1') return reply(200, { ...summary, content: 'Avant.' });
+          return undefined;
+        };
+        await start();
+
+        expect(screen.getByText('Saving the merged text…')).toBeTruthy();
+        const disabled = (name: string) => within(view()).getByRole('button', { name }).hasAttribute('disabled');
+        expect(
+          ['Cancel', 'Saving…', 'Keep This device', 'Keep Other device', 'Keep both', 'Edit by hand'].map(disabled),
+        ).toEqual([true, true, true, true, true, true]);
+        expect(within(view()).getByRole('textbox', { name: 'Your text for this passage' })).toHaveProperty(
+          'readOnly',
+          true,
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'History' }));
+        await elapse();
+        fireEvent.click(screen.getByRole('button', { name: /Revision 1/ }));
+        await elapse();
+        expect(screen.getByRole('button', { name: 'Restore into editor' })).toHaveProperty('disabled', true);
+
+        await releaseHeld();
+        expect(server().draft?.content).toBe('Le gardien rêve et veille. La mer monte.');
+        expect(textarea().value).toBe('Le gardien rêve et veille. La mer monte.');
+      });
+
+      it('runs only once, and does not apply its result over a text changed meanwhile', async () => {
+        await start();
+        // The writer leaves and comes back: the text is read-only until the confirmation ends.
+        open('doc-2');
+        await elapse();
+        open('doc-1');
+        await elapse();
+        expect(textarea()).toHaveProperty('readOnly', true);
+        expect(screen.getByText('Saving the merged text…')).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'Compare and merge' })).toBeNull();
+
+        // Should the text change anyway, the result is not applied over it, and stays recoverable.
+        type('Le gardien rêve encore.');
+        await releaseHeld();
+        await elapse(5000);
+        expect(textarea().value).toBe('Le gardien rêve encore.');
+        expect(status()).toBe('Not saved · changed elsewhere');
+        expect(server().draft?.content).toBe(mine);
+        expect(kept().map(([, content]) => content)).toEqual([theirs, mine]);
+        expect(requests().filter((request) => request === 'POST /revisions')).toHaveLength(2);
+        expect(screen.getByRole('alert').textContent).toContain('Your text changed while the merge was being saved');
+        compare();
+        expect(within(view()).getByRole('textbox', { name: 'Your merged text' })).toHaveProperty(
+          'value',
+          'Le gardien rêve et veille. La mer monte.',
+        );
+      });
+
+      it.each([
+        {
+          stop: 'fails',
+          banner: 'The merge could not be finished',
+          act: () => {
+            intercept = (call) => (call.method === 'POST' ? reply(503) : undefined);
+          },
+        },
+        {
+          stop: 'meets a new text',
+          banner: 'The other device changed the text again',
+          act: () => otherDraft('Le gardien chante. La mer monte.'),
+        },
+      ])('keeps a confirmed hand edit when the confirmation $stop after the writer left', async ({ banner, act }) => {
+        const merged = 'Le gardien rêve et veille. La mer monte.';
+        await start();
+        open('doc-2');
+        await elapse();
+        open('doc-1');
+        await elapse();
+        act();
+        await releaseHeld();
+        intercept = () => undefined;
+
+        // The editor shown now did not start the confirmation: it still says what happened, and the text is kept.
+        expect(screen.getByRole('alert').textContent).toContain(banner);
+        expect(screen.getByRole('alert').textContent).toContain('It is kept');
+        expect(serverTexts()).toContain(theirs);
+        compare();
+        expect(within(view()).getByRole('textbox', { name: 'Your merged text' })).toHaveProperty('value', merged);
+        expect(within(view()).getByRole('button', { name: 'Confirm' })).toHaveProperty('disabled', true);
+
+        await retry();
+        expect(server().draft?.content).toBe(merged);
+        expect(textarea().value).toBe(merged);
+        expect(serverTexts()).toEqual(expect.arrayContaining([theirs, mine]));
+        expect(status()).toBe('Draft saved · changed since revision ' + server().revision);
+      });
+    });
+
+    it('keeps the other device’s text when that device wrote exactly the local text before the confirmation', async () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      compare();
+      handEdit('rêve et veille');
+      otherDraft(mine);
+      await confirm();
+
+      expect(kept()).toEqual([
+        [local, mine],
+        [other, theirs],
+      ]);
+      expect(server().draft?.content).toBe('Le gardien rêve et veille. La mer monte.');
+      expect(status()).toBe('Draft saved · changed since revision 4');
+    });
+
+    it('a hand edit keeps both texts, the other device’s first', async () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      compare();
+      fireEvent.click(within(view()).getByRole('button', { name: 'Edit by hand' }));
+      fireEvent.change(within(view()).getByRole('textbox', { name: 'Your text for this passage' }), {
+        target: { value: 'rêve et veille' },
+      });
+      await confirm();
+
+      expect(kept()).toEqual([
+        [other, theirs],
+        [local, mine],
+      ]);
+      expect(server().draft?.content).toBe('Le gardien rêve et veille. La mer monte.');
+    });
+
+    it('cancelling goes back to the text, still in conflict, and the page still warns', async () => {
+      const mine = 'Le gardien rêve. La mer monte.';
+      await conflict(mine);
+      compare();
+      expect(unload().defaultPrevented).toBe(true);
+      fireEvent.click(within(view()).getByRole('button', { name: 'Cancel' }));
+
+      expect(textarea().value).toBe(mine);
+      expect(screen.getByRole('button', { name: 'Compare and merge' })).toBeTruthy();
+      expect(status()).toBe('Not saved · changed elsewhere');
+      expect(unload().defaultPrevented).toBe(true);
+      await elapse(5000);
+      expect(calls).toEqual([]);
+      expect(server().draft?.content).toBe(theirs);
+    });
+
+    it('after a failure mid-sequence, keeps the conflict and the text, and a retry keeps nothing twice', async () => {
+      const mine = 'Le gardien dort. La mer descend.';
+      await conflict(mine);
+      compare();
+      // The local text is saved as the draft, then making it a version fails.
+      intercept = (call) => (call.method === 'POST' && server().draft?.content === mine ? reply(503) : undefined);
+      await confirm();
+
+      expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft', 'POST /revisions']);
+      expect(screen.getByRole('alert').textContent).toContain('The merge could not be finished');
+      expect(status()).toBe('Not saved · changed elsewhere');
+      expect(unload().defaultPrevented).toBe(true);
+      // The view still shows the other device's text, not this device's own write.
+      expect(view().querySelector('.reconcile-text')?.textContent).toContain('Added by Other device: veille');
+
+      intercept = () => undefined;
+      calls = [];
+      await retry();
+      expect(requests()).toEqual(['GET ', 'POST /revisions', 'PUT /draft']);
+      expect(kept()).toEqual([
+        [other, theirs],
+        [local, mine],
+      ]);
+      expect(server().draft?.content).toBe('Le gardien veille. La mer descend.');
+      expect(status()).toBe('Draft saved · changed since revision 4');
+    });
+
+    it('a retry after a lost answer keeps nothing twice', async () => {
+      const mine = 'Le gardien dort. La mer descend.';
+      await conflict(mine);
+      compare();
+      // The other device's text becomes a version, but the answer is lost.
+      intercept = (call) => {
+        if (call.method !== 'POST') return undefined;
+        intercept = () => undefined;
+        fakeApi(call);
+        return reply(503);
+      };
+      await confirm();
+      expect(kept()).toEqual([[other, theirs]]);
+      expect(screen.getByRole('alert').textContent).toContain('The merge could not be finished');
+
+      calls = [];
+      await retry();
+      expect(requests()).toEqual(['GET ', 'PUT /draft', 'POST /revisions', 'PUT /draft']);
+      expect(kept()).toEqual([
+        [other, theirs],
+        [local, mine],
+      ]);
+      expect(server().draft?.content).toBe('Le gardien veille. La mer descend.');
+    });
+
+    it('when the other device writes again mid-sequence, the view takes its new text and nothing is saved', async () => {
+      const mine = 'Le gardien dort. La mer descend.';
+      await conflict(mine);
+      compare();
+      intercept = (call) => {
+        if (call.method !== 'PUT') return undefined;
+        intercept = () => undefined;
+        otherDraft('Le gardien chante. La mer monte.');
+        return undefined;
+      };
+      await confirm();
+
+      // The new text is kept before the local text is written over it, then given back as the draft.
+      expect(requests()).toEqual([
+        'GET ',
+        'POST /revisions',
+        'PUT /draft',
+        'GET ',
+        'POST /revisions',
+        'PUT /draft',
+        'POST /revisions',
+        'PUT /draft',
+      ]);
+      expect(screen.getByRole('alert').textContent).toContain('The other device changed the text again');
+      expect(view().querySelector('.reconcile-text')?.textContent).toContain('Added by Other device: chante');
+      expect(status()).toBe('Not saved · changed elsewhere');
+      expect(server().draft?.content).toBe('Le gardien chante. La mer monte.');
+
+      calls = [];
+      dismissPrevious();
+      await confirm();
+      expect(kept()).toEqual([
+        [other, theirs],
+        [other, 'Le gardien chante. La mer monte.'],
+        [local, mine],
+      ]);
+      expect(server().draft?.content).toBe('Le gardien chante. La mer descend.');
+      expect(status()).toBe('Draft saved · changed since revision 5');
     });
   });
 

@@ -2,10 +2,12 @@ import type { Document } from '@reviewr/shared';
 import { contentMaxLength, describeError, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
-import { cacheDraft, draftOf, useAutosave } from '../autosave/useAutosave';
+import { draftOf, useAutosave } from '../autosave/useAutosave';
+import { ReconciliationView } from '../reconcile/ReconciliationView';
+import { sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
@@ -33,6 +35,20 @@ const statusText = (state: AutosaveState, revision: number, changedSinceVersion:
       return 'Not saved';
     case 'saved':
       return changedSinceVersion ? `Draft saved · changed since revision ${revision}` : `Saved · revision ${revision}`;
+  }
+};
+
+/** What happened to a merged text that was not applied. */
+const stopText = (stop: Stop): string => {
+  switch (stop.reason) {
+    case 'moved':
+      return 'The other device changed the text again, so your merged text was not applied.';
+    case 'failed': {
+      const error = inlineError(stop.error);
+      return `The merge could not be finished${error ? ` (${error})` : ''}.`;
+    }
+    case 'changed':
+      return 'Your text changed while the merge was being saved, so the merged text was not applied.';
   }
 };
 
@@ -109,33 +125,33 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     await onSaved(latest);
   };
 
-  /**
-   * After a draft conflict: keep the other device's draft in the history, as a version, then save the local text on
-   * top of it.
-   */
-  const keepMine = useMutation({
-    mutationFn: async () => {
-      const latest = await api.getDocument(document.id);
-      if (draftOf(latest).content === latest.content) return draftOf(latest);
-      const saved = await api.updateDocument(document.id, {
-        title: latest.title,
-        content: draftOf(latest).content,
-        baseRevision: latest.revision,
-      });
-      await onSaved(saved);
-      return draftOf(saved);
-    },
-    // Based on the draft the server has just confirmed, so the local text is sent unless it already is that draft.
-    onSuccess: (confirmed) => autosave.resolve(autosave.getSnapshot().content, confirmed),
-  });
+  /** Whether the reconciliation view is open, in place of the text, while the draft is in conflict. */
+  const [reconciling, setReconciling] = useState(false);
+  // Once the conflict is resolved, the next one starts with the banner again.
+  if (reconciling && state.status !== 'conflict') setReconciling(false);
 
-  /** After a draft conflict: drop the local text and take the other device's draft. */
-  const takeTheirs = () => {
-    const snapshot = autosave.getSnapshot();
-    if (snapshot.status !== 'conflict') return;
-    autosave.resolve(snapshot.server.content, snapshot.server);
-    cacheDraft(queryClient, document.id, snapshot.server);
-  };
+  /**
+   * The reconciliation of this document's conflict. It outlives the editor: a confirmation keeps running after the
+   * writer leaves, and its result and how it stopped are shown again when they come back.
+   */
+  const session = sessionFor({
+    id: document.id,
+    autosave,
+    api,
+    isConflict,
+    onDocument: (saved) => {
+      // The machine takes the draft from the cache, as from any read: after a stop, the view shows the newest text.
+      queryClient.setQueryData(queryKeys.document(saved.id), saved);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });
+    },
+  });
+  const sessionState = useSyncExternalStore(
+    useCallback((listener: () => void) => session.subscribe(listener), [session]),
+    useCallback(() => session.getSnapshot(), [session]),
+  );
+  /** A merged text is being saved: the texts cannot change until it ends. */
+  const busy = sessionState.running;
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
@@ -172,7 +188,10 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   // Closing the page is guarded for every document at once, by `useAutosaveGuard` in the app.
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
-  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error ?? keepMine.error);
+  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error);
+  const { result: pendingResult, stop } = sessionState;
+  /** The view replaces the text only while there is a conflict: once it is resolved, the text comes back. */
+  const showReconciliation = reconciling && state.status === 'conflict';
   const historyLabel = showHistory ? 'Hide history' : 'History';
   const status = save.isPending ? 'Saving…' : statusText(state, document.revision, changedSinceVersion);
 
@@ -243,13 +262,35 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
             </span>
           </div>
         ) : state.status === 'conflict' ? (
-          <div className="banner" role="alert">
-            <span>This text was also changed on another device.</span>
-            <button onClick={takeTheirs}>Discard mine, use the other text</button>
-            <button className="primary" disabled={keepMine.isPending} onClick={() => keepMine.mutate()}>
-              Keep mine, save the other as a version
-            </button>
-          </div>
+          busy ? (
+            <div className="banner" role="status">
+              <span>Saving the merged text…</span>
+            </div>
+          ) : stop !== undefined && pendingResult !== undefined ? (
+            <div className={stop.reason === 'failed' ? 'banner error' : 'banner'} role="alert">
+              <span>
+                {stopText(stop)}{' '}
+                {showReconciliation
+                  ? 'It is kept below: retry it, or copy what you need and dismiss it.'
+                  : 'It is kept: open the comparison to retry it or copy it.'}{' '}
+                Your text is intact. Some versions may already have been kept in the history.
+              </span>
+              {!showReconciliation && (
+                <button className="primary" onClick={() => setReconciling(true)}>
+                  Compare and merge
+                </button>
+              )}
+            </div>
+          ) : (
+            !showReconciliation && (
+              <div className="banner" role="alert">
+                <span>This text was also changed on another device.</span>
+                <button className="primary" onClick={() => setReconciling(true)}>
+                  Compare and merge
+                </button>
+              </div>
+            )
+          )
         ) : isConflict(save.error) ? (
           <div className="banner">
             <span>A newer version was saved elsewhere since you opened this document.</span>
@@ -262,26 +303,54 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           actionError && <div className="banner error">{actionError}</div>
         )}
 
-        <input
-          className="title-input"
-          placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
-          value={title}
-          maxLength={titleMaxLength}
-          onChange={(event) => setTitle(event.target.value)}
-        />
-        <textarea
-          className="content-input"
-          placeholder="Start writing…"
-          value={content}
-          maxLength={contentMaxLength}
-          onChange={(event) => autosave.edit(event.target.value)}
-          autoFocus
-        />
+        {showReconciliation && state.status === 'conflict' ? (
+          <div className="editor-reconcile">
+            <ReconciliationView
+              base={state.base.content}
+              mine={state.content}
+              theirs={state.server.content}
+              mineLabel="This device"
+              theirsLabel="Other device"
+              busy={busy}
+              previous={
+                pendingResult === undefined || busy
+                  ? undefined
+                  : {
+                      text: pendingResult,
+                      onRetry: () => void session.confirm(pendingResult),
+                      onDismiss: () => session.dismissResult(),
+                    }
+              }
+              onConfirm={(result) => void session.confirm(result)}
+              onCancel={() => setReconciling(false)}
+            />
+          </div>
+        ) : (
+          <>
+            <input
+              className="title-input"
+              placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
+              value={title}
+              maxLength={titleMaxLength}
+              onChange={(event) => setTitle(event.target.value)}
+            />
+            <textarea
+              className="content-input"
+              placeholder="Start writing…"
+              value={content}
+              maxLength={contentMaxLength}
+              readOnly={busy}
+              onChange={(event) => autosave.edit(event.target.value)}
+              autoFocus
+            />
+          </>
+        )}
       </section>
 
       {showHistory && (
         <RevisionHistory
           document={document}
+          restoreDisabled={busy}
           onRestore={(revision) => {
             setTitle(revision.title ?? '');
             autosave.edit(revision.content);
