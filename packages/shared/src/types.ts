@@ -134,3 +134,20 @@ export interface CreateRevisionInput {
    */
   baseRevision: number;
 }
+
+/**
+ * Payload of `PATCH /documents/:id`: rename a document. Creates no revision and leaves the content and the draft
+ * alone; the revisions already saved keep the title they were saved with.
+ */
+export interface RenameDocumentInput {
+  /** New title, kept as typed. Null, empty or blank makes the document untitled. Required: send null to clear. */
+  title: string | null;
+}
+
+/**
+ * Payload of `PATCH /documents/:id/revisions/:revision`: set or clear the label of a saved version.
+ */
+export interface NameRevisionInput {
+  /** Version label, trimmed. Null, empty or blank removes it. Required: send null to clear. */
+  name: string | null;
+}
