@@ -122,6 +122,9 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
       pending = settle(call()).finally(() => {
         settled = true;
       });
+      // If the call rejects while the test is still polling, the rejection has a handler; it is still thrown by
+      // the `await pending` below on the normal path.
+      void pending.catch(() => undefined);
       await waitForBlocked(1);
       expect(settled).toBe(false);
       await change(holder);
