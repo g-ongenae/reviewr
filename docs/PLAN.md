@@ -65,7 +65,7 @@ Web client — an autosave state machine, not just a debounce:
 - wire the core into the editor and the Composer through `PUT /documents/:id/draft`, with a saved / saving / retrying status; tell permanent failures (a deleted document) apart from temporary ones:
   - the editor of an existing document (done): it opens on the draft and saves it as the writer types; a document left before its text was saved keeps being saved in the background; a deleted document stops the saves for good and a refused text (too large) waits for a change, both with the text left on screen; a newer draft read from the server while the writer has unsaved text is a conflict, never a silent replacement; "Save version" flushes the draft, then creates the version through the old `PUT /documents/:id`;
   - a draft conflict shows a short banner in the editor, whose one action opens the reconciliation view in place of the text (done);
-  - later: the Composer; "Save version" through `POST /documents/:id/revisions`; the title saved by a rename instead of "Save version"; offer to save the text as a new document when the document was deleted;
+  - later: the Composer; "Save version" through `POST /documents/:id/revisions`; the title saved by a rename instead of "Save version";
 - the Composer creates the document on the first autosave with an idempotency key (retry-safe), and does not lose keystrokes typed while it is being created;
 - local buffer in IndexedDB, restored after a crash or a failed request; it also keeps the base (server draft and `draftVersion` the edits started from):
   - the storage module `apps/web/src/autosave/localBuffer.ts`: writes land in call order, a delete can be conditional on the confirmed text, it never throws into the editor, and its schema is versioned for the outbox (done);
@@ -78,10 +78,11 @@ Web client — an autosave state machine, not just a debounce:
   - the view opened from the editor on a draft conflict, its result saved against the server's `draftVersion` (done); if the server moves again or a request fails, the merge stops with the text on screen intact and the view takes the new text;
   - keep the local text as a named version before every reconciliation, not only for conflicts: a few ambiguous merges can still be silent (listed in `packages/merge/README.md`), in particular when one side changed more than about 1,000 words (done in the web editor: each side that the result would erase is kept as a version named after its side and the date, and a text in no revision is kept before anything overwrites it);
   - an unfinished merge is kept per document, outside the editor (done): it survives leaving the document, shows the merged text with "retry" and "dismiss" after a stop, and applies a result only when every text it was given is the result or is in a revision;
-  - later, recovery when a merge cannot be finished:
-    - show, so the writer can copy them, the texts the merge still holds and that are in no revision (older states of either side, replaced since by that side's own edits); today they are kept in memory and saved as versions by the next confirmation, but they are not on screen;
-    - a document deleted elsewhere: keep the unsaved text and the merged text reachable (today the "not found" page replaces the editor when the document is fetched again), and offer to save them as a new document;
-  - later: show the version names in the history panel; "keep all mine / all theirs" for texts with many conflicts;
+  - recovery when a merge cannot be finished or the document is gone (done):
+    - the texts an unfinished merge still holds, in no revision and not on screen, are listed in the editor, each with "copy" and an explicit "discard";
+    - a document deleted elsewhere: while this tab holds text for it (unsaved text, a merged text, texts of a merge), the page lists each text with "copy" and "save as a new document" instead of "not found", and only an explicit "discard" leaves that state;
+    - later: these texts are in memory only until the local buffer keeps them; an unsaved title is not offered;
+  - later: "keep all mine / all theirs" for texts with many conflicts;
   - run the package's tests on a real Hermes runtime (only the Hermes compiler was checked);
 - flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short, until the local buffer is used there);
 - tests with delayed responses, failed requests, typing during creation, and offline edits reconciled against a moved server draft.
