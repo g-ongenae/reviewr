@@ -58,7 +58,7 @@ Small changes on the existing schema, not the commit model:
 - `POST /documents` accepts an empty draft and creates no revision: a document can exist with only a draft.
   - `draftOnly` creates the document at revision 0 with its text in the draft, and every endpoint handles such a document (done); `POST /documents { title, content }` still creates revision 1 for the builds already installed, and their old `PUT` keeps a draft they never saw as revision 1 before answering 409;
   - a creation can be sent again safely (done): the client chooses the document's id; the same creation answers the document as it is now, a different body is refused (422), and an id whose document was deleted is not created again (410);
-  - later: the Composer and the outbox use it.
+  - the web's blank page uses it (done); later: the outbox and the mobile app.
 - Keep the current `PUT /documents/:id` working as "save draft + create revision" until the new mobile build ships. It keeps the draft columns equal to the saved content, and it never overwrites an autosaved draft that differs from the head: it keeps that draft as a revision first, then answers 409 (done).
 - Shared types: structured 409 bodies (done: `draft_conflict` and `stale_revision`, read with `conflictOf`).
 
@@ -68,8 +68,10 @@ Web client — an autosave state machine, not just a debounce:
 - wire the core into the editor and the Composer through `PUT /documents/:id/draft`, with a saved / saving / retrying status; tell permanent failures (a deleted document) apart from temporary ones:
   - the editor of an existing document (done): it opens on the draft and saves it as the writer types; a document left before its text was saved keeps being saved in the background; a deleted document stops the saves for good and a refused text (too large) waits for a change, both with the text left on screen; a newer draft read from the server while the writer has unsaved text is a conflict, never a silent replacement; "Save version" flushes the draft, then saves it as a version through `POST /documents/:id/revisions`, with an optional name; a draft moved elsewhere becomes a conflict, and a head moved elsewhere is retried on the new head;
   - a draft conflict shows a short banner in the editor, whose one action opens the reconciliation view in place of the text (done);
-  - later: the Composer; "Save version" through `POST /documents/:id/revisions`; the title saved by a rename instead of "Save version";
-- the Composer creates the document on the first autosave with an idempotency key (retry-safe), and does not lose keystrokes typed while it is being created;
+- the Composer creates the document on the first autosave with an idempotency key (retry-safe), and does not lose keystrokes typed while it is being created:
+  - the blank page is the editor on a document that does not exist yet, and its first autosave creates it as a draft-only document under an id chosen by the client (done); the creation is sent again unchanged until it is answered, the text typed meanwhile is saved as a draft afterwards, and the text field is not rebuilt, so the caret, the selection and a composition in progress survive;
+  - a creation refused for good keeps the text on screen and can be tried again under a new id (done);
+  - later: a page typed while the server is unreachable is kept in memory only, until the local buffer keeps it; a title typed on a page with no text is not saved until some text is typed;
 - local buffer in IndexedDB, restored after a crash or a failed request; it also keeps the base (server draft and `draftVersion` the edits started from):
   - the storage module `apps/web/src/autosave/localBuffer.ts`: writes land in call order, a delete can be conditional on the confirmed text, it never throws into the editor, and its schema is versioned for the outbox (done);
   - use it from the editor and the Composer: write on every edit, delete once the server confirmed the save, restore on start; when the buffer answers a failure (unavailable, full, stalled), tell the writer the local copy is not being kept, and never reload or discard the text in memory;
