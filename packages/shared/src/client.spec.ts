@@ -4,6 +4,7 @@ import { ReviewrClient } from './client.js';
 import { conflictOf } from './errors.js';
 import type {
   ConflictBody,
+  CreateDraftDocumentInput,
   CreateRevisionInput,
   Document,
   DocumentDraft,
@@ -176,5 +177,59 @@ describe('conflictOf', () => {
     ['a string revision', { code: 'stale_revision', revision: '2' }],
   ])('rejects a known code with %s', (_case: string, body: object) => {
     expect(conflictOf(conflict409(body))).toBeUndefined();
+  });
+});
+
+describe('ReviewrClient.createDocument', () => {
+  const document: Document = {
+    id: '6f1c2b8e-3d4a-4f5b-9c6d-7e8f9a0b1c2d',
+    // eslint-disable-next-line no-null/no-null -- the API sends JSON null for an untitled document
+    title: null,
+    revision: 0,
+    content: '',
+    createdAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    // eslint-disable-next-line no-null/no-null -- a draft without a revision has no base
+    draft: { content: 'premier jet', draftVersion: 1, baseRevision: null },
+  };
+
+  it('sends a draft-only creation with its id to POST /documents, the same body every time', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(201, document));
+    const client: ReviewrClient = new ReviewrClient('http://api.test', fetchFn);
+    const input: CreateDraftDocumentInput = { id: document.id, content: 'premier jet', draftOnly: true };
+
+    await expect(client.createDocument(input)).resolves.toEqual(document);
+    await expect(client.createDocument(input)).resolves.toEqual(document);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    for (const [url, init] of fetchFn.mock.calls as unknown as [string, RequestInit][]) {
+      expect(url).toBe('http://api.test/documents');
+      expect(init).toMatchObject({ method: 'POST', body: JSON.stringify(input) });
+    }
+  });
+
+  it('still sends the body of a creation with a revision as it was', async () => {
+    const fetchFn = vi.fn(async () => jsonResponse(201, { ...document, revision: 1, content: 'v1' }));
+    const client: ReviewrClient = new ReviewrClient('http://api.test', fetchFn);
+
+    await client.createDocument({ title: 'Chapitre', content: 'v1' });
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ title: 'Chapitre', content: 'v1' }) }),
+    );
+  });
+
+  it('rejects with the status of a reused id (422) or a deleted document (410)', async () => {
+    for (const status of [422, 410]) {
+      const client: ReviewrClient = new ReviewrClient(
+        'http://api.test',
+        vi.fn(async () => jsonResponse(status, { statusCode: status, message: 'refused' })),
+      );
+      const error: unknown = await client
+        .createDocument({ id: document.id, content: 'autre', draftOnly: true })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).status).toBe(status);
+    }
   });
 });

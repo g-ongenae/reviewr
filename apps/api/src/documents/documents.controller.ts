@@ -14,7 +14,7 @@ import {
 } from '@nestjs/common';
 import type { Document, DocumentDraft, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import { DocumentsService } from './documents.service.js';
-import { CreateDocumentDto } from './dto/create-document.dto.js';
+import { CreateDocumentBodyDto } from './dto/create-document-body.dto.js';
 import { CreateRevisionDto } from './dto/create-revision.dto.js';
 import { NameRevisionDto } from './dto/name-revision.dto.js';
 import { RenameDocumentDto } from './dto/rename-document.dto.js';
@@ -40,10 +40,10 @@ export class DocumentsController {
   }
 
   /**
-   * POST /documents
+   * POST /documents: 201 with the document, also when the same creation (same `id` and body) is sent again.
    */
   @Post()
-  public async create(@Body() body: CreateDocumentDto): Promise<Document> {
+  public async create(@Body() body: CreateDocumentBodyDto): Promise<Document> {
     return this.documentsService.create(body);
   }
 

@@ -51,11 +51,14 @@ Small changes on the existing schema, not the commit model:
   - later: make `Document.draft` required in the shared type, now that the web uses it; the same tests for the rename endpoints.
 - `POST /documents/:id/revisions` `{ name?, draftVersion, baseRevision }`: snapshots the draft atomically; 409 if either the draft or the head moved. Saving a draft identical to the head is a no-op.
   - the endpoint, `ReviewrClient.createRevision` and the `name` listed on revisions (done); the same request sent twice after a lost response creates one revision only;
-  - later: a document without a revision yet (`baseRevision` null); decide whether a title changed alone can be saved as a version, since a draft identical to the head is a no-op.
+  - a document without a revision yet (done): the base is `null` or 0, the first version is revision 1, and an empty draft is a no-op; later: decide whether a title changed alone can be saved as a version, since a draft identical to the head is a no-op.
 - `PATCH /documents/:id` (title) and `PATCH /documents/:id/revisions/:n` (version name). Add `PATCH` to CORS.
   - the two endpoints, `ReviewrClient.renameDocument` and `nameRevision`, and `PATCH` in CORS (done); a rename creates no revision, the last one wins, and the next version saved from the draft takes the new title; the web history panel shows the version names and lets the writer name, rename and clear them (done);
   - later: use them in the web and mobile apps (rename from the editor, name versions in the history). The old `PUT /documents/:id` always carries a title and applies it, so it puts an old title back when an app loaded the document before a rename: this ends for an app once it renames through `PATCH`, and stays for builds already installed.
 - `POST /documents` accepts an empty draft and creates no revision: a document can exist with only a draft.
+  - `draftOnly` creates the document at revision 0 with its text in the draft, and every endpoint handles such a document (done); `POST /documents { title, content }` still creates revision 1 for the builds already installed, and their old `PUT` keeps a draft they never saw as revision 1 before answering 409;
+  - a creation can be sent again safely (done): the client chooses the document's id; the same creation answers the document as it is now, a different body is refused (422), and an id whose document was deleted is not created again (410);
+  - later: the Composer and the outbox use it.
 - Keep the current `PUT /documents/:id` working as "save draft + create revision" until the new mobile build ships. It keeps the draft columns equal to the saved content, and it never overwrites an autosaved draft that differs from the head: it keeps that draft as a revision first, then answers 409 (done).
 - Shared types: structured 409 bodies (done: `draft_conflict` and `stale_revision`, read with `conflictOf`).
 
