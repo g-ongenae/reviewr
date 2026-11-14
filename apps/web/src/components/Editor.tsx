@@ -97,19 +97,21 @@ const stopText = (stop: Stop): string => {
 
 export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
-  const { autosave, state, discard } = useAutosave(document, isNew);
+  const { autosave, state, discard, pendingTitle, keepTitle } = useAutosave(document, isNew);
   /**
    * The title as typed (empty when untitled), saved on its own by a rename. Every edit of the field is numbered, and
    * the field is saved only once the server confirmed a rename sent at its latest edit: an edit back to an earlier
    * title is an edit like any other, sent again, since an answer may arrive, or be lost, for the one before it.
    */
-  const [title, setTitle] = useState(document.title ?? '');
-  const [titleEdit, setTitleEdit] = useState(0);
+  // A title typed before the document existed, on an earlier editor of this page, is still to be saved.
+  const [title, setTitle] = useState(() => (isNew ? pendingTitle : undefined) ?? document.title ?? '');
+  const [titleEdit, setTitleEdit] = useState(isNew && pendingTitle !== undefined ? 1 : 0);
   const [titleSaved, setTitleSaved] = useState(0);
   const titleDirty = titleSaved < titleEdit;
   const editTitle = (value: string) => {
     setTitle(value);
     setTitleEdit((edit) => edit + 1);
+    if (isNew) keepTitle(value);
   };
   /** The server's title as last read or confirmed: a new one replaces the field only when no edit is unsaved. */
   const [serverTitle, setServerTitle] = useState(document.title);

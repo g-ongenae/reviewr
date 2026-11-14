@@ -326,7 +326,8 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         unknownText = undefined;
         failures = 0;
         lastError = undefined;
-        reconcile();
+        // A read kept meanwhile may hold the text sent (when the server saved another one): it is this machine's.
+        reconcile(sent.content);
         // Another text saved than the one sent: the edits it carried are not saved yet.
         if (server === undefined && saved === sent.content) {
           savedSeq = Math.max(savedSeq, seq);

@@ -187,6 +187,25 @@ describe('createAutosave', () => {
     });
   });
 
+  it('takes a read holding the text sent as the base, when the answer names another text saved', async () => {
+    start({ base: { content: '', draftVersion: 0 } });
+    autosave.edit('B');
+    void autosave.flush();
+    autosave.edit('C');
+    // A read made while the request was in flight: the server holds the text sent, at a newer version.
+    autosave.refresh({ content: 'B', draftVersion: 2 });
+    await server.current().answer({ kind: 'saved', draftVersion: 1, content: 'A' });
+    expect(autosave.getSnapshot()).toMatchObject({ status: 'saving', base: { content: 'B', draftVersion: 2 } });
+    expect(server.calls.at(-1)).toEqual({ content: 'C', draftVersion: 2 });
+
+    await server.current().answer({ kind: 'saved', draftVersion: 3 });
+    expect(autosave.getSnapshot()).toEqual({
+      status: 'saved',
+      content: 'C',
+      base: { content: 'C', draftVersion: 3 },
+    });
+  });
+
   describe('flush', () => {
     it('saves right away during the debounce, and settles once saved', async () => {
       start();
@@ -895,10 +914,12 @@ const seeded = (seed: number) => {
 /**
  * Random interleavings of local edits, writes from another device, reads handed to `refresh` late and out of order,
  * and answers (saved, 409, network failure, refusal) delivered with delays, against a fake server with the rules of
- * `saveDraft`. After every step: `saved` only for the text of the newest confirmed draft given; the text changes only by
- * an edit, a `resolve`, or a `refresh` of a saved machine; one request at a time; no refused text sent twice. At the
- * end the run settles, and once the latest read is delivered the machine is saved with the server's text, or keeps its
- * text in conflict or refused.
+ * `saveDraft`. The server may also answer as a creation sent again does: `saved` with the text it holds, written
+ * earlier by this machine, instead of the one sent. After every step: `saved` only for the text of the newest confirmed
+ * draft given; a flush on a text left unchanged settles as saved only once that text was confirmed; the text changes only by an
+ * edit, a `resolve`, or a `refresh` of a saved machine; one request at a time; no refused text sent twice. At the end
+ * the run settles, and once the latest read is delivered the machine is saved with the server's text, or keeps its text
+ * in conflict or refused.
  */
 describe('createAutosave, randomised', () => {
   const localTexts = ['A', 'B', 'C', 'D', 'too long 1', 'too long 2'];
@@ -915,12 +936,18 @@ describe('createAutosave, randomised', () => {
 
     // The server, and what the machine has been told: the newest confirmed draft given to it.
     let draft: Draft = { content: 'A', draftVersion: 1 };
+    /** Whether this machine wrote the server's draft: only then may the server answer with it instead of a text sent. */
+    let draftIsOurs = true;
     let told: Draft = draft;
+    /** Every text the machine was told the server held, at any version. */
+    const confirmedTexts = new Set([draft.content]);
     const tell = (confirmed: Draft) => {
+      confirmedTexts.add(confirmed.content);
       if (confirmed.draftVersion > told.draftVersion) told = confirmed;
     };
     const reads: Draft[] = [];
     let failureRate = 0.2;
+    let replayRate = 0.15;
 
     // Requests: handled by the server when they arrive, answered later.
     interface Request {
@@ -972,12 +999,16 @@ describe('createAutosave, randomised', () => {
       } else {
         if (tooLong(sent.content)) {
           answer = { kind: 'rejected', error: new Error('413'), permanent: false };
+        } else if (draftIsOurs && draft.content !== sent.content && random() < replayRate) {
+          // As a creation sent again: the server keeps the text it holds, and says so.
+          answer = { kind: 'saved', draftVersion: draft.draftVersion, content: draft.content };
         } else if (draft.content === sent.content) {
           answer = { kind: 'saved', draftVersion: draft.draftVersion };
         } else if (draft.draftVersion !== sent.draftVersion) {
           answer = { kind: 'conflict', server: draft };
         } else {
           draft = { content: sent.content, draftVersion: draft.draftVersion + 1 };
+          draftIsOurs = true;
           answer = { kind: 'saved', draftVersion: draft.draftVersion };
         }
         if (random() < failureRate / 2) answer = { kind: 'failed', error: new Error('answer lost') };
@@ -992,7 +1023,9 @@ describe('createAutosave, randomised', () => {
       if (request?.answer === undefined) return false;
       requests.shift();
       const result = request.answer;
-      if (result.kind === 'saved') tell({ content: request.sent.content, draftVersion: result.draftVersion });
+      if (result.kind === 'saved') {
+        tell({ content: result.content ?? request.sent.content, draftVersion: result.draftVersion });
+      }
       if (result.kind === 'conflict') tell(result.server);
       // Only a refusal the machine received counts: a lost one may be sent again.
       if (result.kind === 'rejected') refusedSent.add(request.sent.content);
@@ -1018,6 +1051,8 @@ describe('createAutosave, randomised', () => {
       autosave.refresh(read);
     };
 
+    /** How many times the text changed, so that a flush knows whether the text it was called on is still the same. */
+    let changes = 0;
     const check = (action: string, before: AutosaveState) => {
       if (violation !== undefined) fail(violation);
       const state = autosave.getSnapshot();
@@ -1025,6 +1060,7 @@ describe('createAutosave, randomised', () => {
         fail(`saved with ${JSON.stringify(state.content)}, newest confirmed draft given is ${JSON.stringify(told)}`);
       }
       if (state.content !== before.content) {
+        changes++;
         const allowed =
           action.startsWith('edit') ||
           action.startsWith('resolve') ||
@@ -1057,13 +1093,23 @@ describe('createAutosave, randomised', () => {
         const text = pick(remoteTexts);
         await act(`other device writes ${text}`, () => {
           draft = { content: text, draftVersion: draft.draftVersion + 1 };
+          draftIsOurs = false;
         });
       } else if (roll < 0.77) {
         await act('read', () => void reads.push(draft));
       } else if (roll < 0.86) {
         await act('deliver read', () => deliverRead(Math.floor(random() * reads.length)));
       } else if (roll < 0.9) {
-        await act('flush', () => void autosave.flush());
+        const text = autosave.getSnapshot().content;
+        const changesAtCall = changes;
+        await act('flush', () => {
+          void autosave.flush().then((outcome) => {
+            // Text typed after the call may have replaced it; while it is still the same, it must be on the server.
+            if (outcome === 'saved' && changes === changesAtCall && !confirmedTexts.has(text)) {
+              violation ??= `flush settled as saved, but ${JSON.stringify(text)} was never confirmed`;
+            }
+          });
+        });
       } else {
         const state = autosave.getSnapshot();
         if (state.status === 'conflict') {
@@ -1077,6 +1123,7 @@ describe('createAutosave, randomised', () => {
 
     // The end: no more edits or writes, nothing lost on the network; everything pending is delivered.
     failureRate = 0;
+    replayRate = 0;
     const settleAll = async () => {
       for (let round = 0; round < 200; round++) {
         if (requests.length === 0 && due.length === 0 && reads.length === 0) return;

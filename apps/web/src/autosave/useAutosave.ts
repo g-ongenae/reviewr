@@ -138,6 +138,11 @@ interface Entry {
    * subscription to the query cache; kept when the query is dropped from the cache.
    */
   deleted: boolean;
+  /**
+   * A title typed on a page whose document does not exist yet: it can be saved only once the document is created, by
+   * the editor shown then. Kept here so that an editor mounted again on the page (after "Try again") still has it.
+   */
+  title?: string;
 }
 
 /**
@@ -253,17 +258,25 @@ export const entryOf = (queryClient: QueryClient, id: string): Readonly<Entry> |
   registryOf(queryClient).get(id);
 
 /**
- * Gives the text of a page whose creation was refused a new id, to create it again; the refused machine is dropped.
- * Answers the new id.
+ * Gives the text and the title of a page whose creation was refused a new id, to create it again; the refused machine
+ * is dropped. Answers the new id.
  */
 export const createAgain = (queryClient: QueryClient, id: string): string => {
-  const text = registryOf(queryClient).get(id)?.autosave.getSnapshot().content ?? '';
+  const refused = registryOf(queryClient).get(id);
+  const text = refused?.autosave.getSnapshot().content ?? '';
   const next = newDocumentId();
   const entry = entryFor(queryClient, blankDocument(next), true);
+  entry.title = refused?.title;
   entry.autosave.edit(text);
   void entry.autosave.flush();
   discardAutosave(queryClient, id);
   return next;
+};
+
+/** Keeps the title typed on a page whose document is not created yet, with its machine (see `Entry.title`). */
+const keepPendingTitle = (queryClient: QueryClient, id: string, title: string) => {
+  const entry = registryOf(queryClient).get(id);
+  if (entry !== undefined) entry.title = title;
 };
 
 /** Drops a document's machine without saving, for a document that no longer exists. */
@@ -309,6 +322,10 @@ export interface UseAutosave {
   state: AutosaveState;
   /** Drops the machine without saving, for a document that no longer exists. */
   discard: () => void;
+  /** The title typed on the page before its document was created, if any (see `Entry.title`). */
+  pendingTitle: string | undefined;
+  /** Keeps the title typed on a page whose document is not created yet. */
+  keepTitle: (title: string) => void;
 }
 
 /**
@@ -336,7 +353,9 @@ export const useAutosave = (document: Document, create = false): UseAutosave => 
 
   const discard = () => discardAutosave(queryClient, document.id);
 
-  return { autosave, state, discard };
+  const keepTitle = (title: string) => keepPendingTitle(queryClient, document.id, title);
+
+  return { autosave, state, discard, pendingTitle: entry.title, keepTitle };
 };
 
 /**
