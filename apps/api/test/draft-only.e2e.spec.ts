@@ -107,6 +107,15 @@ describe('Documents with only a draft', () => {
       expect((await call('POST', '/documents', { content: 'x', draftOnly: 'yes' })).status).toBe(400);
       expect((await call('POST', '/documents', { id: 'mon-id', content: 'x' })).status).toBe(400);
 
+      // An explicit null is not "absent": it is refused, and nothing is stored (a null id must not reach the table).
+      const count = async (table: 'documents' | 'document_creations'): Promise<number> =>
+        (await pglite.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`)).rows[0]?.n ?? -1;
+      const before = { documents: await count('documents'), creations: await count('document_creations') };
+      expect((await call('POST', '/documents', { id: null, content: 'x', draftOnly: true })).status).toBe(400);
+      expect((await call('POST', '/documents', { id: null, content: 'x' })).status).toBe(400);
+      expect((await call('POST', '/documents', { content: 'x', draftOnly: null })).status).toBe(400);
+      expect({ documents: await count('documents'), creations: await count('document_creations') }).toEqual(before);
+
       const doc = await createDraft('x');
       const put = await call('PUT', `/documents/${doc.id}`, {
         title: 'Brouillon',
