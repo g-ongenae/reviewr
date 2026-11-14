@@ -284,7 +284,7 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, tool
   /** Earlier texts of the merge, in no version, that neither the text nor the view shows. */
   const hidden = busy ? [] : hiddenTexts(sessionState, state);
   /** Other texts that tabs closed before saving left on this device for this document. */
-  const copies = useKeptCopies(document.id);
+  const copies = useKeptCopies(document.id).filter((text) => text !== content);
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
@@ -530,13 +530,13 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, tool
           <div className="held-texts">
             <p>
               {copies.length === 1
-                ? 'This device also kept another copy of this text, from a tab closed before it was saved.'
-                : 'This device also kept other copies of this text, from tabs closed before they were saved.'}{' '}
+                ? 'This device also kept another copy of this text, which was not saved.'
+                : 'This device also kept other copies of this text, which were not saved.'}{' '}
               Copy what you need, then discard {copies.length === 1 ? 'it' : 'them'}.
             </p>
-            {copies.map(({ key, content: text }) => (
-              <HeldText key={key} label={keptCopyLabel} text={text}>
-                <button type="button" onClick={() => discardCopy(queryClient, document.id, key)}>
+            {copies.map((text) => (
+              <HeldText key={text} label={keptCopyLabel} text={text}>
+                <button type="button" onClick={() => discardCopy(queryClient, document.id, text)}>
                   Discard this copy
                 </button>
               </HeldText>

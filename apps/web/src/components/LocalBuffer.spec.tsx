@@ -1,8 +1,9 @@
-import type { Document, DocumentSummary, SaveDraftInput } from '@reviewr/shared';
+import type { CreateDraftDocumentInput, Document, DocumentSummary, SaveDraftInput } from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, within, type RenderResult } from '@testing-library/react';
 import { IDBFactory } from 'fake-indexeddb';
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reachability } from '../api';
 import { App } from '../App';
@@ -13,7 +14,7 @@ import {
   type LocalBuffer,
   type LocalBufferOptions,
 } from '../autosave/localBuffer';
-import { entryOf } from '../autosave/useAutosave';
+import { abandonAutosave, entryOf } from '../autosave/useAutosave';
 import { createQueryClient } from '../queryClient';
 
 const fetchMock = vi.mocked(fetch);
@@ -36,6 +37,8 @@ const notFound = () => reply(404, { statusCode: 404, message: 'Not found' });
 const original = 'Il veillait.';
 
 let db: Map<string, Document>;
+/** Every text the server ever saved as a draft. */
+let everSaved: Set<string>;
 
 /** The API's rules for listing and reading documents, and for saving a draft. */
 const fakeApi = ({ method, path, body }: Call): Response => {
@@ -49,6 +52,22 @@ const fakeApi = ({ method, path, body }: Call): Response => {
       updatedAt,
     }));
     return reply(200, list);
+  }
+  if (method === 'POST' && path === '/documents') {
+    const input = body as CreateDraftDocumentInput;
+    const existing = db.get(input.id);
+    if (existing !== undefined) return reply(201, existing);
+    const created: Document = {
+      id: input.id,
+      title: input.title ?? null,
+      revision: 0,
+      content: '',
+      createdAt: '2026-11-01T10:00:00.000Z',
+      updatedAt: '2026-11-01T10:00:00.000Z',
+      draft: { content: input.content, draftVersion: 1, baseRevision: null },
+    };
+    db.set(input.id, created);
+    return reply(201, created);
   }
   const [, , id, sub] = path.split('/');
   const document = id === undefined ? undefined : db.get(id);
@@ -64,6 +83,7 @@ const fakeApi = ({ method, path, body }: Call): Response => {
     }
     const saved = { ...draft, content: input.content, draftVersion: draft.draftVersion + 1 };
     db.set(document.id, { ...document, draft: saved });
+    everSaved.add(input.content);
     return reply(200, saved);
   }
   return notFound();
@@ -87,8 +107,6 @@ let lose: (call: Call) => boolean;
 /** Requests matching `hold` wait for `releaseHeld`. */
 let hold: (call: Call) => boolean;
 let held: (() => void)[];
-/** A page that crashed sends nothing more: its requests never get an answer. */
-let frozen: boolean;
 
 const NAME = 'reviewr-test';
 let factory: IDBFactory;
@@ -123,71 +141,167 @@ const releaseHeld = async () => {
   await settle();
 };
 
+/** Writes and deletes records as another tab would, with its own connection. */
+const raw = async (change: (buffer: LocalBuffer) => Promise<unknown>) => {
+  const buffer = openLocalBuffer(bufferOptions());
+  await act(async () => {
+    await change(buffer);
+    await buffer.close();
+  });
+};
+
 /** What the buffer holds, read as another page would: each key with its text. */
 const stored = async (): Promise<[string, string][]> => {
-  const reader = openLocalBuffer(bufferOptions());
   let entries: [string, string][] = [];
-  await act(async () => {
-    const result = await reader.list();
+  await raw(async (buffer) => {
+    const result = await buffer.list();
     entries = result.entries.map(({ key, content }) => [key, content]);
-    await reader.close();
   });
   return entries.sort(([a], [b]) => a.localeCompare(b));
 };
 
-/** The tabs' locks: a tab holds its own while it lives, a crash releases them. */
+/** Which simulated tab holds each lock. A crash releases a tab's locks and drops the requests it was waiting on. */
 let heldLocks: Map<string, number>;
+/** While set, requests for another tab's lock (`ifAvailable`) wait for `grantClaims`. */
+let claimsWait: boolean;
+let pendingClaims: { tab: number; grant: () => void }[];
 let tabs: number;
 
 const locksOf = (tab: number): Locks => ({
   request: (name: string, ...rest: unknown[]) => {
     const callback = rest.at(-1) as (lock: Lock | null) => unknown;
     const options = (rest.length > 1 ? rest[0] : {}) as LockOptions;
-    if (heldLocks.has(name)) {
-      return options.ifAvailable === true ? Promise.resolve(callback(null)) : new Promise(() => {});
+    // Decided when granted, on the locks held then.
+    const decide = (): unknown => {
+      if (heldLocks.has(name)) return options.ifAvailable === true ? callback(null) : new Promise(() => {});
+      heldLocks.set(name, tab);
+      return callback({ name, mode: 'exclusive' });
+    };
+    if (options.ifAvailable === true && claimsWait) {
+      return new Promise<unknown>((resolve) => pendingClaims.push({ tab, grant: () => resolve(decide()) }));
     }
-    heldLocks.set(name, tab);
-    return Promise.resolve(callback({ name, mode: 'exclusive' }));
+    return Promise.resolve(decide());
   },
 });
+
+const grantClaims = async () => {
+  claimsWait = false;
+  for (const { grant } of pendingClaims.splice(0)) grant();
+  await settle();
+};
+
+/** Faults a page's buffer answers instead of writing. */
+interface Faults {
+  put?: BufferFailureReason;
+  delete?: BufferFailureReason;
+}
+
+/**
+ * A page's buffer as a crash sees it: calls reach IndexedDB one at a time, so on a crash the calls not sent yet are
+ * dropped (only committed records stay), and no answer reaches the page any more. `pause` keeps calls from being sent.
+ */
+interface CrashableBuffer extends LocalBuffer {
+  faults: Faults;
+  pause: () => void;
+  resume: () => void;
+  crash: () => void;
+}
+
+const crashable = (real: LocalBuffer = openLocalBuffer(bufferOptions())): CrashableBuffer => {
+  let crashed = false;
+  let paused = false;
+  let running = false;
+  const queue: (() => Promise<void>)[] = [];
+  const pump = async () => {
+    if (running) return;
+    running = true;
+    for (let job = queue.shift(); job !== undefined && !crashed; job = paused ? undefined : queue.shift()) await job();
+    running = false;
+    if (!paused && !crashed && queue.length > 0) void pump();
+  };
+  const call = <T,>(run: () => Promise<T>) =>
+    new Promise<T>((resolve) => {
+      if (crashed) return;
+      queue.push(async () => {
+        const result = await run();
+        if (!crashed) resolve(result);
+      });
+      if (!paused) void pump();
+    });
+  const failure = (reason: BufferFailureReason) => ({ ok: false as const, reason, error: new Error(reason) });
+  const buffer: CrashableBuffer = {
+    faults: {},
+    get: (key) => call(() => real.get(key)),
+    list: () => call(() => real.list()),
+    put: (key, value) => {
+      const record = { content: value.content, base: value.base };
+      return call(() => (buffer.faults.put ? Promise.resolve(failure(buffer.faults.put)) : real.put(key, record)));
+    },
+    delete: (key, condition) =>
+      call(() =>
+        buffer.faults.delete
+          ? Promise.resolve({ ...failure(buffer.faults.delete), deleted: false as const })
+          : real.delete(key, condition),
+      ),
+    close: () => real.close(),
+    pause: () => {
+      paused = true;
+    },
+    resume: () => {
+      paused = false;
+      void pump();
+    },
+    crash: () => {
+      crashed = true;
+      queue.length = 0;
+    },
+  };
+  return buffer;
+};
 
 interface Page {
   queryClient: QueryClient;
   view: RenderResult;
-  buffer: LocalBuffer | null;
-  /** The page goes away at once, as when the browser crashes: nothing more is sent or written. */
+  buffer: CrashableBuffer | null;
+  /** The page goes away at once, as when the browser crashes: nothing more is sent, written or answered. */
   crash: () => Promise<void>;
 }
 
+interface LoadOptions {
+  buffer?: LocalBuffer | null;
+  locks?: boolean;
+  strict?: boolean;
+}
+
 /** Opens the app in a new tab, at `hash`, on the same IndexedDB as the tabs before it. */
-const load = async (hash = '#/documents/doc-1', buffer: LocalBuffer | null = openLocalBuffer(bufferOptions())) => {
+const load = async (hash = '#/documents/doc-1', options: LoadOptions = {}) => {
   window.history.replaceState(null, '', `/${hash}`);
   const tab = ++tabs;
+  const buffer = options.buffer === null ? null : crashable(options.buffer);
   const queryClient = createQueryClient();
   queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false } });
-  configureDeviceBuffer(queryClient, { buffer, locks: locksOf(tab), tabId: `tab-${tab}` });
-  const view = render(
+  configureDeviceBuffer(queryClient, {
+    buffer,
+    locks: options.locks === false ? null : locksOf(tab),
+    tabId: `tab-${tab}`,
+  });
+  const app = (
     <QueryClientProvider client={queryClient}>
       <App />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(options.strict === true ? <StrictMode>{app}</StrictMode> : app);
   const page: Page = {
     queryClient,
     view,
     buffer,
     crash: async () => {
-      frozen = true;
-      view.unmount();
-      await act(async () => {
-        await Promise.resolve();
-      });
-      // The machines of the page that crashed stay waiting forever: their timers and answers never come.
-      vi.clearAllTimers();
-      frozen = false;
+      buffer?.crash();
+      abandonAutosave(queryClient);
       for (const [name, owner] of heldLocks) if (owner === tab) heldLocks.delete(name);
-      await act(async () => {
-        await buffer?.close();
-      });
+      pendingClaims = pendingClaims.filter((claim) => claim.tab !== tab);
+      view.unmount();
+      await settle();
     },
   };
   await elapse();
@@ -228,13 +342,15 @@ beforeEach(() => {
       },
     ]),
   );
+  everSaved = new Set();
   calls = [];
   lose = () => false;
   hold = () => false;
   held = [];
-  frozen = false;
   factory = new IDBFactory();
   heldLocks = new Map();
+  claimsWait = false;
+  pendingClaims = [];
   tabs = 0;
 
   fetchMock.mockImplementation((input, init) => {
@@ -246,7 +362,6 @@ beforeEach(() => {
       ),
       body: typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined,
     };
-    if (frozen) return new Promise<Response>(() => {});
     calls.push(call);
     if (lose(call)) return Promise.reject(new TypeError('Failed to fetch'));
     if (hold(call)) return new Promise<Response>((resolve) => held.push(() => resolve(fakeApi(call))));
@@ -328,15 +443,16 @@ describe('the local buffer, in one tab', () => {
 
     lose = () => true;
     const second = await load();
-    // The document is read again a few times, then waits for the server.
-    await elapse(8000);
+    // Nothing is decided without the server's draft: the text waits in the buffer, where the crashed tab left it.
     expect(within(second.view.container).getByText('This document will open as soon as the server is back.'));
-    expect(await stored()).toEqual([['tab-2 doc-1', 'Hors ligne.']]);
+    expect(textOf(second)).toBeNull();
+    expect(await stored()).toEqual([['tab-1 doc-1', 'Hors ligne.']]);
+    // The first tab's one attempt: the second sends nothing before it can read the server.
+    expect(calls.filter(isDraftSave)).toHaveLength(1);
 
-    // The next retry, after the backoff, and the read that the server's return triggers.
     lose = () => false;
-    await elapse(10_000);
-    await elapse(10_000);
+    await elapse(5000);
+    await elapse(1000);
     expect(serverDraft()).toBe('Hors ligne.');
     expect(textarea(second).value).toBe('Hors ligne.');
     expect(await stored()).toEqual([]);
@@ -387,21 +503,46 @@ describe('the local buffer, in one tab', () => {
     expect(await stored()).toEqual([]);
   });
 
-  it('never replaces a restored text silently with a newer draft, even when it is the text of its base', async () => {
+  it('holds a text that is its own base as a copy, and sends nothing, when the server moved', async () => {
     // A tab that crashed while a save was unanswered, after the writer typed the text back to its base.
-    const writer = openLocalBuffer(bufferOptions());
-    await act(async () => {
-      await writer.put('tab-0 doc-1', { content: original, base: { content: original, draftVersion: 1 } });
-      await writer.close();
-    });
+    await raw((buffer) =>
+      buffer.put('tab-0 doc-1', { content: original, base: { content: original, draftVersion: 1 } }),
+    );
     otherDraft('Il veillait, seul.');
 
     const page = await load();
     await elapse(1000);
-    expect(textarea(page).value).toBe(original);
-    expect(within(page.view.container).getByRole('alert').textContent).toContain(
-      'This text was also changed on another device.',
+    expect(textarea(page).value).toBe('Il veillait, seul.');
+    expect(listed(page)).toEqual([['Another copy kept on this device', original]]);
+    expect(calls.filter(isDraftSave)).toEqual([]);
+    expect(await stored()).toEqual([['tab-0 doc-1', original]]);
+  });
+
+  it('holds a text whose base is ahead of the server as a copy, without sending it in a loop', async () => {
+    await raw((buffer) =>
+      buffer.put('tab-0 doc-1', { content: 'Venu d’ailleurs.', base: { content: 'Autre', draftVersion: 100 } }),
     );
+    const page = await load();
+    await elapse(5000);
+    expect(textarea(page).value).toBe(original);
+    expect(listed(page)).toEqual([['Another copy kept on this device', 'Venu d’ailleurs.']]);
+    expect(calls.filter(isDraftSave)).toEqual([]);
+    expect(serverDraft()).toBe(original);
+
+    fireEvent.click(within(page.view.container).getByRole('button', { name: 'Discard this copy' }));
+    await settle();
+    expect(await stored()).toEqual([]);
+  });
+
+  it('lets go of a text the server already holds', async () => {
+    await raw((buffer) =>
+      buffer.put('tab-0 doc-1', { content: original, base: { content: 'Avant', draftVersion: 0 } }),
+    );
+    const page = await load();
+    await elapse(1000);
+    expect(textarea(page).value).toBe(original);
+    expect(listed(page)).toEqual([]);
+    expect(await stored()).toEqual([]);
   });
 
   it('saves in the background a text restored for a document that is not open', async () => {
@@ -429,22 +570,23 @@ describe('the local buffer, in one tab', () => {
 
     lose = () => false;
     const real = openLocalBuffer(bufferOptions());
-    let answer = () => {};
+    let slowness = true;
+    const waiting: (() => void)[] = [];
     const slow: LocalBuffer = {
       ...real,
       list: () =>
-        new Promise((resolve) => {
-          answer = () => void real.list().then(resolve);
-        }),
+        slowness ? new Promise((resolve) => waiting.push(() => void real.list().then(resolve))) : real.list(),
     };
-    const second = await load('#/documents/doc-1', slow);
+    const answer = () => {
+      slowness = false;
+      for (const run of waiting.splice(0)) run();
+    };
+    const second = await load('#/documents/doc-1', { buffer: slow });
     await elapse(3000);
     expect(textOf(second)).toBeNull();
     expect(within(second.view.container).getByText('Loading…'));
     expect(second.view.container.textContent).not.toContain(original);
 
-    answer();
-    await settle();
     answer();
     await settle();
     expect(textarea(second).value).toBe('Il veillait, seul.');
@@ -471,7 +613,7 @@ describe('when the buffer cannot keep the text', () => {
   it.each<BufferFailureReason>(['unavailable', 'blocked', 'quota', 'failed', 'stalled'])(
     'says so once (%s), and typing and saving go on',
     async (reason) => {
-      const page = await load('#/documents/doc-1', failing(reason));
+      const page = await load('#/documents/doc-1', { buffer: failing(reason) });
       expect(notice(page)).not.toBeNull();
       type(page, 'Il veillait sur la mer.');
       await elapse(1000);
@@ -496,7 +638,7 @@ describe('when the buffer cannot keep the text', () => {
         full ? Promise.resolve({ ok: false, reason: 'quota', error: new Error('full') }) : real.put(key, value),
     };
     lose = isDraftSave;
-    const page = await load('#/documents/doc-1', buffer);
+    const page = await load('#/documents/doc-1', { buffer });
     type(page, 'Il veillait');
     await settle();
     expect(notice(page)).toBeNull();
@@ -515,7 +657,7 @@ describe('when the buffer cannot keep the text', () => {
   });
 
   it('says so without IndexedDB, and opens documents at once', async () => {
-    const page = await load('#/documents/doc-1', null);
+    const page = await load('#/documents/doc-1', { buffer: null });
     expect(notice(page)).not.toBeNull();
     expect(textarea(page).value).toBe(original);
   });
@@ -624,5 +766,266 @@ describe('two tabs on one document', () => {
     type(page, 'Une page neuve.');
     await elapse(1000);
     expect(await stored()).toEqual([]);
+  });
+});
+
+describe('adoption, through crashes and races', () => {
+  /** The first tab types `text`, which the server never gets, then crashes. */
+  const leave = async (text = 'Il veillait, seul.') => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, text);
+    await elapse(1000);
+    await first.crash();
+  };
+
+  it('keeps a gone tab’s text when its replacement write fails, through a crash before the server has it', async () => {
+    await leave();
+    const failing = crashable();
+    failing.faults.put = 'quota';
+    const second = await load('#/documents/doc-1', { buffer: failing });
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Il veillait, seul.');
+    expect(notice(second)).not.toBeNull();
+    // Not written elsewhere, not confirmed: the gone tab's entry stays.
+    expect(await stored()).toEqual([['tab-1 doc-1', 'Il veillait, seul.']]);
+    await second.crash();
+
+    lose = () => false;
+    const third = await load();
+    await elapse(1000);
+    expect(textarea(third).value).toBe('Il veillait, seul.');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('decides on records read under the owner’s lock: a text undone and deleted meanwhile is not restored', async () => {
+    // Another tab, still open, holds an unsaved text.
+    await raw((buffer) =>
+      buffer.put('tab-A doc-1', { content: 'Il veillait, seul.', base: { content: original, draftVersion: 1 } }),
+    );
+    heldLocks.set('reviewr-tab tab-A', 99);
+    claimsWait = true;
+    lose = () => false;
+    const page = await load();
+    expect(textOf(page)).toBeNull();
+
+    // Between the list and the lock: that tab goes back to the saved text, deletes its entry, and closes.
+    await raw((buffer) => buffer.delete('tab-A doc-1'));
+    heldLocks.delete('reviewr-tab tab-A');
+    await grantClaims();
+    await elapse(1000);
+    expect(textarea(page).value).toBe(original);
+    expect(calls.filter(isDraftSave)).toEqual([]);
+    expect(serverDraft()).toBe(original);
+  });
+
+  it('restores the newest text a tab wrote before it closed, not the one listed first', async () => {
+    await raw((buffer) =>
+      buffer.put('tab-A doc-1', { content: 'Il veillait', base: { content: original, draftVersion: 1 } }),
+    );
+    heldLocks.set('reviewr-tab tab-A', 99);
+    claimsWait = true;
+    const page = await load();
+    await raw((buffer) =>
+      buffer.put('tab-A doc-1', { content: 'Il veillait, seul.', base: { content: original, draftVersion: 1 } }),
+    );
+    heldLocks.delete('reviewr-tab tab-A');
+    await grantClaims();
+    await elapse(1000);
+    expect(textarea(page).value).toBe('Il veillait, seul.');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('keeps the text when the adopting tab crashes while waiting for the lock', async () => {
+    await leave();
+    claimsWait = true;
+    const second = await load();
+    await second.crash();
+    claimsWait = false;
+
+    lose = () => false;
+    const third = await load();
+    await elapse(1000);
+    expect(textarea(third).value).toBe('Il veillait, seul.');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+  });
+
+  it('keeps the text when the adopting tab crashes before its replacement write is sent', async () => {
+    await leave();
+    // The read of the document waits, so the restore (and its write) comes after the buffer is paused.
+    hold = (call) => call.method === 'GET' && call.path === '/documents/doc-1';
+    const second = await load();
+    second.buffer?.pause();
+    await releaseHeld();
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Il veillait, seul.');
+    await second.crash();
+
+    lose = () => false;
+    const third = await load();
+    await elapse(1000);
+    expect(textarea(third).value).toBe('Il veillait, seul.');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('restores without Web Locks', async () => {
+    lose = isDraftSave;
+    const first = await load('#/documents/doc-1', { locks: false });
+    type(first, 'Il veillait, seul.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = () => false;
+    const second = await load('#/documents/doc-1', { locks: false });
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Il veillait, seul.');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('lets go of an entry whose delete failed once the server is seen to hold its text', async () => {
+    const failing = crashable();
+    failing.faults.delete = 'failed';
+    const first = await load('#/documents/doc-1', { buffer: failing });
+    type(first, 'Il veillait, seul.');
+    await elapse(1000);
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(notice(first)).not.toBeNull();
+    expect(await stored()).toEqual([['tab-1 doc-1', 'Il veillait, seul.']]);
+    await first.crash();
+
+    const second = await load();
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Il veillait, seul.');
+    expect(within(second.view.container).queryByRole('alert')).toBeNull();
+    expect(await stored()).toEqual([]);
+  });
+
+  it('restores once in strict mode', async () => {
+    await leave();
+    lose = () => false;
+    const second = await load('#/documents/doc-1', { strict: true });
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Il veillait, seul.');
+    expect(listed(second)).toEqual([]);
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(calls.filter(isDraftSave).filter((call) => call.method === 'PUT')).toHaveLength(2);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('keeps the text typed during a document’s creation once the creation is confirmed', async () => {
+    hold = (call) => call.method === 'POST' && call.path === '/documents';
+    const first = await load('');
+    type(first, 'Une page.');
+    await elapse(1000);
+    expect(held).toHaveLength(1);
+    type(first, 'Une page neuve.');
+    await settle();
+    expect(await stored()).toEqual([]);
+
+    lose = isDraftSave;
+    await releaseHeld();
+    await elapse(1000);
+    const id = [...db.keys()].find((key) => key !== 'doc-1' && key !== 'doc-2') ?? '';
+    expect(db.get(id)?.draft?.content).toBe('Une page.');
+    expect(await stored()).toEqual([[`tab-1 ${id}`, 'Une page neuve.']]);
+    await first.crash();
+
+    lose = () => false;
+    const second = await load(`#/documents/${id}`);
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Une page neuve.');
+    expect(db.get(id)?.draft?.content).toBe('Une page neuve.');
+    expect(db.size).toBe(3);
+  });
+
+  it('brings back the last text whose write committed when a crash drops the newest one, queued', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Il veillait');
+    await settle();
+    first.buffer?.pause();
+    type(first, 'Il veillait, seul.');
+    await settle();
+    await first.crash();
+
+    lose = () => false;
+    const second = await load();
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Il veillait');
+    expect(serverDraft()).toBe('Il veillait');
+  });
+});
+
+describe('the invariant of adoption, on random runs', () => {
+  /** A small seeded generator (mulberry32), so a failing run can be replayed. */
+  const random = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
+  it.each(Array.from({ length: 12 }, (_, i) => i + 1))('loses no text a tab left, run %i', async (seed) => {
+    const next = random(seed);
+    const pick = <T,>(items: readonly T[]): T => items[Math.floor(next() * items.length)] as T;
+    interface Tab {
+      page: Page;
+      /** The tab's last text, which must survive it unless its buffer refused to keep it. */
+      last?: string;
+      keeps: boolean;
+    }
+    const open: Tab[] = [];
+    const left: string[] = [];
+    let words = 0;
+    for (let step = 0; step < 14; step++) {
+      const roll = next();
+      if (open.length === 0 || (roll < 0.2 && open.length < 3)) {
+        const keeps = next() > 0.15;
+        const buffer = crashable();
+        if (!keeps) buffer.faults.put = 'quota';
+        claimsWait = next() < 0.3;
+        const page = await load('#/documents/doc-1', { buffer });
+        await grantClaims();
+        await elapse(100);
+        open.push({ page, keeps });
+      } else if (roll < 0.6) {
+        const tab = pick(open);
+        if (textOf(tab.page) === null) continue;
+        // A text this tab took over from a gone one is superseded by the writer's edit of it, in this tab.
+        const before = textarea(tab.page).value;
+        left.splice(0, left.length, ...left.filter((text) => text !== before));
+        tab.last = `${before} mot${++words}`;
+        type(tab.page, tab.last);
+        await settle();
+        await elapse(pick([0, 300, 1200]));
+      } else if (roll < 0.75) {
+        lose = next() < 0.5 ? isDraftSave : () => false;
+        await elapse(pick([0, 1000]));
+      } else {
+        const tab = pick(open);
+        open.splice(open.indexOf(tab), 1);
+        if (tab.last !== undefined && tab.keeps) left.push(tab.last);
+        await tab.page.crash();
+      }
+    }
+    for (const tab of open) {
+      if (tab.last !== undefined && tab.keeps) left.push(tab.last);
+      await tab.page.crash();
+    }
+
+    lose = () => false;
+    claimsWait = false;
+    const last = await load();
+    await elapse(5000);
+    await elapse(5000);
+    const onScreen = [textOf(last)?.value, ...listed(last).map(([, text]) => text)];
+    const inBuffer = (await stored()).map(([, text]) => text);
+    for (const text of left) {
+      expect(everSaved.has(text) || onScreen.includes(text) || inBuffer.includes(text), text).toBe(true);
+    }
   });
 });

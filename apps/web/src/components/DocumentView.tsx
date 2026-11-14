@@ -72,7 +72,16 @@ export const DocumentView = ({
       <p className="muted">Loading…</p>
     </div>
   );
-  if (!restored) return loading;
+  if (restored === 'pending') return loading;
+  if (restored === 'deferred') {
+    // Texts this device kept for the document wait for the server, to be decided on its draft.
+    return (
+      <div className="padded">
+        {toolbarStart}
+        <p className="muted">This document will open as soon as the server is back.</p>
+      </div>
+    );
+  }
 
   // A document known to be gone stays so while a later read is pending or fails for another reason (the server
   // unreachable): only a read that finds the document says otherwise. Until then, the texts this tab holds for it

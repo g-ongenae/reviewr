@@ -4,7 +4,6 @@ import type { ReactNode } from 'react';
 import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import type { Autosave, AutosaveState } from '../autosave/autosave';
-import type { LeftText } from '../autosave/deviceBuffer';
 import { discardAutosave, useKeptCopies } from '../autosave/useAutosave';
 import { existingSession, type SessionState, type Side } from '../reconcile/session';
 
@@ -12,7 +11,7 @@ import { existingSession, type SessionState, type Side } from '../reconcile/sess
 export const earlierTextLabel = (side: Side): string =>
   side === 'mine' ? 'An earlier text of yours' : 'An earlier text from the other device';
 
-/** How a text that a tab closed before saving left on this device is labelled, besides the local text. */
+/** How a text another tab left on this device, not saved, is labelled besides the local text. */
 export const keptCopyLabel = 'Another copy kept on this device';
 
 interface HeldTextProps {
@@ -58,7 +57,7 @@ export const recoverableTexts = (
   machine: AutosaveState,
   session: SessionState,
   edited: boolean,
-  copies: readonly LeftText[] = [],
+  copies: readonly string[] = [],
 ): { label: string; text: string }[] => {
   const texts: { label: string; text: string }[] = [];
   const add = (text: string, label: string) => {
@@ -69,7 +68,7 @@ export const recoverableTexts = (
   if (session.result !== undefined) add(session.result, 'Your merged text, not applied');
   if (machine.status === 'conflict') add(machine.server.content, 'The other device’s text');
   for (const { text, side } of session.texts) add(text, earlierTextLabel(side));
-  for (const { content } of copies) add(content, keptCopyLabel);
+  for (const copy of copies) add(copy, keptCopyLabel);
   return texts;
 };
 
