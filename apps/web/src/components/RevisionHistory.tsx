@@ -1,6 +1,6 @@
 import type { Document, Revision, RevisionSummary } from '@reviewr/shared';
 import { displayTitle, revisionNameMaxLength } from '@reviewr/shared';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import { formatDate } from '../format';
@@ -72,6 +72,10 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
   );
 };
 
+/** Key of the request naming one revision: one at a time per revision, even across remounts of the panel. */
+const nameRevisionKey = (revision: RevisionSummary) =>
+  ['nameRevision', revision.documentId, revision.revision] as const;
+
 interface RowProps {
   revision: RevisionSummary;
   current: boolean;
@@ -84,6 +88,8 @@ const RevisionRow = ({ revision, current, selected, onSelect }: RowProps) => {
   const [editing, setEditing] = useState(false);
   const editButton = useRef<HTMLButtonElement>(null);
   const focusEditButton = useRef(false);
+  // A save left running by a panel closed meanwhile: no second edit until it is answered.
+  const saving = useIsMutating({ mutationKey: nameRevisionKey(revision) }) > 0;
 
   useEffect(() => {
     if (!editing && focusEditButton.current) {
@@ -136,6 +142,7 @@ const RevisionRow = ({ revision, current, selected, onSelect }: RowProps) => {
               revision.name === null ? `Name revision ${revision.revision}` : `Rename revision ${revision.revision}`
             }
             title={revision.name === null ? 'Name this version' : 'Rename this version'}
+            disabled={saving}
             onClick={() => setEditing(true)}
           >
             <PencilIcon />
@@ -157,28 +164,42 @@ const RevisionNameForm = ({ revision, onDone }: FormProps) => {
   const [name, setName] = useState(revision.name ?? '');
   const errorId = useId();
   const save = useMutation({
+    mutationKey: nameRevisionKey(revision),
     mutationFn: (value: string) =>
       api.nameRevision(revision.documentId, revision.revision, value.trim() === '' ? null : value),
-    onSuccess: (saved) => {
-      // Show the server's answer; the text of the revision is not touched.
+    onSuccess: async (saved) => {
+      const listKey = queryKeys.revisions(saved.documentId);
+      const fullKey = queryKeys.revision(saved.documentId, saved.revision);
+      // A read sent before this answer may still hold the old name: drop it, so it cannot overwrite the new one.
+      await queryClient.cancelQueries({ queryKey: listKey, exact: true });
+      await queryClient.cancelQueries({ queryKey: fullKey, exact: true });
+      // Show the server's answer, keeping every other row; the text of the revision is not touched.
       queryClient.setQueryData<RevisionSummary[]>(queryKeys.revisions(saved.documentId), (list) =>
         list?.map((item) => (item.revision === saved.revision ? { ...item, ...saved } : item)),
       );
       queryClient.setQueryData<Revision>(queryKeys.revision(saved.documentId, saved.revision), (full) =>
         full === undefined ? undefined : { ...full, ...saved },
       );
+      // Read both again, so what the cancelled reads would have brought (a version saved meanwhile) still shows.
+      void queryClient.invalidateQueries({ queryKey: listKey, exact: true });
+      void queryClient.invalidateQueries({ queryKey: fullKey, exact: true });
       onDone();
     },
   });
   const error = inlineError(save.error);
+  const pending = save.isPending;
+  const submit = () => {
+    if (!pending) save.mutate(name);
+  };
 
   return (
     <form
       className="revision-name-form"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!save.isPending) save.mutate(name);
+        submit();
       }}
+      aria-busy={pending}
     >
       <input
         className="revision-name-input"
@@ -187,24 +208,29 @@ const RevisionNameForm = ({ revision, onDone }: FormProps) => {
         aria-invalid={error ? true : undefined}
         placeholder="Name this version"
         value={name}
+        // While the name is being saved, nothing typed could be kept: the field waits for the answer.
+        readOnly={pending}
         maxLength={revisionNameMaxLength}
         autoFocus
         onChange={(event) => setName(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Escape') {
+          if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            submit();
+          } else if (event.key === 'Escape') {
             event.preventDefault();
             event.stopPropagation();
-            onDone();
+            if (!pending) onDone();
           }
         }}
       />
       <div className="revision-name-actions">
         <span className="muted small">Revision {revision.revision}</span>
-        <button type="button" className="revision-name-cancel" onClick={onDone}>
+        <button type="button" className="revision-name-cancel" disabled={pending} onClick={onDone}>
           Cancel
         </button>
-        <button type="submit" className="primary" disabled={save.isPending}>
-          {save.isPending ? 'Saving…' : 'Save'}
+        <button type="submit" className="primary" disabled={pending}>
+          {pending ? 'Saving…' : 'Save'}
         </button>
       </div>
       {error && (

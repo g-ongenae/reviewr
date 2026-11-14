@@ -39,12 +39,28 @@ interface Call {
 
 /**
  * A fake API holding three revisions; `onName` answers `PATCH /documents/:id/revisions/:n` (by default it
- * stores the trimmed name, or null when blank, as the API does).
+ * stores the trimmed name, or null when blank, as the API does). While `hold.get` or `hold.patch` is set, the
+ * answers of those requests are computed when they arrive but sent only by `release()`, oldest first.
  */
 const serve = (onName?: (revision: number, name: string | null) => Response | Promise<Response>) => {
   const revisions = [summary(3, null), summary(2, 'Relu par Claire'), summary(1, null)];
   const calls: Call[] = [];
+  const hold = { get: false, patch: false };
+  const held: (() => void)[] = [];
+  const answer = async (method: string, response: Response | Promise<Response>) => {
+    if (method === 'PATCH' ? hold.patch : hold.get) await new Promise<void>((resolve) => held.push(resolve));
+    return response;
+  };
+  const release = () => {
+    const next = held.shift();
+    if (!next) throw new Error('No request is held');
+    next();
+  };
   fetchMock.mockImplementation(async (input, init) => {
+    const method = init?.method ?? 'GET';
+    return answer(method, respond(input, init));
+  });
+  const respond = (input: RequestInfo | URL, init?: RequestInit): Response | Promise<Response> => {
     const url = input instanceof Request ? input.url : input.toString();
     const path = new URL(url, 'http://localhost').pathname.replace(/^\/api/, '');
     const method = init?.method ?? 'GET';
@@ -63,8 +79,8 @@ const serve = (onName?: (revision: number, name: string | null) => Response | Pr
     }
     const full: Revision = { ...item, content: contents[item.revision] ?? '' };
     return json(200, full);
-  });
-  return calls;
+  };
+  return { calls, revisions, hold, held, release };
 };
 
 const renderHistory = (onRestore: (revision: Revision) => void = () => {}) => {
@@ -75,6 +91,7 @@ const renderHistory = (onRestore: (revision: Revision) => void = () => {}) => {
       <RevisionHistory document={openDocument} onRestore={onRestore} />
     </QueryClientProvider>,
   );
+  return queryClient;
 };
 
 const nameField = (revision: number) => screen.findByRole('textbox', { name: `Name of revision ${revision}` });
@@ -99,7 +116,7 @@ describe('RevisionHistory names', () => {
   });
 
   it('names an unnamed version with Enter and shows the name the server answered', async () => {
-    const calls = serve();
+    const { calls } = serve();
     renderHistory();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
@@ -107,7 +124,7 @@ describe('RevisionHistory names', () => {
     expect(document.activeElement).toBe(field);
     expect(field.getAttribute('maxlength')).toBe(String(revisionNameMaxLength));
     fireEvent.change(field, { target: { value: '  Première version  ' } });
-    fireEvent.submit(field);
+    fireEvent.keyDown(field, { key: 'Enter' });
 
     expect(await screen.findByRole('button', { name: /Première version/ })).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
@@ -132,13 +149,13 @@ describe('RevisionHistory names', () => {
   });
 
   it('clears a name when the field is saved empty', async () => {
-    const calls = serve();
+    const { calls } = serve();
     renderHistory();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Rename revision 2' }));
     const field = await nameField(2);
     fireEvent.change(field, { target: { value: '   ' } });
-    fireEvent.submit(field);
+    fireEvent.keyDown(field, { key: 'Enter' });
 
     expect(await screen.findByRole('button', { name: 'Name revision 2' })).toBeTruthy();
     expect(screen.queryByText('Relu par Claire')).toBeNull();
@@ -147,7 +164,7 @@ describe('RevisionHistory names', () => {
   });
 
   it('cancels with Escape without sending anything', async () => {
-    const calls = serve();
+    const { calls } = serve();
     renderHistory();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Rename revision 2' }));
@@ -180,7 +197,7 @@ describe('RevisionHistory names', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
     const field = await nameField(1);
     fireEvent.change(field, { target: { value: 'Version du soir' } });
-    fireEvent.submit(field);
+    fireEvent.keyDown(field, { key: 'Enter' });
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('name must be shorter than or equal to 200 characters');
@@ -196,7 +213,7 @@ describe('RevisionHistory names', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
     const field = await nameField(1);
     fireEvent.change(field, { target: { value: 'Version du soir' } });
-    fireEvent.submit(field);
+    fireEvent.keyDown(field, { key: 'Enter' });
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(false));
     expect(screen.queryByRole('alert')).toBeNull();
@@ -211,7 +228,7 @@ describe('RevisionHistory names', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
     const field = await nameField(1);
     fireEvent.change(field, { target: { value: long } });
-    fireEvent.submit(field);
+    fireEvent.keyDown(field, { key: 'Enter' });
 
     const name = await screen.findByText(long);
     expect(name.getAttribute('title')).toBe(long);
@@ -227,7 +244,7 @@ describe('RevisionHistory names', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Rename revision 2' }));
     fireEvent.change(await nameField(2), { target: { value: 'La mer, relue' } });
-    fireEvent.submit(await nameField(2));
+    fireEvent.keyDown(await nameField(2), { key: 'Enter' });
     await screen.findByRole('button', { name: /La mer, relue/ });
 
     expect(onRestore).not.toHaveBeenCalled();
@@ -237,5 +254,163 @@ describe('RevisionHistory names', () => {
     );
     const list = screen.getByRole('list');
     expect(within(list).queryByText('La mer.')).toBeNull();
+  });
+});
+
+describe('RevisionHistory names with slow requests', () => {
+  it('keeps the new name when an older read of the list and the preview answers after the save', async () => {
+    const server = serve();
+    const queryClient = renderHistory();
+    fireEvent.click(await screen.findByRole('button', { name: /Relu par Claire/ }));
+    expect(await screen.findByText('La mer.')).toBeTruthy();
+
+    // A version saved elsewhere starts new reads of the list and the preview; they read the old name.
+    server.hold.get = true;
+    server.revisions.unshift(summary(4, null));
+    void queryClient.invalidateQueries({ queryKey: ['documents', 'doc-1', 'revisions'] });
+    await waitFor(() => expect(server.held).toHaveLength(2));
+    server.hold.get = false;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename revision 2' }));
+    fireEvent.change(await nameField(2), { target: { value: 'Relu par Hugo' } });
+    fireEvent.keyDown(await nameField(2), { key: 'Enter' });
+    await waitFor(() => expect(screen.queryByRole('textbox')).toBeNull());
+
+    // The old reads answer last, with the old name.
+    server.release();
+    server.release();
+
+    // The list keeps the new name and the row added meanwhile; the open preview has the new name too.
+    expect(await screen.findByRole('button', { name: /^Revision 4/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Relu par Hugo/ })).toBeTruthy();
+    expect(screen.queryByText('Relu par Claire')).toBeNull();
+    const full = queryClient.getQueryData<Revision>(['documents', 'doc-1', 'revisions', 2]);
+    expect(full).toMatchObject({ name: 'Relu par Hugo', content: 'La mer.' });
+  });
+
+  it('keeps the new name in a closed preview whose old read answers after the save', async () => {
+    const server = serve();
+    const queryClient = renderHistory();
+
+    // Open the preview of revision 2 and close it while its read is still running.
+    server.hold.get = true;
+    fireEvent.click(await screen.findByRole('button', { name: /Relu par Claire/ }));
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.hold.get = false;
+    fireEvent.click(screen.getByRole('button', { name: /Relu par Claire/ }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename revision 2' }));
+    fireEvent.change(await nameField(2), { target: { value: 'Relu par Hugo' } });
+    fireEvent.keyDown(await nameField(2), { key: 'Enter' });
+    expect(await screen.findByRole('button', { name: /Relu par Hugo/ })).toBeTruthy();
+    server.release();
+
+    // Opened again, the preview reads the revision anew instead of keeping the old name for good.
+    fireEvent.click(screen.getByRole('button', { name: /Relu par Hugo/ }));
+    expect(await screen.findByText('La mer.')).toBeTruthy();
+    expect(queryClient.getQueryData<Revision>(['documents', 'doc-1', 'revisions', 2])).toMatchObject({
+      name: 'Relu par Hugo',
+    });
+  });
+
+  it('locks the field while saving: no typing, no cancel, no second request', async () => {
+    const server = serve();
+    renderHistory();
+    server.hold.patch = true;
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
+    const field = (await nameField(1)) as HTMLInputElement;
+    fireEvent.change(field, { target: { value: 'Version A' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+
+    await waitFor(() => expect(field.readOnly).toBe(true));
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Saving…' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.keyDown(field, { key: 'Escape' });
+    fireEvent.keyDown(field, { key: 'Enter' });
+    fireEvent.submit(field);
+    expect(screen.getByRole('textbox', { name: 'Name of revision 1' })).toBe(field);
+    expect(server.calls.filter((c) => c.method === 'PATCH')).toHaveLength(1);
+
+    server.release();
+    expect(await screen.findByRole('button', { name: /Version A/ })).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(server.calls.filter((c) => c.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('does not reopen a revision whose name is still being saved after the panel was closed', async () => {
+    const server = serve();
+    const queryClient = createQueryClient();
+    queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false } });
+    const panel = (
+      <QueryClientProvider client={queryClient}>
+        <RevisionHistory document={openDocument} onRestore={() => {}} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(panel);
+    server.hold.patch = true;
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
+    fireEvent.change(await nameField(1), { target: { value: 'Version A' } });
+    fireEvent.keyDown(await nameField(1), { key: 'Enter' });
+    await waitFor(() => expect(server.held).toHaveLength(1));
+
+    // The editor hides the history, then shows it again while the save is still running.
+    rerender(<QueryClientProvider client={queryClient}>{null}</QueryClientProvider>);
+    rerender(panel);
+    const pencil = await screen.findByRole('button', { name: 'Name revision 1' });
+    expect(pencil.hasAttribute('disabled')).toBe(true);
+
+    server.release();
+    expect(await screen.findByRole('button', { name: /Version A/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Rename revision 1' }).hasAttribute('disabled')).toBe(false);
+    expect(server.calls.filter((c) => c.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('edits two rows independently', async () => {
+    const server = serve();
+    renderHistory();
+    server.hold.patch = true;
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Name revision 3' }));
+    fireEvent.change(await nameField(1), { target: { value: 'Premier jet' } });
+    fireEvent.keyDown(await nameField(1), { key: 'Enter' });
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    const third = (await nameField(3)) as HTMLInputElement;
+    fireEvent.change(third, { target: { value: 'Fin du chapitre' } });
+    expect(third.readOnly).toBe(false);
+
+    server.release();
+    expect(await screen.findByRole('button', { name: /Premier jet/ })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Name of revision 3' })).toBe(third);
+    expect(third.value).toBe('Fin du chapitre');
+
+    server.hold.patch = false;
+    fireEvent.keyDown(third, { key: 'Enter' });
+    expect(await screen.findByRole('button', { name: /Fin du chapitre/ })).toBeTruthy();
+    expect(server.calls.filter((c) => c.method === 'PATCH').map((c) => c.path)).toEqual([
+      '/documents/doc-1/revisions/1',
+      '/documents/doc-1/revisions/3',
+    ]);
+  });
+
+  it('keeps an open edit when a refetch inserts a new version', async () => {
+    const server = serve();
+    const queryClient = renderHistory();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Name revision 1' }));
+    const field = (await nameField(1)) as HTMLInputElement;
+    fireEvent.change(field, { target: { value: 'En cours' } });
+
+    server.hold.get = true;
+    server.revisions.unshift(summary(4, 'Cet appareil — 14 nov.'));
+    void queryClient.invalidateQueries({ queryKey: ['documents', 'doc-1', 'revisions'], exact: true });
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.release();
+
+    expect(await screen.findByRole('button', { name: /Cet appareil — 14 nov\./ })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Name of revision 1' })).toBe(field);
+    expect(field.value).toBe('En cours');
   });
 });

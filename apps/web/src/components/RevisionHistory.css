@@ -114,3 +114,9 @@
 .revision-name-error {
   margin: 0;
 }
+
+/* Saving: the field is read-only until the server answers. */
+.revision-name-input:read-only {
+  color: var(--muted);
+  background: var(--bg-soft);
+}
