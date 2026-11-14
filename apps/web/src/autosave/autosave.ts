@@ -103,9 +103,11 @@ export interface Autosave {
    * reconciled as soon as no answer is pending: holding one of this machine's texts (the local text, the base, a text
    * it sent), it becomes the base and local edits are sent on it; holding another text, it is a conflict, and the
    * local text stays. Never "saved" for a text older than it. In conflict, a draft newer than the server's that does
-   * not hold the local text becomes the server's draft of the conflict.
+   * not hold the local text becomes the server's draft of the conflict. With `keepText`, the local text is never
+   * replaced, even with nothing pending: a draft holding another text is a conflict (for a draft that moved under a
+   * text the writer asked to keep, as with "Save version").
    */
-  refresh(confirmed: Draft): void;
+  refresh(confirmed: Draft, keepText?: boolean): void;
   /** The current state; the same object until something changes, as `useSyncExternalStore` requires. */
   getSnapshot(): AutosaveState;
   /** Calls `listener` after every state change. Returns the unsubscribe function. */
@@ -395,9 +397,9 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       advance('now');
     },
 
-    refresh(confirmed) {
+    refresh(confirmed, keepText = false) {
       if (disposed || confirmed.draftVersion <= base.draftVersion) return;
-      if (snapshot.status === 'saved' && later === undefined) {
+      if (!keepText && snapshot.status === 'saved' && later === undefined) {
         // No local edits, nothing pending: the newer draft simply replaces the text.
         base = confirmed;
         content = confirmed.content;
