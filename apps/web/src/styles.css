@@ -173,6 +173,7 @@ button.danger {
   height: 100%;
   display: flex;
   flex-direction: column;
+  position: relative;
   min-width: 0;
   --editor-gutter: 2rem;
   padding: 1rem var(--editor-gutter);
@@ -289,6 +290,13 @@ button.danger {
   padding: 0.6rem 0.8rem;
   border-radius: 6px;
   background: var(--warning-bg);
+}
+
+/* In the editor, in the text's column: wide enough margins hold the floating writing stats, which would cover it. */
+.editor > .banner {
+  width: 100%;
+  max-width: 48rem;
+  margin-inline: auto;
 }
 
 /* A long message keeps its width: the actions go under it when they no longer fit beside it. */
@@ -432,15 +440,8 @@ button.danger {
   }
 }
 
-.composer {
-  position: relative;
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  padding-top: 1.5rem;
-}
-
-.composer-placeholder {
+/* The blank page's welcome, over the empty text: the text area underneath takes the first keystroke. */
+.blank-page-welcome {
   position: absolute;
   inset: 0;
   display: grid;
@@ -450,11 +451,11 @@ button.danger {
   pointer-events: none;
 }
 
-.composer-placeholder h1 {
+.blank-page-welcome h1 {
   margin: 0 0 0.5rem;
 }
 
-.composer-placeholder p {
+.blank-page-welcome p {
   margin: 0;
 }
 

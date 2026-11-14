@@ -13,8 +13,12 @@ export interface Draft {
 
 /** What a `save` call can answer. A rejected promise counts as `failed`. */
 export type SaveResult =
-  /** The draft was saved; `draftVersion` is the server's new version, the base of the next save. */
-  | { kind: 'saved'; draftVersion: number }
+  /**
+   * The draft was saved; `draftVersion` is the server's new version, the base of the next save. `content`, when given,
+   * is the text the server saved instead of the one sent (a document's creation is always sent again with its first
+   * text): it becomes the base, and the local text is sent on it.
+   */
+  | { kind: 'saved'; draftVersion: number; content?: string }
   /** The `draftVersion` sent was stale: someone else saved meanwhile. `server` is the server's current draft. */
   | { kind: 'conflict'; server: Draft }
   /** The request failed (network error, 5xx…). The text is kept and sent again later. */
@@ -315,20 +319,23 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
 
   const settle = (sent: Draft, seq: number, result: SaveResult) => {
     switch (result.kind) {
-      case 'saved':
-        base = { content: sent.content, draftVersion: result.draftVersion };
+      case 'saved': {
+        const saved = result.content ?? sent.content;
+        base = { content: saved, draftVersion: result.draftVersion };
         uncertain = false;
         unknownText = undefined;
         failures = 0;
         lastError = undefined;
         reconcile();
-        if (server === undefined) {
+        // Another text saved than the one sent: the edits it carried are not saved yet.
+        if (server === undefined && saved === sent.content) {
           savedSeq = Math.max(savedSeq, seq);
           settleFlushes('saved', false);
         }
         // Text typed during the request goes right away, based on the version it returned.
         advance('now');
         return;
+      }
       case 'conflict':
         // The text sent did not land: the server holds `result.server`, or a newer draft read meanwhile. That draft may
         // be a text of this machine whose answer was lost (`unknownText`): then it is the base, not a conflict.

@@ -1,4 +1,4 @@
-import type { Document, DocumentDraft, DocumentSummary } from '@reviewr/shared';
+import type { CreateDraftDocumentInput, Document, DocumentDraft, DocumentSummary } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
 import type { QueryClient, QueryState } from '@tanstack/react-query';
 import { useQueryClient } from '@tanstack/react-query';
@@ -43,6 +43,58 @@ export const toSaveResult = (error: unknown): SaveResult => {
   }
   return { kind: 'failed', error };
 };
+
+/**
+ * What a failed creation means for the autosave. The creation is sent again as it was first sent, so a refusal (4xx)
+ * is for good: the text stays, and the writer can try again under a new id. Anything else is retried.
+ */
+const toCreateResult = (error: unknown): SaveResult => {
+  const result = toSaveResult(error);
+  return result.kind === 'rejected' ? { ...result, permanent: true } : { kind: 'failed', error };
+};
+
+/** A new document's id, chosen here so that its creation can be sent again safely. */
+export const newDocumentId = (): string => {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  // Pages served over plain HTTP have no `randomUUID`: a version 4 UUID from random bytes.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
+
+/**
+ * A document that does not exist on the server yet: the blank page. Its draft is empty at version 0; its first save
+ * creates it (see `entryFor`).
+ */
+export const blankDocument = (id: string): Document => {
+  const now = new Date().toISOString();
+  return {
+    id,
+    title: null,
+    revision: 0,
+    content: '',
+    createdAt: now,
+    updatedAt: now,
+    draft: { content: '', draftVersion: 0, baseRevision: null },
+  };
+};
+
+/** The ids of the documents this tab created, kept so that a blank page is never shown again on one of them. */
+const createdIds = new WeakMap<QueryClient, Set<string>>();
+
+const createdIn = (queryClient: QueryClient): Set<string> => {
+  let ids = createdIds.get(queryClient);
+  if (ids === undefined) {
+    ids = new Set();
+    createdIds.set(queryClient, ids);
+  }
+  return ids;
+};
+
+/** Whether this tab created the document `id` (its creation was answered). */
+export const isCreated = (queryClient: QueryClient, id: string): boolean => createdIn(queryClient).has(id);
 
 /** Whether the document query holds a 404: the document no longer exists. */
 const goneState = (state: QueryState | undefined): boolean => state?.status === 'error' && isNotFound(state.error);
@@ -122,15 +174,49 @@ const registryOf = (queryClient: QueryClient): Map<string, Entry> => {
   return registry;
 };
 
-const entryFor = (queryClient: QueryClient, document: Document): Entry => {
+/**
+ * The machine of a document, created on first use. For a document that does not exist on the server yet (`create`),
+ * the first save creates it: a blank text creates nothing, and the first text sent is the creation's body for good,
+ * sent again as it is until it is answered (the server refuses the same id with another body). The answer tells the
+ * machine which text the server holds, and the machine sends the text typed since as a draft.
+ */
+const entryFor = (queryClient: QueryClient, document: Document, create = false): Entry => {
   const registry = registryOf(queryClient);
   const existing = registry.get(document.id);
   if (existing !== undefined) return existing;
 
   const { id } = document;
+  let creating = create && !isCreated(queryClient, id);
+  let creation: CreateDraftDocumentInput | undefined;
+  const createDocument = async (draft: Draft): Promise<SaveResult> => {
+    if (creation === undefined) {
+      // Nothing to keep yet: no request, and the blank text counts as saved.
+      if (draft.content.trim() === '') return { kind: 'saved', draftVersion: 0 };
+      creation = { id, content: draft.content, draftOnly: true };
+    }
+    let created: Document;
+    try {
+      created = await api.createDocument(creation);
+      reachability.reportSuccess();
+    } catch (error) {
+      reachability.reportError(error);
+      return toCreateResult(error);
+    }
+    creating = false;
+    createdIn(queryClient).add(id);
+    cacheDocument(queryClient, created);
+    void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
+    // The document as it is now: it holds the creation's text, unless its draft moved since (then the machine
+    // reconciles it with its own texts, and never overwrites another one).
+    const confirmed = draftOf(created);
+    return confirmed.content === creation.content
+      ? { kind: 'saved', draftVersion: confirmed.draftVersion, content: confirmed.content }
+      : { kind: 'conflict', server: confirmed };
+  };
   const machine = createAutosave({
     base: draftOf(document),
     save: async (draft) => {
+      if (creating) return createDocument(draft);
       try {
         const saved = await api.saveDraft(id, draft);
         reachability.reportSuccess();
@@ -165,6 +251,20 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
  */
 export const entryOf = (queryClient: QueryClient, id: string): Readonly<Entry> | undefined =>
   registryOf(queryClient).get(id);
+
+/**
+ * Gives the text of a page whose creation was refused a new id, to create it again; the refused machine is dropped.
+ * Answers the new id.
+ */
+export const createAgain = (queryClient: QueryClient, id: string): string => {
+  const text = registryOf(queryClient).get(id)?.autosave.getSnapshot().content ?? '';
+  const next = newDocumentId();
+  const entry = entryFor(queryClient, blankDocument(next), true);
+  entry.autosave.edit(text);
+  void entry.autosave.flush();
+  discardAutosave(queryClient, id);
+  return next;
+};
 
 /** Drops a document's machine without saving, for a document that no longer exists. */
 export const discardAutosave = (queryClient: QueryClient, id: string) => {
@@ -212,12 +312,13 @@ export interface UseAutosave {
 }
 
 /**
- * The autosave of an open document: the editor shows `state.content` and sends every edit to `autosave`. A newer
- * draft in `document` (a refetch, a version save) reaches the machine through `refresh`, which keeps local edits.
+ * The autosave of an open document (with `create`, one that does not exist on the server yet, created by the first
+ * save): the editor shows `state.content` and sends every edit to `autosave`. A newer draft in `document` (a refetch,
+ * a version save) reaches the machine through `refresh`, which keeps local edits.
  */
-export const useAutosave = (document: Document): UseAutosave => {
+export const useAutosave = (document: Document, create = false): UseAutosave => {
   const queryClient = useQueryClient();
-  const [entry] = useState(() => entryFor(queryClient, document));
+  const [entry] = useState(() => entryFor(queryClient, document, create));
   const { autosave } = entry;
   const subscribe = useCallback((listener: () => void) => autosave.subscribe(listener), [autosave]);
   const getSnapshot = useCallback(() => autosave.getSnapshot(), [autosave]);

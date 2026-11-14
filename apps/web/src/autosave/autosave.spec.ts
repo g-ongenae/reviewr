@@ -161,6 +161,32 @@ describe('createAutosave', () => {
     expect(server.calls).toEqual([]);
   });
 
+  it('takes a text the server saved instead of the one sent as the base, and sends the local text on it', async () => {
+    start({ base: { content: '', draftVersion: 0 } });
+    autosave.edit('Il était');
+    const flushed = autosave.flush();
+    await server.current().reject(new TypeError('Failed to fetch'));
+    await expect(flushed).resolves.toBe('failed');
+
+    // The retry carries the later text; the server answers with the first one (a creation sent again as it was).
+    autosave.edit('Il était une fois');
+    let outcome: string | undefined;
+    void autosave.flush().then((value) => (outcome = value));
+    expect(server.calls.at(-1)).toEqual({ content: 'Il était une fois', draftVersion: 0 });
+    await server.current().answer({ kind: 'saved', draftVersion: 1, content: 'Il était' });
+    expect(outcome).toBeUndefined();
+    expect(autosave.getSnapshot()).toMatchObject({ status: 'saving', base: { content: 'Il était', draftVersion: 1 } });
+    expect(server.calls.at(-1)).toEqual({ content: 'Il était une fois', draftVersion: 1 });
+
+    await server.current().answer({ kind: 'saved', draftVersion: 2 });
+    expect(outcome).toBe('saved');
+    expect(autosave.getSnapshot()).toEqual({
+      status: 'saved',
+      content: 'Il était une fois',
+      base: { content: 'Il était une fois', draftVersion: 2 },
+    });
+  });
+
   describe('flush', () => {
     it('saves right away during the debounce, and settles once saved', async () => {
       start();

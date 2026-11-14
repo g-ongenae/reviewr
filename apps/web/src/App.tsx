@@ -1,5 +1,6 @@
-import { useAutosaveGuard } from './autosave/useAutosave';
-import { Composer } from './components/Composer';
+import { useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { isCreated, newDocumentId, useAutosaveGuard } from './autosave/useAutosave';
 import { DocumentList } from './components/DocumentList';
 import { DocumentView } from './components/DocumentView';
 import { ServerStatus } from './components/ServerStatus';
@@ -9,7 +10,15 @@ import { useSelectedDocumentId } from './useHashRoute';
 import { useSidebar } from './useSidebar';
 
 export const App = () => {
+  const queryClient = useQueryClient();
   const [selectedId, select] = useSelectedDocumentId();
+  /**
+   * The blank page: a document that does not exist yet, created by its first save. Once created, it keeps its page
+   * (same id, same editor) and takes its address; the next blank page gets a new id.
+   */
+  const [blankId, setBlankId] = useState(newDocumentId);
+  if (selectedId === undefined && isCreated(queryClient, blankId)) setBlankId(newDocumentId());
+  const id = selectedId ?? blankId;
   const [sidebarOpen, toggleSidebar] = useSidebar();
   useAutosaveGuard();
   const sidebarToggle = <SidebarToggle open={sidebarOpen} onToggle={toggleSidebar} />;
@@ -37,21 +46,20 @@ export const App = () => {
         <DocumentList selectedId={selectedId} onSelect={navigate} />
       </aside>
       <main className="content">
-        {selectedId === undefined ? (
-          <Composer
-            onCreated={(document) => select(document.id)}
-            toolbarStart={sidebarOpen ? undefined : sidebarToggle}
-          />
-        ) : (
-          <DocumentView
-            key={selectedId}
-            id={selectedId}
-            onDeleted={() => select(undefined)}
-            onGoBack={() => navigate(undefined)}
-            onOpen={(document) => select(document.id)}
-            toolbarStart={sidebarOpen ? undefined : sidebarToggle}
-          />
-        )}
+        {/* The same element before and after the blank page is created: the writer keeps typing in it. */}
+        <DocumentView
+          key={id}
+          id={id}
+          blank={id === blankId}
+          onCreated={() => {
+            if (selectedId === undefined) select(id, true);
+          }}
+          onCreateAgain={setBlankId}
+          onDeleted={() => select(undefined)}
+          onGoBack={() => navigate(undefined)}
+          onOpen={(document) => select(document.id)}
+          toolbarStart={sidebarOpen ? undefined : sidebarToggle}
+        />
       </main>
       <ServerStatus />
     </div>
