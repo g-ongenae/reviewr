@@ -446,6 +446,7 @@ describe('the local buffer, in one tab', () => {
     // Nothing is decided without the server's draft: the text waits in the buffer, where the crashed tab left it.
     expect(within(second.view.container).getByText('This document will open as soon as the server is back.'));
     expect(textOf(second)).toBeNull();
+    expect(listed(second)).toEqual([['Another copy kept on this device', 'Hors ligne.']]);
     expect(await stored()).toEqual([['tab-1 doc-1', 'Hors ligne.']]);
     // The first tab's one attempt: the second sends nothing before it can read the server.
     expect(calls.filter(isDraftSave)).toHaveLength(1);
@@ -1027,5 +1028,84 @@ describe('the invariant of adoption, on random runs', () => {
     for (const text of left) {
       expect(everSaved.has(text) || onScreen.includes(text) || inBuffer.includes(text), text).toBe(true);
     }
+  });
+});
+
+describe('texts kept while their restore waits, and leaving the page', () => {
+  const unload = () => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  const openDocument = async (page: Page, name: RegExp) => {
+    fireEvent.click(within(page.view.container).getByRole('button', { name }));
+    await elapse(1000);
+  };
+
+  it('shows a text left by a crashed tab, to copy, through a long outage, then recovers it once', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = () => true;
+    const second = await load();
+    await elapse(60_000);
+    expect(textOf(second)).toBeNull();
+    expect(listed(second)).toEqual([['Another copy kept on this device', 'Hors ligne.']]);
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    fireEvent.click(within(second.view.container).getByRole('button', { name: 'Copy' }));
+    await settle();
+    expect(writeText).toHaveBeenCalledWith('Hors ligne.');
+    expect(calls.filter(isDraftSave)).toHaveLength(1);
+
+    lose = () => false;
+    await elapse(5000);
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Hors ligne.');
+    expect(listed(second)).toEqual([]);
+    expect(serverDraft()).toBe('Hors ligne.');
+    expect(await stored()).toEqual([]);
+    expect(unload()).toBe(false);
+  });
+
+  it('warns on leaving while a restore waits for the server, also from another document', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = (call) => call.path.startsWith('/documents/doc-1');
+    const second = await load();
+    expect(listed(second)).toEqual([['Another copy kept on this device', 'Hors ligne.']]);
+    expect(unload()).toBe(true);
+    await openDocument(second, /Lettres/);
+    expect(textarea(second).value).toBe(original);
+    expect(unload()).toBe(true);
+    // Only this read fails: it is tried again now and then, not in a loop.
+    const reads = () => calls.filter((call) => call.method === 'GET' && call.path === '/documents/doc-1').length;
+    const before = reads();
+    await elapse(10_000);
+    expect(reads() - before).toBeLessThan(4);
+  });
+
+  it('warns on leaving while a copy the server does not have is held, until it is discarded', async () => {
+    await raw((buffer) =>
+      buffer.put('tab-0 doc-1', { content: 'Venu d’ailleurs.', base: { content: 'Autre', draftVersion: 100 } }),
+    );
+    const page = await load();
+    await elapse(1000);
+    expect(listed(page)).toEqual([['Another copy kept on this device', 'Venu d’ailleurs.']]);
+    expect(unload()).toBe(true);
+    await openDocument(page, /Lettres/);
+    expect(unload()).toBe(true);
+
+    await openDocument(page, /Le gardien du phare/);
+    fireEvent.click(within(page.view.container).getByRole('button', { name: 'Discard this copy' }));
+    await settle();
+    expect(unload()).toBe(false);
   });
 });

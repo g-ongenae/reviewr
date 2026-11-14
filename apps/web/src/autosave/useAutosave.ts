@@ -339,10 +339,9 @@ const restore = async (queryClient: QueryClient, id: string, texts: readonly Lef
       cacheDocument(queryClient, document);
       server = draftOf(document);
     } catch (error) {
-      if (!isNotFound(error)) {
-        reachability.reportError(error);
-        return false;
-      }
+      // Not reported to `reachability`: its return triggers this restore again, which would loop while only this
+      // read fails. The server's return, seen by other requests, or the open document's timer brings it back.
+      if (!isNotFound(error)) return false;
     }
   }
   if (abandoned.has(queryClient)) return false;
@@ -400,7 +399,9 @@ const restoreLeftTexts = (queryClient: QueryClient, id?: string): Promise<Set<st
     if (abandoned.has(queryClient)) return deferred;
     const left = await adoptLeftTexts(queryClient, id);
     for (const [documentId, texts] of left) {
-      if (!(await restore(queryClient, documentId, texts))) deferred.add(documentId);
+      const restored = await restore(queryClient, documentId, texts);
+      if (!restored) deferred.add(documentId);
+      setWaiting(queryClient, documentId, restored ? [] : [...new Set(texts.map((text) => text.content))]);
     }
     return deferred;
   };
@@ -408,6 +409,43 @@ const restoreLeftTexts = (queryClient: QueryClient, id?: string): Promise<Set<st
   const next = previous.then(run, run);
   restoring.set(queryClient, next);
   return next;
+};
+
+/**
+ * The texts read under their tabs' locks whose restore waits for the server, by document: shown read-only, and
+ * guarded on unload, until the restore decides on them. Nothing is sent before.
+ */
+const waitingTexts = new WeakMap<QueryClient, Map<string, readonly string[]>>();
+const waitingListeners = new Set<() => void>();
+
+const waitingOf = (queryClient: QueryClient): Map<string, readonly string[]> => {
+  let waiting = waitingTexts.get(queryClient);
+  if (waiting === undefined) {
+    waiting = new Map();
+    waitingTexts.set(queryClient, waiting);
+  }
+  return waiting;
+};
+
+const setWaiting = (queryClient: QueryClient, id: string, texts: readonly string[]) => {
+  const waiting = waitingOf(queryClient);
+  if (texts.length === 0 && !waiting.has(id)) return;
+  if (texts.length === 0) waiting.delete(id);
+  else waiting.set(id, texts);
+  for (const listener of [...waitingListeners]) listener();
+};
+
+const subscribeWaiting = (listener: () => void) => {
+  waitingListeners.add(listener);
+  return () => {
+    waitingListeners.delete(listener);
+  };
+};
+
+/** The texts this device kept for the document `id` whose restore waits for the server (see `waitingTexts`). */
+export const useWaitingTexts = (id: string): readonly string[] => {
+  const queryClient = useQueryClient();
+  return useSyncExternalStore(subscribeWaiting, () => waitingOf(queryClient).get(id) ?? noCopies);
 };
 
 /**
@@ -657,7 +695,11 @@ export const useAutosaveGuard = () => {
       flushAll();
       if (
         hasUnsavedChanges() ||
-        entries().some((entry) => entry.autosave.getSnapshot().status !== 'saved' || orphaned(entry))
+        // Texts other tabs left that the server does not hold yet: held copies, and restores waiting for the server.
+        waitingOf(queryClient).size > 0 ||
+        entries().some(
+          (entry) => entry.autosave.getSnapshot().status !== 'saved' || orphaned(entry) || entry.held.length > 0,
+        )
       ) {
         event.preventDefault();
       }

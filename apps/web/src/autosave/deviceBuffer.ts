@@ -232,7 +232,11 @@ export const mirrorState = (
   else enqueue(device, documentId, { kind: 'put', content: state.content, base: state.base });
 };
 
-/** Writes a restored text under this tab's key, once, whatever is typed after it; `onKept` hears it landed. */
+/**
+ * Writes a restored text under this tab's key, once, whatever is typed after it; `onKept` hears it landed. The pin
+ * usually overlaps the mirror's own put of the same text (already started, so skipped as a repeat): the safety does not
+ * rest on it, but on the gone tab's record being kept until a write of that very text was answered ok (`letGo`).
+ */
 export const keepRestored = (
   queryClient: QueryClient,
   documentId: string,
