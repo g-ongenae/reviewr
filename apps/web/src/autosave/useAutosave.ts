@@ -390,33 +390,22 @@ const abandoned = new WeakSet<QueryClient>();
 const restoring = new WeakMap<QueryClient, Promise<unknown>>();
 
 /**
- * Restores the texts gone tabs left for every document, or for `id` only, one restore at a time. Answers the
- * documents whose server could not be read: their texts wait in the buffer.
- */
-const restoreLeftTexts = (queryClient: QueryClient, id?: string): Promise<Set<string>> => {
-  const run = async () => {
-    const deferred = new Set<string>();
-    if (abandoned.has(queryClient)) return deferred;
-    const left = await adoptLeftTexts(queryClient, id);
-    for (const [documentId, texts] of left) {
-      const restored = await restore(queryClient, documentId, texts);
-      if (!restored) deferred.add(documentId);
-      setWaiting(queryClient, documentId, restored ? [] : [...new Set(texts.map((text) => text.content))]);
-    }
-    return deferred;
-  };
-  const previous = restoring.get(queryClient) ?? Promise.resolve();
-  const next = previous.then(run, run);
-  restoring.set(queryClient, next);
-  return next;
-};
-
-/**
- * The texts read under their tabs' locks whose restore waits for the server, by document: shown read-only, and
- * guarded on unload, until the restore decides on them. Nothing is sent before.
+ * The texts waiting for the server, by document: texts gone tabs left, read under their locks, on which no restore
+ * could decide because the server's draft could not be read. Shown read-only and guarded on unload; nothing is sent
+ * before a decision.
+ *
+ * A view of the buffer, owned by `restoreLeftTexts` alone: after each successful scan, every document the scan covered
+ * holds exactly its texts still undecided (a document absent from the scan, whose texts another tab saved and removed,
+ * drops out); a failed scan changes nothing. While anything waits, the registry tries again on its own, with a backoff,
+ * whatever document is open.
  */
 const waitingTexts = new WeakMap<QueryClient, Map<string, readonly string[]>>();
 const waitingListeners = new Set<() => void>();
+const retries = new WeakMap<QueryClient, { timer?: ReturnType<typeof setTimeout>; delay: number }>();
+
+/** How long the registry waits before it tries a waiting restore again, then up to `restoreRetryMaxMs`. */
+const restoreRetryMs = 5000;
+const restoreRetryMaxMs = 60_000;
 
 const waitingOf = (queryClient: QueryClient): Map<string, readonly string[]> => {
   let waiting = waitingTexts.get(queryClient);
@@ -427,12 +416,54 @@ const waitingOf = (queryClient: QueryClient): Map<string, readonly string[]> => 
   return waiting;
 };
 
-const setWaiting = (queryClient: QueryClient, id: string, texts: readonly string[]) => {
-  const waiting = waitingOf(queryClient);
-  if (texts.length === 0 && !waiting.has(id)) return;
-  if (texts.length === 0) waiting.delete(id);
-  else waiting.set(id, texts);
-  for (const listener of [...waitingListeners]) listener();
+/** Tries every waiting restore again after a while, while anything waits; never twice at once. */
+const scheduleRetry = (queryClient: QueryClient) => {
+  const retry = retries.get(queryClient) ?? { delay: restoreRetryMs };
+  retries.set(queryClient, retry);
+  if (waitingOf(queryClient).size === 0 || abandoned.has(queryClient)) {
+    clearTimeout(retry.timer);
+    retry.timer = undefined;
+    retry.delay = restoreRetryMs;
+    return;
+  }
+  if (retry.timer !== undefined) return;
+  retry.timer = setTimeout(() => {
+    retry.timer = undefined;
+    retry.delay = Math.min(retry.delay * 2, restoreRetryMaxMs);
+    void restoreLeftTexts(queryClient);
+  }, retry.delay);
+};
+
+/**
+ * Restores the texts gone tabs left for every document, or for `id` only, one restore at a time, then brings the
+ * waiting texts in line with what it found (see `waitingTexts`). Answers the documents whose texts wait for the server.
+ */
+const restoreLeftTexts = (queryClient: QueryClient, id?: string): Promise<Set<string>> => {
+  const run = async () => {
+    const waiting = waitingOf(queryClient);
+    if (abandoned.has(queryClient)) return new Set<string>();
+    const left = await adoptLeftTexts(queryClient, id);
+    if (left !== undefined) {
+      const undecided = new Map<string, readonly string[]>();
+      for (const [documentId, texts] of left) {
+        if (!(await restore(queryClient, documentId, texts))) {
+          undecided.set(documentId, [...new Set(texts.map((text) => text.content))]);
+        }
+      }
+      // The scan covered every document, or only `id`: those hold what it left undecided, nothing else.
+      for (const documentId of [...waiting.keys()]) {
+        if ((id === undefined || documentId === id) && !undecided.has(documentId)) waiting.delete(documentId);
+      }
+      for (const [documentId, texts] of undecided) waiting.set(documentId, texts);
+      for (const listener of [...waitingListeners]) listener();
+    }
+    scheduleRetry(queryClient);
+    return new Set(id === undefined ? waiting.keys() : waiting.has(id) ? [id] : []);
+  };
+  const previous = restoring.get(queryClient) ?? Promise.resolve();
+  const next = previous.then(run, run);
+  restoring.set(queryClient, next);
+  return next;
 };
 
 const subscribeWaiting = (listener: () => void) => {
@@ -538,47 +569,29 @@ export const useKeptCopies = (id: string): readonly string[] => {
 /** How far the restore of a document's texts went: `deferred` while the server cannot be read to decide on them. */
 export type Restored = 'pending' | 'deferred' | 'done';
 
-/** How long a restore that could not read the server waits before it tries again, if the server is not back sooner. */
-const restoreRetryMs = 5000;
-
 /**
  * Whether what the local buffer holds for the document `id` was restored: until then, nothing may show the server's
- * text as the writer's. `done` at once when `skip` (a page not created yet) or when the device keeps no buffer. A
- * restore that could not read the server tries again once it is back, or after a while.
+ * text as the writer's. `done` at once when `skip` (a page not created yet) or when the device keeps no buffer.
  */
 export const useRestored = (id: string, skip = false): Restored => {
   const queryClient = useQueryClient();
   const settled = skip || !hasDeviceBuffer(queryClient);
-  const [state, setState] = useState<{ id: string; restored: Restored; attempt: number }>({
-    id,
-    restored: 'pending',
-    attempt: 0,
-  });
-  const restored = settled ? 'done' : state.id === id ? state.restored : 'pending';
-  const attempt = state.id === id ? state.attempt : 0;
+  const [restored, setRestored] = useState<{ id: string; deferred: boolean } | undefined>(undefined);
+  // The registry retries on its own (see `waitingTexts`): the document opens once its texts no longer wait.
+  const waiting = useSyncExternalStore(subscribeWaiting, () => waitingOf(queryClient).has(id));
   useEffect(() => {
     if (settled) return;
     let live = true;
     void restoreLeftTexts(queryClient, id).then((deferred) => {
-      if (live) setState((current) => ({ ...current, id, restored: deferred.has(id) ? 'deferred' : 'done' }));
+      if (live) setRestored({ id, deferred: deferred.has(id) });
     });
     return () => {
       live = false;
     };
-  }, [queryClient, id, settled, attempt]);
-  useEffect(() => {
-    if (restored !== 'deferred') return;
-    const retry = () => setState((current) => ({ ...current, id, restored: 'deferred', attempt: attempt + 1 }));
-    const timer = setTimeout(retry, restoreRetryMs);
-    const unsubscribe = reachability.subscribe(() => {
-      if (!reachability.isUnreachable()) retry();
-    });
-    return () => {
-      clearTimeout(timer);
-      unsubscribe();
-    };
-  }, [id, restored, attempt]);
-  return restored;
+  }, [queryClient, id, settled]);
+  if (settled) return 'done';
+  if (restored?.id !== id) return 'pending';
+  return restored.deferred && waiting ? 'deferred' : 'done';
 };
 
 /** An editor shows the machine: it is kept until every editor left. */

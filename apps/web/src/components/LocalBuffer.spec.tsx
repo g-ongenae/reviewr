@@ -1055,14 +1055,16 @@ describe('texts kept while their restore waits, and leaving the page', () => {
     expect(textOf(second)).toBeNull();
     expect(listed(second)).toEqual([['Another copy kept on this device', 'Hors ligne.']]);
     const writeText = vi.fn(() => Promise.resolve());
-    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     fireEvent.click(within(second.view.container).getByRole('button', { name: 'Copy' }));
     await settle();
     expect(writeText).toHaveBeenCalledWith('Hors ligne.');
+    Reflect.deleteProperty(navigator, 'clipboard');
     expect(calls.filter(isDraftSave)).toHaveLength(1);
 
+    // The registry tries again on its own, its backoff capped at a minute.
     lose = () => false;
-    await elapse(5000);
+    await elapse(30_000);
     await elapse(1000);
     expect(textarea(second).value).toBe('Hors ligne.');
     expect(listed(second)).toEqual([]);
@@ -1107,5 +1109,97 @@ describe('texts kept while their restore waits, and leaving the page', () => {
     fireEvent.click(within(page.view.container).getByRole('button', { name: 'Discard this copy' }));
     await settle();
     expect(unload()).toBe(false);
+  });
+});
+
+describe('the waiting texts, kept in line with the buffer', () => {
+  const unload = () => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  const isDocumentRead = (id: string) => (call: Call) => call.method === 'GET' && call.path === `/documents/${id}`;
+
+  it('recovers a waiting text of a document that is not open, though the server never looked unreachable', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    // Only the read of the left document fails; the open one works, so the server always looks reachable.
+    lose = isDocumentRead('doc-1');
+    const second = await load('#/documents/doc-2');
+    await elapse(1000);
+    expect(textarea(second).value).toBe(original);
+    expect(unload()).toBe(true);
+    expect(reachability.isUnreachable()).toBe(false);
+
+    lose = () => false;
+    await elapse(5000);
+    await elapse(10_000);
+    expect(reachability.isUnreachable()).toBe(false);
+    expect(serverDraft()).toBe('Hors ligne.');
+    expect(await stored()).toEqual([]);
+    expect(unload()).toBe(false);
+  });
+
+  it('drops a waiting text once another tab saved it and removed it from the buffer', async () => {
+    lose = isDraftSave;
+    const first = await load('#/documents/doc-1', { locks: false });
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = isDocumentRead('doc-1');
+    const waiting = await load('#/documents/doc-2', { locks: false });
+    await elapse(100);
+    expect(unload()).toBe(true);
+
+    // Before the waiting tab tries again, another tab (no lock either) adopts the text, saves it and removes it.
+    lose = () => false;
+    const other = await load('#/documents/doc-1', { locks: false });
+    await elapse(1000);
+    expect(textarea(other).value).toBe('Hors ligne.');
+    expect(serverDraft()).toBe('Hors ligne.');
+    expect(await stored()).toEqual([]);
+    other.view.unmount();
+    // The tabs share this test's address: the waiting tab's is put back.
+    window.history.replaceState(null, '', '/#/documents/doc-2');
+
+    await elapse(5000);
+    await elapse(1000);
+    expect(unload()).toBe(false);
+    fireEvent.click(within(waiting.view.container).getByRole('button', { name: /Le gardien du phare/ }));
+    await elapse(1000);
+    expect(textarea(waiting).value).toBe('Hors ligne.');
+    expect(listed(waiting)).toEqual([]);
+  });
+
+  it('keeps a waiting text when a later scan of the buffer fails', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = isDocumentRead('doc-1');
+    const buffer = crashable();
+    const page = await load('#/documents/doc-2', { buffer });
+    await elapse(100);
+    expect(unload()).toBe(true);
+    const list = buffer.list;
+    buffer.list = () => Promise.resolve({ ok: false, reason: 'failed', error: new Error('failed'), entries: [] });
+    await elapse(5000);
+    await elapse(1000);
+    expect(unload()).toBe(true);
+
+    buffer.list = list;
+    lose = () => false;
+    await elapse(10_000);
+    await elapse(1000);
+    expect(serverDraft()).toBe('Hors ligne.');
+    expect(unload()).toBe(false);
+    expect(textarea(page).value).toBe(original);
   });
 });

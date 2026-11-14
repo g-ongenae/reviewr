@@ -311,12 +311,16 @@ const leftBy = (device: DeviceBuffer, entry: BufferEntry, documentId: string | u
 
 /**
  * The texts gone tabs left, by document (all of them, or only `documentId`'s), the most recent first, read under
- * their tabs' locks (rule 2). A text stays offered until the registry takes it over (`markHanded`).
+ * their tabs' locks (rule 2). A text stays offered until the registry takes it over (`markHanded`). `undefined` when
+ * the buffer could not be read: unlike an empty result, it says nothing about what is stored.
  */
-export const adoptLeftTexts = (queryClient: QueryClient, documentId?: string): Promise<Map<string, LeftText[]>> => {
+export const adoptLeftTexts = (
+  queryClient: QueryClient,
+  documentId?: string,
+): Promise<Map<string, LeftText[]> | undefined> => {
   const device = deviceOf(queryClient);
   const { buffer } = device;
-  const run = async (): Promise<Map<string, LeftText[]>> => {
+  const run = async (): Promise<Map<string, LeftText[]> | undefined> => {
     const left = new Map<string, LeftText[]>();
     if (buffer === null) return left;
     await device.ready;
@@ -324,7 +328,7 @@ export const adoptLeftTexts = (queryClient: QueryClient, documentId?: string): P
     const first = await buffer.list();
     if (!first.ok) {
       report(device, first.reason);
-      return left;
+      return undefined;
     }
     const owners = new Set(first.entries.flatMap((entry) => leftBy(device, entry, documentId)?.tabId ?? []));
     for (const owner of owners) await claim(device, owner);
@@ -332,7 +336,7 @@ export const adoptLeftTexts = (queryClient: QueryClient, documentId?: string): P
     const fresh = await buffer.list();
     if (!fresh.ok) {
       report(device, fresh.reason);
-      return left;
+      return undefined;
     }
     for (const entry of fresh.entries) {
       const owner = leftBy(device, entry, documentId);
