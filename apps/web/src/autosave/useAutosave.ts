@@ -135,10 +135,14 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
 export const entryOf = (queryClient: QueryClient, id: string): Readonly<Entry> | undefined =>
   registryOf(queryClient).get(id);
 
-/** A read answered that the document no longer exists: a text the writer edited in it is kept until discarded. */
-export const markDeleted = (queryClient: QueryClient, id: string) => {
+/**
+ * What a read of the document answered: that it no longer exists (a text the writer edited in it is then kept until
+ * discarded), or that it exists, which undoes a wrong or transient 404 (the cache and the cleanup of a saved machine work
+ * as usual again; no text is dropped by this).
+ */
+export const markDeleted = (queryClient: QueryClient, id: string, deleted: boolean) => {
   const entry = registryOf(queryClient).get(id);
-  if (entry !== undefined) entry.deleted = true;
+  if (entry !== undefined) entry.deleted = deleted;
 };
 
 /** Drops a document's machine without saving, for a document that no longer exists. */

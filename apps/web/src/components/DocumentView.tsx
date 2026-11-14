@@ -25,13 +25,16 @@ export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: 
   const document = useQuery({
     queryKey: queryKeys.document(id),
     queryFn: async () => {
+      let read: Document;
       try {
-        return await api.getDocument(id);
+        read = await api.getDocument(id);
       } catch (error) {
         // Known before the editor goes: its release then keeps a text the writer edited.
-        if (isNotFound(error)) markDeleted(queryClient, id);
+        if (isNotFound(error)) markDeleted(queryClient, id, true);
         throw error;
       }
+      markDeleted(queryClient, id, false);
+      return read;
     },
     enabled: id.length > 0,
     retry: (failureCount, error) => !isNotFound(error) && failureCount < 3,

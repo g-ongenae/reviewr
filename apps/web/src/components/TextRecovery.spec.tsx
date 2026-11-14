@@ -4,7 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys, reachability } from '../api';
-import { useAutosaveGuard } from '../autosave/useAutosave';
+import { entryOf, useAutosaveGuard } from '../autosave/useAutosave';
 import { createQueryClient } from '../queryClient';
 import { DocumentView } from './DocumentView';
 
@@ -319,6 +319,48 @@ describe('a document deleted elsewhere', () => {
     expect(unload().defaultPrevented).toBe(true);
     await leaveAndComeBack();
     expect(listed()).toEqual([['Your text', typed]]);
+  });
+
+  it('works as usual again once a read finds the document after a wrong 404', async () => {
+    const later = `${typed} Il dormait enfin.`;
+    await open();
+    type(typed);
+    await elapse(1000);
+    intercept = (call) => (call.method === 'GET' && call.path === '/documents/doc-1' ? notFound() : undefined);
+    await refetch();
+    expect(listed()).toEqual([['Your text', typed]]);
+
+    intercept = () => undefined;
+    await refetch();
+    expect(recovery()).toBeNull();
+    expect(textarea().value).toBe(typed);
+    type(later);
+    await elapse(1000);
+    expect(server().draft?.content).toBe(later);
+    expect(queryClient.getQueryData<Document>(queryKeys.document('doc-1'))?.draft?.content).toBe(later);
+    expect(unload().defaultPrevented).toBe(false);
+
+    await open('doc-2');
+    await elapse(1000);
+    expect(entryOf(queryClient, 'doc-1')).toBeUndefined();
+    expect(unload().defaultPrevented).toBe(false);
+  });
+
+  it('shows "not found" for a text saved and left before the document was deleted elsewhere', async () => {
+    // Once its text was saved and its editor left, the tab released the document: it no longer holds that text, so
+    // there is nothing to offer. Guarding against a deletion made elsewhere, from a stale view, is a decision for the
+    // server side (see docs/PLAN.md).
+    await open();
+    type(typed);
+    await elapse(1000);
+    await open('doc-2');
+    await elapse(1000);
+    expect(entryOf(queryClient, 'doc-1')).toBeUndefined();
+    db.delete('doc-1');
+    queryClient.removeQueries({ queryKey: queryKeys.document('doc-1') });
+    await open('doc-1');
+    expect(isNotFoundPage()).toBe(true);
+    expect(unload().defaultPrevented).toBe(false);
   });
 
   it('shows "not found" for a document deleted from this tab, with no warning', async () => {
