@@ -1144,6 +1144,42 @@ describe('the waiting texts, kept in line with the buffer', () => {
     expect(unload()).toBe(false);
   });
 
+  it('stops trying when the app is removed from the page, and recovers the text once it is shown again', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = isDocumentRead('doc-1');
+    const second = await load('#/documents/doc-2');
+    await elapse(1000);
+    expect(unload()).toBe(true);
+
+    // The app goes away without the page going away, as on a hot reload: nothing may read or save behind it, even
+    // once the document can be read again and well past the longest wait between two tries.
+    second.view.unmount();
+    await settle();
+    lose = () => false;
+    const sent = calls.length;
+    await elapse(200_000);
+    expect(calls).toHaveLength(sent);
+    expect(serverDraft()).toBe(original);
+    expect((await stored()).map(([, text]) => text)).toEqual(['Hors ligne.']);
+
+    // Shown again on the same registry, the recovery goes on.
+    render(
+      <QueryClientProvider client={second.queryClient}>
+        <App />
+      </QueryClientProvider>,
+    );
+    await elapse(1000);
+    await elapse(10_000);
+    expect(serverDraft()).toBe('Hors ligne.');
+    expect(await stored()).toEqual([]);
+    expect(unload()).toBe(false);
+  });
+
   it('drops a waiting text once another tab saved it and removed it from the buffer', async () => {
     lose = isDraftSave;
     const first = await load('#/documents/doc-1', { locks: false });

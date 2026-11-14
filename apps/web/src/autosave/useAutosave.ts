@@ -402,6 +402,12 @@ const restoring = new WeakMap<QueryClient, Promise<unknown>>();
 const waitingTexts = new WeakMap<QueryClient, Map<string, readonly string[]>>();
 const waitingListeners = new Set<() => void>();
 const retries = new WeakMap<QueryClient, { timer?: ReturnType<typeof setTimeout>; delay: number }>();
+/**
+ * How many app guards hold each registry (see `useAutosaveGuard`). The registry tries waiting restores again only
+ * while the app is shown: once the app is removed from the page without the page going away (a hot reload, a test),
+ * nothing may go on reading and saving behind it.
+ */
+const guards = new WeakMap<QueryClient, number>();
 
 /** How long the registry waits before it tries a waiting restore again, then up to `restoreRetryMaxMs`. */
 const restoreRetryMs = 5000;
@@ -420,7 +426,7 @@ const waitingOf = (queryClient: QueryClient): Map<string, readonly string[]> => 
 const scheduleRetry = (queryClient: QueryClient) => {
   const retry = retries.get(queryClient) ?? { delay: restoreRetryMs };
   retries.set(queryClient, retry);
-  if (waitingOf(queryClient).size === 0 || abandoned.has(queryClient)) {
+  if (waitingOf(queryClient).size === 0 || abandoned.has(queryClient) || (guards.get(queryClient) ?? 0) === 0) {
     clearTimeout(retry.timer);
     retry.timer = undefined;
     retry.delay = restoreRetryMs;
@@ -689,6 +695,7 @@ export const useAutosaveGuard = () => {
   useEffect(() => {
     // What crashed or closed tabs left is restored, and saved in the background; what waited for the server, once it
     // is back.
+    guards.set(queryClient, (guards.get(queryClient) ?? 0) + 1);
     void restoreLeftTexts(queryClient);
     const unsubscribe = reachability.subscribe(() => {
       if (!reachability.isUnreachable()) void restoreLeftTexts(queryClient);
@@ -725,6 +732,10 @@ export const useAutosaveGuard = () => {
       window.removeEventListener('beforeunload', onBeforeUnload);
       window.document.removeEventListener('visibilitychange', onVisibilityChange);
       unsubscribe();
+      // The last guard gone, the registry stops trying on its own, and a restore still running does not start it
+      // again. The waiting texts stay in the buffer; the next guard (a remount, strict mode) restores them.
+      guards.set(queryClient, (guards.get(queryClient) ?? 1) - 1);
+      scheduleRetry(queryClient);
     };
   }, [queryClient]);
 };
