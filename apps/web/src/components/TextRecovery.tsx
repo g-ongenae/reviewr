@@ -4,12 +4,16 @@ import type { ReactNode } from 'react';
 import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import type { Autosave, AutosaveState } from '../autosave/autosave';
-import { discardAutosave } from '../autosave/useAutosave';
+import type { LeftText } from '../autosave/deviceBuffer';
+import { discardAutosave, useKeptCopies } from '../autosave/useAutosave';
 import { existingSession, type SessionState, type Side } from '../reconcile/session';
 
 /** How a text a merge holds is labelled, after the side it came from. */
 export const earlierTextLabel = (side: Side): string =>
   side === 'mine' ? 'An earlier text of yours' : 'An earlier text from the other device';
+
+/** How a text that a tab closed before saving left on this device is labelled, besides the local text. */
+export const keptCopyLabel = 'Another copy kept on this device';
 
 interface HeldTextProps {
   label: string;
@@ -46,13 +50,15 @@ const noSession: SessionState = { running: false, texts: [] };
 
 /**
  * Every text this tab holds for a document its server no longer has: the local text when the writer edited it or it is
- * not saved, the merged text of a stopped merge, the other device's text of a conflict, and every text a merge was given. The first
- * label wins for a text held twice; blank texts hold nothing to recover.
+ * not saved, the merged text of a stopped merge, the other device's text of a conflict, every text a merge was given, and
+ * the copies closed tabs left on this device. The first label wins for a text held twice; blank texts hold nothing to
+ * recover.
  */
 export const recoverableTexts = (
   machine: AutosaveState,
   session: SessionState,
   edited: boolean,
+  copies: readonly LeftText[] = [],
 ): { label: string; text: string }[] => {
   const texts: { label: string; text: string }[] = [];
   const add = (text: string, label: string) => {
@@ -63,6 +69,7 @@ export const recoverableTexts = (
   if (session.result !== undefined) add(session.result, 'Your merged text, not applied');
   if (machine.status === 'conflict') add(machine.server.content, 'The other device’s text');
   for (const { text, side } of session.texts) add(text, earlierTextLabel(side));
+  for (const { content } of copies) add(content, keptCopyLabel);
   return texts;
 };
 
@@ -115,7 +122,8 @@ export const DeletedDocument = ({
     },
   });
 
-  const texts = recoverableTexts(machine, sessionState, edited);
+  const copies = useKeptCopies(id);
+  const texts = recoverableTexts(machine, sessionState, edited, copies);
   if (texts.length === 0) return notFound;
 
   const discard = () => {

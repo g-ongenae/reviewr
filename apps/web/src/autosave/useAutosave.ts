@@ -6,6 +6,15 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { api, isNotFound, queryKeys, reachability } from '../api';
 import { hasUnsavedChanges } from '../unsavedChanges';
 import { createAutosave, type Autosave, type AutosaveState, type Draft, type SaveResult } from './autosave';
+import {
+  adoptLeftTexts,
+  dropLeftText,
+  forgetDocument,
+  hasDeviceBuffer,
+  keepRestored,
+  mirrorState,
+  type LeftText,
+} from './deviceBuffer';
 
 /**
  * The draft an editor opens on. The API always sends it; documents without one (fixtures written before drafts
@@ -139,6 +148,17 @@ interface Entry {
    */
   deleted: boolean;
   /**
+   * The other texts gone tabs left in the local buffer for this document, besides the local text (see `restore`):
+   * shown until the writer discards them or the local text is saved as one of them.
+   */
+  copies: readonly LeftText[];
+  copyListeners: Set<() => void>;
+  /**
+   * The base of a text restored from the local buffer, while it is still the machine's: until then a newer draft read
+   * from the server never replaces the restored text silently, even when it is the base's text.
+   */
+  restoredBase?: Draft;
+  /**
    * A title typed on a page whose document does not exist yet: it can be saved only once the document is created, by
    * the editor shown then. Kept here so that an editor mounted again on the page (after "Try again") still has it.
    */
@@ -185,12 +205,11 @@ const registryOf = (queryClient: QueryClient): Map<string, Entry> => {
  * sent again as it is until it is answered (the server refuses the same id with another body). The answer tells the
  * machine which text the server holds, and the machine sends the text typed since as a draft.
  */
-const entryFor = (queryClient: QueryClient, document: Document, create = false): Entry => {
+const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = false): Entry => {
   const registry = registryOf(queryClient);
-  const existing = registry.get(document.id);
+  const existing = registry.get(id);
   if (existing !== undefined) return existing;
 
-  const { id } = document;
   let creating = create && !isCreated(queryClient, id);
   let creation: CreateDraftDocumentInput | undefined;
   const createDocument = async (draft: Draft): Promise<SaveResult> => {
@@ -219,7 +238,7 @@ const entryFor = (queryClient: QueryClient, document: Document, create = false):
       : { kind: 'conflict', server: confirmed };
   };
   const machine = createAutosave({
-    base: draftOf(document),
+    base: draft,
     save: async (draft) => {
       if (creating) return createDocument(draft);
       try {
@@ -241,13 +260,73 @@ const entryFor = (queryClient: QueryClient, document: Document, create = false):
         entry.edited = true;
         machine.edit(content);
       },
+      refresh: (confirmed, keepText) =>
+        machine.refresh(confirmed, keepText === true || entry.restoredBase === machine.getSnapshot().base),
     },
     users: 0,
     edited: false,
     deleted: false,
+    copies: [],
+    copyListeners: new Set(),
   };
+  // The local buffer mirrors the machine, once the document exists on the server.
+  machine.subscribe(() => {
+    if (creating) return;
+    const state = machine.getSnapshot();
+    mirrorState(queryClient, id, state);
+    if (state.status === 'saved') {
+      const saved = entry.copies.filter((copy) => copy.content === state.content);
+      for (const copy of saved) dropLeftText(queryClient, copy.key, copy.content);
+      if (saved.length > 0)
+        setCopies(
+          entry,
+          entry.copies.filter((copy) => !saved.includes(copy)),
+        );
+    }
+  });
   registry.set(id, entry);
   return entry;
+};
+
+const setCopies = (entry: Entry, copies: readonly LeftText[]) => {
+  entry.copies = copies;
+  for (const listener of [...entry.copyListeners]) listener();
+};
+
+/**
+ * Rebuilds what gone tabs left for a document: with no machine in this tab yet, the most recent text becomes the
+ * local text, on the base it was written from, and is saved like any text (in the background if no editor shows it);
+ * every other text (all of them, if this tab already has a machine) is kept as a copy for the writer, never merged or
+ * dropped. A copy of a text already held is dropped from the buffer: nothing is lost.
+ */
+const restore = (queryClient: QueryClient, id: string, texts: readonly LeftText[]) => {
+  let entry = registryOf(queryClient).get(id);
+  let others = texts;
+  if (entry === undefined && texts[0] !== undefined) {
+    const [{ key, content, base }] = texts;
+    others = texts.slice(1);
+    entry = entryFor(queryClient, id, base);
+    entry.restoredBase = entry.autosave.getSnapshot().base;
+    entry.autosave.edit(content);
+    keepRestored(queryClient, id, content, base);
+    dropLeftText(queryClient, key, content);
+    queueMicrotask(() => saveInBackground(queryClient, id, entry as Entry));
+  }
+  if (entry === undefined) return;
+  const copies = [...entry.copies];
+  for (const text of others) {
+    const held =
+      text.content === entry.autosave.getSnapshot().content || copies.some((c) => c.content === text.content);
+    if (held) dropLeftText(queryClient, text.key, text.content);
+    else copies.push(text);
+  }
+  if (copies.length !== entry.copies.length) setCopies(entry, copies);
+};
+
+/** Restores the texts gone tabs left for every document, or for `id` only. */
+const restoreLeftTexts = async (queryClient: QueryClient, id?: string) => {
+  const left = await adoptLeftTexts(queryClient, id);
+  for (const [documentId, texts] of left) restore(queryClient, documentId, texts);
 };
 
 /**
@@ -265,7 +344,7 @@ export const createAgain = (queryClient: QueryClient, id: string): string => {
   const refused = registryOf(queryClient).get(id);
   const text = refused?.autosave.getSnapshot().content ?? '';
   const next = newDocumentId();
-  const entry = entryFor(queryClient, blankDocument(next), true);
+  const entry = entryFor(queryClient, next, draftOf(blankDocument(next)), true);
   entry.title = refused?.title;
   entry.autosave.edit(text);
   void entry.autosave.flush();
@@ -282,8 +361,67 @@ const keepPendingTitle = (queryClient: QueryClient, id: string, title: string) =
 /** Drops a document's machine without saving, for a document that no longer exists. */
 export const discardAutosave = (queryClient: QueryClient, id: string) => {
   const registry = registryOf(queryClient);
-  registry.get(id)?.autosave.dispose();
+  const entry = registry.get(id);
+  entry?.autosave.dispose();
   registry.delete(id);
+  forgetDocument(
+    queryClient,
+    id,
+    (entry?.copies ?? []).map((copy) => copy.key),
+  );
+};
+
+/** The writer discards one of the copies gone tabs left for a document. */
+export const discardCopy = (queryClient: QueryClient, id: string, key: string) => {
+  const entry = registryOf(queryClient).get(id);
+  const copy = entry?.copies.find((item) => item.key === key);
+  if (entry === undefined || copy === undefined) return;
+  dropLeftText(queryClient, copy.key, copy.content);
+  setCopies(
+    entry,
+    entry.copies.filter((item) => item !== copy),
+  );
+};
+
+const noCopies: readonly LeftText[] = [];
+
+/** The copies gone tabs left for a document, besides its local text (see `restore`). */
+export const useKeptCopies = (id: string): readonly LeftText[] => {
+  const queryClient = useQueryClient();
+  const entry = registryOf(queryClient).get(id);
+  return useSyncExternalStore(
+    useCallback(
+      (listener: () => void) => {
+        entry?.copyListeners.add(listener);
+        return () => entry?.copyListeners.delete(listener);
+      },
+      [entry],
+    ),
+    () => entry?.copies ?? noCopies,
+  );
+};
+
+/**
+ * Whether what the local buffer holds for the document `id` was restored: until then, nothing may show the server's
+ * text as the writer's. Answers `true` at once when `skip` (a page not created yet) or when the device keeps no buffer.
+ */
+export const useRestored = (id: string, skip = false): boolean => {
+  const queryClient = useQueryClient();
+  const [restored, setRestored] = useState<string | undefined>(() =>
+    skip || !hasDeviceBuffer(queryClient) ? id : undefined,
+  );
+  const done = restored === id || skip || !hasDeviceBuffer(queryClient);
+  useEffect(() => {
+    if (done) return;
+    let live = true;
+    void restoreLeftTexts(queryClient, id).then(() => {
+      if (live) setRestored(id);
+    });
+    return () => {
+      live = false;
+    };
+  }, [queryClient, id, done]);
+  return done;
 };
 
 /** An editor shows the machine: it is kept until every editor left. */
@@ -298,23 +436,36 @@ const acquire = (entry: Entry) => {
 const release = (queryClient: QueryClient, id: string, entry: Entry) => {
   entry.users--;
   // Deferred, so an editor mounted again right away (React's strict mode, a remount) keeps the same machine.
-  queueMicrotask(() => {
-    if (entry.users > 0) return;
-    const { autosave } = entry;
-    void autosave.flush();
-    const check = () => {
-      const { status } = autosave.getSnapshot();
-      if (entry.users > 0 || status === 'conflict' || status === 'rejected' || orphaned(entry)) {
-        unsubscribe();
-      } else if (status === 'saved') {
-        const registry = registryOf(queryClient);
-        if (registry.get(id) === entry) registry.delete(id);
-        autosave.dispose();
-      }
-    };
-    const unsubscribe = autosave.subscribe(check);
-    check();
-  });
+  queueMicrotask(() => saveInBackground(queryClient, id, entry));
+};
+
+/**
+ * No editor shows the machine: it saves now, and is dropped once its text is saved. It stays after a conflict or a
+ * rejection, for a text of a deleted document, and while it has copies, so reopening the document shows them again.
+ */
+const saveInBackground = (queryClient: QueryClient, id: string, entry: Entry) => {
+  if (entry.users > 0) return;
+  const { autosave } = entry;
+  void autosave.flush();
+  const check = () => {
+    const { status } = autosave.getSnapshot();
+    if (
+      entry.users > 0 ||
+      status === 'conflict' ||
+      status === 'rejected' ||
+      orphaned(entry) ||
+      entry.copies.length > 0
+    ) {
+      unsubscribe();
+    } else if (status === 'saved' && entry.restoredBase !== autosave.getSnapshot().base) {
+      // A restored text is kept until the server confirmed something since: until then it only looks saved.
+      const registry = registryOf(queryClient);
+      if (registry.get(id) === entry) registry.delete(id);
+      autosave.dispose();
+    }
+  };
+  const unsubscribe = autosave.subscribe(check);
+  check();
 };
 
 export interface UseAutosave {
@@ -335,7 +486,7 @@ export interface UseAutosave {
  */
 export const useAutosave = (document: Document, create = false): UseAutosave => {
   const queryClient = useQueryClient();
-  const [entry] = useState(() => entryFor(queryClient, document, create));
+  const [entry] = useState(() => entryFor(queryClient, document.id, draftOf(document), create));
   const { autosave } = entry;
   const subscribe = useCallback((listener: () => void) => autosave.subscribe(listener), [autosave]);
   const getSnapshot = useCallback(() => autosave.getSnapshot(), [autosave]);
@@ -367,6 +518,8 @@ export const useAutosaveGuard = () => {
   const queryClient = useQueryClient();
 
   useEffect(() => {
+    // What crashed or closed tabs left is restored, and saved in the background.
+    void restoreLeftTexts(queryClient);
     const entries = () => [...registryOf(queryClient).values()];
     const machines = () => entries().map((entry) => entry.autosave);
     const flushAll = () => {
@@ -375,6 +528,9 @@ export const useAutosaveGuard = () => {
     const onVisibilityChange = () => {
       if (window.document.visibilityState === 'hidden') flushAll();
     };
+    // A text the local buffer keeps still warns: the buffer brings it back on this browser only, and only once the
+    // app is opened again here, while the writer may expect it on the server (another device). It is the net for a
+    // crash or an ignored warning, not a reason to stop warning.
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       flushAll();
       if (

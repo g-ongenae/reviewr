@@ -1,18 +1,21 @@
 import { isServerUnreachable } from '@reviewr/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { useEffect, useSyncExternalStore } from 'react';
 import { api, queryKeys, reachability } from '../api';
 
 interface Props {
   /** How often to check whether the server is back, in milliseconds. */
   probeInterval?: number;
+  /** Other notifications, shown under this one. */
+  children?: ReactNode;
 }
 
 /**
  * Shows a single "Server unreachable" notification while the API can't be reached, checks in the background whether
  * it is back, then reloads whatever failed in the meantime.
  */
-export const ServerStatus = ({ probeInterval = 5000 }: Props) => {
+export const ServerStatus = ({ probeInterval = 5000, children }: Props) => {
   const queryClient = useQueryClient();
   const unreachable = useSyncExternalStore(reachability.subscribe, reachability.isUnreachable);
 
@@ -57,6 +60,7 @@ export const ServerStatus = ({ probeInterval = 5000 }: Props) => {
           </div>
         </div>
       )}
+      {children}
     </div>
   );
 };

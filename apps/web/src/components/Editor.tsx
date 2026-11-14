@@ -14,13 +14,21 @@ import type { ReactNode } from 'react';
 import { useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
-import { cacheDocument, createAgain, draftOf, isGone, useAutosave } from '../autosave/useAutosave';
+import {
+  cacheDocument,
+  createAgain,
+  discardCopy,
+  draftOf,
+  isGone,
+  useAutosave,
+  useKeptCopies,
+} from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
-import { earlierTextLabel, HeldText } from './TextRecovery';
+import { earlierTextLabel, HeldText, keptCopyLabel } from './TextRecovery';
 import { ChevronIcon, HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
 import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
@@ -275,6 +283,8 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, tool
   const busy = sessionState.running;
   /** Earlier texts of the merge, in no version, that neither the text nor the view shows. */
   const hidden = busy ? [] : hiddenTexts(sessionState, state);
+  /** Other texts that tabs closed before saving left on this device for this document. */
+  const copies = useKeptCopies(document.id);
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
@@ -510,6 +520,24 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, tool
               <HeldText key={text} label={earlierTextLabel(side)} text={text}>
                 <button type="button" onClick={() => session.discardText(text)}>
                   Discard this text
+                </button>
+              </HeldText>
+            ))}
+          </div>
+        )}
+
+        {copies.length > 0 && (
+          <div className="held-texts">
+            <p>
+              {copies.length === 1
+                ? 'This device also kept another copy of this text, from a tab closed before it was saved.'
+                : 'This device also kept other copies of this text, from tabs closed before they were saved.'}{' '}
+              Copy what you need, then discard {copies.length === 1 ? 'it' : 'them'}.
+            </p>
+            {copies.map(({ key, content: text }) => (
+              <HeldText key={key} label={keptCopyLabel} text={text}>
+                <button type="button" onClick={() => discardCopy(queryClient, document.id, key)}>
+                  Discard this copy
                 </button>
               </HeldText>
             ))}

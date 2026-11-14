@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useReducer, useState } from 'react';
 import { api, inlineError, isNotFound, queryKeys } from '../api';
-import { blankDocument, entryOf, isCreated } from '../autosave/useAutosave';
+import { blankDocument, entryOf, isCreated, useRestored } from '../autosave/useAutosave';
 import { Editor } from './Editor';
 import { DeletedDocument } from './TextRecovery';
 
@@ -51,6 +51,8 @@ export const DocumentView = ({
   useEffect(() => {
     if (blankPage !== undefined && !uncreated) created();
   }, [blankPage, uncreated]);
+  // What this device kept of the document's text comes first: the server's text is not shown before it is restored.
+  const restored = useRestored(id, blankPage !== undefined);
 
   if (uncreated) {
     return (
@@ -63,6 +65,14 @@ export const DocumentView = ({
       />
     );
   }
+
+  const loading = (
+    <div className="padded">
+      {toolbarStart}
+      <p className="muted">Loading…</p>
+    </div>
+  );
+  if (!restored) return loading;
 
   // A document known to be gone stays so while a later read is pending or fails for another reason (the server
   // unreachable): only a read that finds the document says otherwise. Until then, the texts this tab holds for it
@@ -98,14 +108,7 @@ export const DocumentView = ({
     );
   }
 
-  if (document.isPending) {
-    return (
-      <div className="padded">
-        {toolbarStart}
-        <p className="muted">Loading…</p>
-      </div>
-    );
-  }
+  if (document.isPending) return loading;
   if (document.isError) {
     const message = inlineError(document.error);
     return (

@@ -1,0 +1,628 @@
+import type { Document, DocumentSummary, SaveDraftInput } from '@reviewr/shared';
+import type { QueryClient } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, within, type RenderResult } from '@testing-library/react';
+import { IDBFactory } from 'fake-indexeddb';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { reachability } from '../api';
+import { App } from '../App';
+import { configureDeviceBuffer, type Locks } from '../autosave/deviceBuffer';
+import {
+  openLocalBuffer,
+  type BufferFailureReason,
+  type LocalBuffer,
+  type LocalBufferOptions,
+} from '../autosave/localBuffer';
+import { entryOf } from '../autosave/useAutosave';
+import { createQueryClient } from '../queryClient';
+
+const fetchMock = vi.mocked(fetch);
+
+interface Call {
+  method: string;
+  path: string;
+  body: unknown;
+}
+
+const reply = (status: number, body?: unknown) =>
+  ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => (body === undefined ? Promise.reject(new Error('No body')) : Promise.resolve(structuredClone(body))),
+  }) as unknown as Response;
+
+const notFound = () => reply(404, { statusCode: 404, message: 'Not found' });
+
+const original = 'Il veillait.';
+
+let db: Map<string, Document>;
+
+/** The API's rules for listing and reading documents, and for saving a draft. */
+const fakeApi = ({ method, path, body }: Call): Response => {
+  if (method === 'GET' && path === '/health') return reply(200, { status: 'ok' });
+  if (method === 'GET' && path === '/documents') {
+    const list: DocumentSummary[] = [...db.values()].map(({ id, title, revision, createdAt, updatedAt }) => ({
+      id,
+      title,
+      revision,
+      createdAt,
+      updatedAt,
+    }));
+    return reply(200, list);
+  }
+  const [, , id, sub] = path.split('/');
+  const document = id === undefined ? undefined : db.get(id);
+  if (document?.draft === undefined) return notFound();
+  const { draft } = document;
+  if (method === 'GET' && sub === undefined) return reply(200, document);
+  if (method === 'GET' && sub === 'revisions') return reply(200, []);
+  if (method === 'PUT' && sub === 'draft') {
+    const input = body as SaveDraftInput;
+    if (draft.content === input.content) return reply(200, draft);
+    if (draft.draftVersion !== input.draftVersion) {
+      return reply(409, { statusCode: 409, message: 'Conflict', code: 'draft_conflict', draft });
+    }
+    const saved = { ...draft, content: input.content, draftVersion: draft.draftVersion + 1 };
+    db.set(document.id, { ...document, draft: saved });
+    return reply(200, saved);
+  }
+  return notFound();
+};
+
+/** Another device saves a draft. */
+const otherDraft = (content: string) => {
+  const document = db.get('doc-1');
+  if (document?.draft === undefined) throw new Error('No doc-1');
+  db.set('doc-1', {
+    ...document,
+    draft: { ...document.draft, content, draftVersion: document.draft.draftVersion + 1 },
+  });
+};
+
+const serverDraft = () => db.get('doc-1')?.draft?.content;
+
+let calls: Call[];
+/** Requests matching `lose` fail as a network error: the server is unreachable. */
+let lose: (call: Call) => boolean;
+/** Requests matching `hold` wait for `releaseHeld`. */
+let hold: (call: Call) => boolean;
+let held: (() => void)[];
+/** A page that crashed sends nothing more: its requests never get an answer. */
+let frozen: boolean;
+
+const NAME = 'reviewr-test';
+let factory: IDBFactory;
+const bufferOptions = (): LocalBufferOptions => ({
+  indexedDB: factory,
+  name: NAME,
+  // IndexedDB runs on real time here, the app on a fake clock: no timeout may fire while the clock jumps.
+  openTimeoutMs: 600_000,
+  transactionTimeoutMs: 600_000,
+});
+
+/** Lets IndexedDB (real time) and the app (fake time) run until both are idle. */
+const settle = async () => {
+  for (let round = 0; round < 12; round++) {
+    await act(async () => {
+      await new Promise((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(1);
+    });
+  }
+};
+
+/** Lets `ms` go by on the app's clock, then everything that follows. */
+const elapse = async (ms = 0) => {
+  await settle();
+  await act(() => vi.advanceTimersByTimeAsync(ms));
+  await settle();
+};
+
+const releaseHeld = async () => {
+  hold = () => false;
+  for (const answer of held.splice(0)) answer();
+  await settle();
+};
+
+/** What the buffer holds, read as another page would: each key with its text. */
+const stored = async (): Promise<[string, string][]> => {
+  const reader = openLocalBuffer(bufferOptions());
+  let entries: [string, string][] = [];
+  await act(async () => {
+    const result = await reader.list();
+    entries = result.entries.map(({ key, content }) => [key, content]);
+    await reader.close();
+  });
+  return entries.sort(([a], [b]) => a.localeCompare(b));
+};
+
+/** The tabs' locks: a tab holds its own while it lives, a crash releases them. */
+let heldLocks: Map<string, number>;
+let tabs: number;
+
+const locksOf = (tab: number): Locks => ({
+  request: (name: string, ...rest: unknown[]) => {
+    const callback = rest.at(-1) as (lock: Lock | null) => unknown;
+    const options = (rest.length > 1 ? rest[0] : {}) as LockOptions;
+    if (heldLocks.has(name)) {
+      return options.ifAvailable === true ? Promise.resolve(callback(null)) : new Promise(() => {});
+    }
+    heldLocks.set(name, tab);
+    return Promise.resolve(callback({ name, mode: 'exclusive' }));
+  },
+});
+
+interface Page {
+  queryClient: QueryClient;
+  view: RenderResult;
+  buffer: LocalBuffer | null;
+  /** The page goes away at once, as when the browser crashes: nothing more is sent or written. */
+  crash: () => Promise<void>;
+}
+
+/** Opens the app in a new tab, at `hash`, on the same IndexedDB as the tabs before it. */
+const load = async (hash = '#/documents/doc-1', buffer: LocalBuffer | null = openLocalBuffer(bufferOptions())) => {
+  window.history.replaceState(null, '', `/${hash}`);
+  const tab = ++tabs;
+  const queryClient = createQueryClient();
+  queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false } });
+  configureDeviceBuffer(queryClient, { buffer, locks: locksOf(tab), tabId: `tab-${tab}` });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <App />
+    </QueryClientProvider>,
+  );
+  const page: Page = {
+    queryClient,
+    view,
+    buffer,
+    crash: async () => {
+      frozen = true;
+      view.unmount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // The machines of the page that crashed stay waiting forever: their timers and answers never come.
+      vi.clearAllTimers();
+      frozen = false;
+      for (const [name, owner] of heldLocks) if (owner === tab) heldLocks.delete(name);
+      await act(async () => {
+        await buffer?.close();
+      });
+    },
+  };
+  await elapse();
+  return page;
+};
+
+const textOf = (page: Page) => page.view.container.querySelector<HTMLTextAreaElement>('textarea.content-input');
+const textarea = (page: Page) => {
+  const field = textOf(page);
+  if (field === null) throw new Error('No text field');
+  return field;
+};
+const type = (page: Page, value: string) => fireEvent.change(textarea(page), { target: { value } });
+const notice = (page: Page) => within(page.view.container).queryByText('No copy kept on this device');
+/** The texts listed as held: each label with its text. */
+const listed = (page: Page) =>
+  [...page.view.container.querySelectorAll<HTMLElement>('.held-text')].map((section) => [
+    section.querySelector('h3')?.textContent,
+    section.querySelector('textarea')?.value,
+  ]);
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  window.localStorage.clear();
+  vi.stubGlobal('matchMedia', () => ({ matches: false }));
+  const now = '2026-11-01T10:00:00.000Z';
+  db = new Map(
+    (['doc-1', 'doc-2'] as const).map((id) => [
+      id,
+      {
+        id,
+        title: id === 'doc-1' ? 'Le gardien du phare' : 'Lettres',
+        revision: 1,
+        content: original,
+        createdAt: now,
+        updatedAt: now,
+        draft: { content: original, draftVersion: 1, baseRevision: 1 },
+      },
+    ]),
+  );
+  calls = [];
+  lose = () => false;
+  hold = () => false;
+  held = [];
+  frozen = false;
+  factory = new IDBFactory();
+  heldLocks = new Map();
+  tabs = 0;
+
+  fetchMock.mockImplementation((input, init) => {
+    const call = {
+      method: init?.method ?? 'GET',
+      path: new URL(input instanceof Request ? input.url : input.toString(), 'http://localhost').pathname.replace(
+        /^\/api/,
+        '',
+      ),
+      body: typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined,
+    };
+    if (frozen) return new Promise<Response>(() => {});
+    calls.push(call);
+    if (lose(call)) return Promise.reject(new TypeError('Failed to fetch'));
+    if (hold(call)) return new Promise<Response>((resolve) => held.push(() => resolve(fakeApi(call))));
+    return Promise.resolve(fakeApi(call));
+  });
+});
+
+afterEach(async () => {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.stubGlobal('fetch', fetchMock);
+  vi.restoreAllMocks();
+  reachability.reportSuccess();
+  fetchMock.mockReset();
+});
+
+const isDraftSave = (call: Call) => call.method === 'PUT' && call.path.endsWith('/draft');
+
+describe('the local buffer, in one tab', () => {
+  it('keeps every edit with its base, and deletes it once the server confirmed that very text', async () => {
+    const page = await load();
+    type(page, 'Il veillait sur la mer.');
+    await settle();
+    expect(await stored()).toEqual([['tab-1 doc-1', 'Il veillait sur la mer.']]);
+
+    await elapse(1000);
+    expect(serverDraft()).toBe('Il veillait sur la mer.');
+    expect(await stored()).toEqual([]);
+    expect(notice(page)).toBeNull();
+  });
+
+  it('never deletes a newer text on the confirmation of an older one', async () => {
+    const page = await load();
+    hold = isDraftSave;
+    type(page, 'Il veillait');
+    await elapse(1000);
+    expect(held).toHaveLength(1);
+    type(page, 'Il veillait sur la mer.');
+    await settle();
+
+    // The older text is confirmed: the newer one is sent, and stays in the buffer meanwhile.
+    hold = isDraftSave;
+    const first = held.splice(0);
+    for (const answer of first) answer();
+    await settle();
+    expect(serverDraft()).toBe('Il veillait');
+    expect(await stored()).toEqual([['tab-1 doc-1', 'Il veillait sur la mer.']]);
+
+    await releaseHeld();
+    expect(serverDraft()).toBe('Il veillait sur la mer.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('brings the text back after a crash, before the server’s text is shown, and saves it', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Il veillait, seul.');
+    await elapse(1000);
+    await first.crash();
+    expect(serverDraft()).toBe(original);
+
+    lose = () => false;
+    const second = await load();
+    expect(textarea(second).value).toBe('Il veillait, seul.');
+    await elapse(1000);
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('keeps the text through a reload while the server is unreachable, and saves it once it is back', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = () => true;
+    const second = await load();
+    // The document is read again a few times, then waits for the server.
+    await elapse(8000);
+    expect(within(second.view.container).getByText('This document will open as soon as the server is back.'));
+    expect(await stored()).toEqual([['tab-2 doc-1', 'Hors ligne.']]);
+
+    // The next retry, after the backoff, and the read that the server's return triggers.
+    lose = () => false;
+    await elapse(10_000);
+    await elapse(10_000);
+    expect(serverDraft()).toBe('Hors ligne.');
+    expect(textarea(second).value).toBe('Hors ligne.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('shows a conflict when the server moved meanwhile, merged against the base the text was written from', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Il veillait, seul.');
+    await elapse(1000);
+    await first.crash();
+    otherDraft('Elle veillait.');
+
+    lose = () => false;
+    const second = await load();
+    await elapse(1000);
+    expect(within(second.view.container).getByRole('alert').textContent).toContain(
+      'This text was also changed on another device.',
+    );
+    const state = entryOf(second.queryClient, 'doc-1')?.autosave.getSnapshot();
+    expect(state?.status).toBe('conflict');
+    // The reconciliation's three texts.
+    expect(state?.base.content).toBe(original);
+    expect(state?.content).toBe('Il veillait, seul.');
+    expect(state?.status === 'conflict' && state.server.content).toBe('Elle veillait.');
+    expect(serverDraft()).toBe('Elle veillait.');
+    expect(await stored()).toEqual([['tab-2 doc-1', 'Il veillait, seul.']]);
+  });
+
+  it('lists the text for recovery when the document was deleted meanwhile, until the writer discards it', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Il veillait, seul.');
+    await elapse(1000);
+    await first.crash();
+    db.delete('doc-1');
+
+    lose = () => false;
+    const second = await load();
+    await elapse(1000);
+    expect(within(second.view.container).getByRole('heading', { name: 'This document was deleted elsewhere' }));
+    expect(listed(second)).toEqual([['Your text', 'Il veillait, seul.']]);
+    expect(await stored()).toEqual([['tab-2 doc-1', 'Il veillait, seul.']]);
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fireEvent.click(within(second.view.container).getByRole('button', { name: 'Discard these copies' }));
+    await settle();
+    expect(await stored()).toEqual([]);
+  });
+
+  it('never replaces a restored text silently with a newer draft, even when it is the text of its base', async () => {
+    // A tab that crashed while a save was unanswered, after the writer typed the text back to its base.
+    const writer = openLocalBuffer(bufferOptions());
+    await act(async () => {
+      await writer.put('tab-0 doc-1', { content: original, base: { content: original, draftVersion: 1 } });
+      await writer.close();
+    });
+    otherDraft('Il veillait, seul.');
+
+    const page = await load();
+    await elapse(1000);
+    expect(textarea(page).value).toBe(original);
+    expect(within(page.view.container).getByRole('alert').textContent).toContain(
+      'This text was also changed on another device.',
+    );
+  });
+
+  it('saves in the background a text restored for a document that is not open', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Il veillait, seul.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = () => false;
+    const second = await load('');
+    await elapse(1000);
+    expect(textarea(second).value).toBe('');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(await stored()).toEqual([]);
+    expect(entryOf(second.queryClient, 'doc-1')).toBeUndefined();
+  });
+
+  it('shows nothing of the document while the buffer is slow to answer, and loses no keystroke after', async () => {
+    lose = isDraftSave;
+    const first = await load();
+    type(first, 'Il veillait, seul.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = () => false;
+    const real = openLocalBuffer(bufferOptions());
+    let answer = () => {};
+    const slow: LocalBuffer = {
+      ...real,
+      list: () =>
+        new Promise((resolve) => {
+          answer = () => void real.list().then(resolve);
+        }),
+    };
+    const second = await load('#/documents/doc-1', slow);
+    await elapse(3000);
+    expect(textOf(second)).toBeNull();
+    expect(within(second.view.container).getByText('Loading…'));
+    expect(second.view.container.textContent).not.toContain(original);
+
+    answer();
+    await settle();
+    answer();
+    await settle();
+    expect(textarea(second).value).toBe('Il veillait, seul.');
+    type(second, 'Il veillait, seul, la nuit.');
+    await elapse(1000);
+    expect(serverDraft()).toBe('Il veillait, seul, la nuit.');
+    expect(await stored()).toEqual([]);
+  });
+});
+
+describe('when the buffer cannot keep the text', () => {
+  /** A buffer that answers every call with `reason`. */
+  const failing = (reason: BufferFailureReason): LocalBuffer => {
+    const failure = { ok: false as const, reason, error: new Error(reason) };
+    return {
+      get: () => Promise.resolve({ ...failure, entry: undefined }),
+      put: () => Promise.resolve(failure),
+      delete: () => Promise.resolve({ ...failure, deleted: false }),
+      list: () => Promise.resolve({ ...failure, entries: [] }),
+      close: () => Promise.resolve(),
+    };
+  };
+
+  it.each<BufferFailureReason>(['unavailable', 'blocked', 'quota', 'failed', 'stalled'])(
+    'says so once (%s), and typing and saving go on',
+    async (reason) => {
+      const page = await load('#/documents/doc-1', failing(reason));
+      expect(notice(page)).not.toBeNull();
+      type(page, 'Il veillait sur la mer.');
+      await elapse(1000);
+      expect(textarea(page).value).toBe('Il veillait sur la mer.');
+      expect(serverDraft()).toBe('Il veillait sur la mer.');
+
+      fireEvent.click(within(page.view.container).getByRole('button', { name: 'OK' }));
+      type(page, 'Il veillait sur la mer, seul.');
+      await elapse(1000);
+      expect(notice(page)).toBeNull();
+      expect(textarea(page).value).toBe('Il veillait sur la mer, seul.');
+      expect(serverDraft()).toBe('Il veillait sur la mer, seul.');
+    },
+  );
+
+  it('says so when a write fails mid-way, and keeps the text in memory', async () => {
+    const real = openLocalBuffer(bufferOptions());
+    let full = false;
+    const buffer: LocalBuffer = {
+      ...real,
+      put: (key, value) =>
+        full ? Promise.resolve({ ok: false, reason: 'quota', error: new Error('full') }) : real.put(key, value),
+    };
+    lose = isDraftSave;
+    const page = await load('#/documents/doc-1', buffer);
+    type(page, 'Il veillait');
+    await settle();
+    expect(notice(page)).toBeNull();
+    full = true;
+    type(page, 'Il veillait sur la mer.');
+    await elapse(1000);
+    expect(notice(page)).not.toBeNull();
+    expect(within(page.view.container).getByText(/storage is full/));
+    expect(textarea(page).value).toBe('Il veillait sur la mer.');
+
+    lose = () => false;
+    await elapse(2000);
+    expect(serverDraft()).toBe('Il veillait sur la mer.');
+    // The older text the buffer still held goes with the confirmation.
+    expect(await stored()).toEqual([]);
+  });
+
+  it('says so without IndexedDB, and opens documents at once', async () => {
+    const page = await load('#/documents/doc-1', null);
+    expect(notice(page)).not.toBeNull();
+    expect(textarea(page).value).toBe(original);
+  });
+});
+
+describe('two tabs on one document', () => {
+  it('keeps each tab’s text after both crash: the latest is the text, the other a copy until discarded', async () => {
+    lose = isDraftSave;
+    const one = await load();
+    const two = await load();
+    type(one, 'Le texte du premier onglet.');
+    await settle();
+    type(two, 'Le texte du second onglet.');
+    await elapse(1000);
+    expect(await stored()).toEqual([
+      ['tab-1 doc-1', 'Le texte du premier onglet.'],
+      ['tab-2 doc-1', 'Le texte du second onglet.'],
+    ]);
+    await one.crash();
+    await two.crash();
+
+    lose = () => false;
+    const three = await load();
+    await elapse(1000);
+    expect(textarea(three).value).toBe('Le texte du second onglet.');
+    expect(listed(three)).toEqual([['Another copy kept on this device', 'Le texte du premier onglet.']]);
+    expect(serverDraft()).toBe('Le texte du second onglet.');
+    expect(await stored()).toEqual([['tab-1 doc-1', 'Le texte du premier onglet.']]);
+
+    fireEvent.click(within(three.view.container).getByRole('button', { name: 'Discard this copy' }));
+    await settle();
+    expect(listed(three)).toEqual([]);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('brings a copy left alone back as the text after another reload, as a conflict with the server', async () => {
+    lose = isDraftSave;
+    const one = await load();
+    const two = await load();
+    type(one, 'Le texte du premier onglet.');
+    await settle();
+    type(two, 'Le texte du second onglet.');
+    await elapse(1000);
+    await one.crash();
+    await two.crash();
+    lose = () => false;
+    const three = await load();
+    await elapse(1000);
+    await three.crash();
+
+    const four = await load();
+    await elapse(1000);
+    const state = entryOf(four.queryClient, 'doc-1')?.autosave.getSnapshot();
+    expect(state?.status).toBe('conflict');
+    expect(state?.base.content).toBe(original);
+    expect(state?.content).toBe('Le texte du premier onglet.');
+    expect(state?.status === 'conflict' && state.server.content).toBe('Le texte du second onglet.');
+    expect(serverDraft()).toBe('Le texte du second onglet.');
+  });
+
+  it('drops a copy once the text saved is that copy', async () => {
+    lose = isDraftSave;
+    const one = await load();
+    const two = await load();
+    type(one, 'Le texte du premier onglet.');
+    await settle();
+    type(two, 'Le texte du second onglet.');
+    await elapse(1000);
+    await one.crash();
+    await two.crash();
+
+    lose = () => false;
+    const three = await load();
+    await elapse(1000);
+    type(three, 'Le texte du premier onglet.');
+    await elapse(1000);
+    expect(listed(three)).toEqual([]);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('never takes the text of a tab that is still open', async () => {
+    lose = isDraftSave;
+    const one = await load();
+    type(one, 'Le texte du premier onglet.');
+    await elapse(1000);
+
+    const two = await load();
+    await elapse(1000);
+    expect(textarea(two).value).toBe(original);
+    expect(listed(two)).toEqual([]);
+    expect(await stored()).toEqual([['tab-1 doc-1', 'Le texte du premier onglet.']]);
+
+    // Once the first tab crashed, opening the document again in the second brings its text back.
+    await one.crash();
+    fireEvent.click(within(two.view.container).getByRole('button', { name: /Lettres/ }));
+    await elapse();
+    fireEvent.click(within(two.view.container).getByRole('button', { name: /Le gardien du phare/ }));
+    await elapse();
+    expect(textarea(two).value).toBe('Le texte du premier onglet.');
+    expect(listed(two)).toEqual([]);
+  });
+
+  it('writes nothing for a page whose document is not created yet', async () => {
+    lose = () => true;
+    const page = await load('');
+    type(page, 'Une page neuve.');
+    await elapse(1000);
+    expect(await stored()).toEqual([]);
+  });
+});
