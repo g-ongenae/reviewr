@@ -63,8 +63,6 @@ const refused = (error: unknown): boolean => error instanceof ApiError && error.
 interface VersionRequest {
   name: string | undefined;
   text: string;
-  /** The cached title when the request started, to tell whether a rename was confirmed since. */
-  title: string | null;
 }
 
 /** The text was changed before it was confirmed: the version would hold another text than the one asked for. */
@@ -182,9 +180,11 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
         }
       }
     },
-    onSuccess: async (saved, { title: titleAtStart }) => {
+    onSuccess: async (saved) => {
       if (saved === undefined) return;
-      // The answer may be older than a draft saved or a rename confirmed since the request started: those stay.
+      // The answer may be older than a draft saved or a rename confirmed since the request started: those stay. The
+      // title never comes from this answer: it cannot tell a title older than the cached one from a newer one (the
+      // title may have changed and changed back meanwhile), so only renames and reads of the document write it.
       if (!isGone(queryClient, saved.id)) {
         queryClient.setQueryData<Document>(queryKeys.document(saved.id), (cached) => {
           if (cached === undefined) return saved;
@@ -192,7 +192,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           const newerDraft = (cached.draft?.draftVersion ?? 0) > (saved.draft?.draftVersion ?? 0);
           return {
             ...saved,
-            title: cached.title === titleAtStart ? saved.title : cached.title,
+            title: cached.title,
             draft: newerDraft ? cached.draft : saved.draft,
           };
         });
@@ -222,7 +222,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   /** Saves the text on screen now as a version; the writer goes back to the text. */
   const saveVersion = (name?: string) => {
     const trimmed = name?.trim().slice(0, revisionNameMaxLength);
-    save.mutate({ name: trimmed === '' ? undefined : trimmed, text: content, title: document.title });
+    save.mutate({ name: trimmed === '' ? undefined : trimmed, text: content });
     if (versionName !== undefined) {
       setVersionName(undefined);
       textField.current?.focus();

@@ -898,6 +898,56 @@ describe('Editor autosave', () => {
       expect(status()).toBe('Draft saved · changed since revision 3');
     });
 
+    it('a late answer does not put back a title that was changed and changed back meanwhile', async () => {
+      open();
+      type('The end.');
+      await elapse(1000);
+      const titleField = () => screen.getByPlaceholderText<HTMLInputElement>(/^Untitled/);
+      const renames = () => calls.filter((call) => call.method === 'PATCH' && call.path === '/documents/doc-1');
+
+      // The version request is sent, reaches the server later (`commit`), and is answered later still (`deliver`).
+      let commit = () => {};
+      let deliver = () => {};
+      const api = fetchMock.getMockImplementation();
+      if (api === undefined) throw new Error('No fake API');
+      fetchMock.mockImplementation((input, init) => {
+        if (init?.method !== 'POST') return api(input, init);
+        return new Promise<Response>((resolve) => {
+          commit = () => {
+            const answer = api(input, init);
+            deliver = () => resolve(answer);
+          };
+        });
+      });
+      fireEvent.click(saveButton());
+      await elapse();
+
+      fireEvent.change(titleField(), { target: { value: 'Renamed' } });
+      await elapse(1000);
+      expect(server().title).toBe('Renamed');
+      act(() => commit());
+      await elapse();
+      expect(versions()).toEqual([[null, 'The end.']]);
+      fireEvent.change(titleField(), { target: { value: 'The lighthouse keeper' } });
+      await elapse(1000);
+      expect(server().title).toBe('The lighthouse keeper');
+      expect(renames()).toHaveLength(2);
+
+      // The answer holds the title of the moment the server saved the version: "Renamed". The title is back to its
+      // first value since, so comparing values could not tell that the answer is the older one.
+      act(() => deliver());
+      await elapse(1000);
+      expect(queryClient.getQueryData<Document>(queryKeys.document('doc-1'))).toMatchObject({
+        title: 'The lighthouse keeper',
+        revision: 3,
+        content: 'The end.',
+      });
+      expect(titleField().value).toBe('The lighthouse keeper');
+      expect(server().title).toBe('The lighthouse keeper');
+      expect(renames()).toHaveLength(2);
+      expect(unload().defaultPrevented).toBe(false);
+    });
+
     it('when the text typed meanwhile reaches the server first, makes no version of it, and says so', async () => {
       open();
       type('The end.');
