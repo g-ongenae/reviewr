@@ -1,4 +1,10 @@
-import type { CreateDocumentInput, CreateRevisionInput, Document, SaveDraftInput } from '@reviewr/shared';
+import type {
+  CreateDocumentInput,
+  CreateRevisionInput,
+  Document,
+  SaveDraftInput,
+  UpdateDocumentInput,
+} from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
@@ -62,6 +68,28 @@ const fakeApi = ({ method, path, body }: Call): Response => {
   if (method === 'DELETE' && sub === undefined) {
     db.delete(document.id);
     return reply(204);
+  }
+  if (method === 'PUT' && sub === undefined) {
+    // "Save version" through the old endpoint: the text becomes a revision, and the draft.
+    const input = body as UpdateDocumentInput;
+    if (document.revision !== input.baseRevision) {
+      return reply(409, { statusCode: 409, message: 'Conflict', code: 'stale_revision', revision: document.revision });
+    }
+    const revision = document.revision + 1;
+    const next: Document = {
+      ...document,
+      title: input.title ?? null,
+      content: input.content,
+      revision,
+      draft: {
+        content: input.content,
+        draftVersion: draft.content === input.content ? draft.draftVersion : draft.draftVersion + 1,
+        baseRevision: revision,
+      },
+    };
+    db.set(document.id, next);
+    revisions.push({ documentId: document.id, name: null, content: input.content });
+    return reply(200, next);
   }
   if (method === 'PUT' && sub === 'draft') {
     const input = body as SaveDraftInput;
@@ -319,6 +347,131 @@ describe('a document deleted elsewhere', () => {
     expect(unload().defaultPrevented).toBe(true);
     await leaveAndComeBack();
     expect(listed()).toEqual([['Your text', typed]]);
+  });
+
+  describe('answers that arrive out of order', () => {
+    const later = `${typed} Il dormait enfin.`;
+    const readsDocument = (call: Call) => call.method === 'GET' && call.path === '/documents/doc-1';
+    const savesDraft = (call: Call) => call.method === 'PUT' && call.path === '/documents/doc-1/draft';
+    const savesVersion = (call: Call) => call.method === 'PUT' && call.path === '/documents/doc-1';
+    /** A read the app starts on its own (window focus, a remount), without waiting for it. */
+    const startRead = async () => {
+      act(() => void queryClient.refetchQueries({ queryKey: queryKeys.document('doc-1') }));
+      await elapse();
+    };
+    const answer = async (index: number) => {
+      held[index]?.();
+      await elapse();
+    };
+    const answerAll = async () => {
+      for (const release of held.splice(0)) release();
+      await elapse();
+    };
+
+    /** Requests the server answers with a success that arrives late: the text was typed and saved before. */
+    const lateSuccesses = [
+      {
+        request: 'a draft save',
+        start: async () => {
+          delay = savesDraft;
+          type(typed);
+          await elapse(1000);
+        },
+      },
+      {
+        request: 'a version save',
+        start: async () => {
+          type(typed);
+          await elapse(1000);
+          delay = savesVersion;
+          fireEvent.click(screen.getByRole('button', { name: 'Save version' }));
+          await elapse();
+        },
+      },
+      {
+        request: 'a read',
+        start: async () => {
+          type(typed);
+          await elapse(1000);
+          delay = readsDocument;
+          await startRead();
+        },
+      },
+    ];
+
+    /** The text stays offered: the page warns on closing, and the machine survives leaving. */
+    const stillRecovered = async () => {
+      expect(listed()).toEqual([['Your text', typed]]);
+      expect(unload().defaultPrevented).toBe(true);
+      await leaveAndComeBack();
+      expect(listed()).toEqual([['Your text', typed]]);
+      expect(entryOf(queryClient, 'doc-1')).toBeDefined();
+      expect(unload().defaultPrevented).toBe(true);
+    };
+
+    it('keeps the deletion when a superseded read and a draft save answer after a newer 404', async () => {
+      await open();
+      delay = (call) => savesDraft(call) || readsDocument(call);
+      type(typed);
+      await elapse(1000);
+      await startRead();
+      expect(held).toHaveLength(2);
+      db.delete('doc-1');
+      delay = () => false;
+      // A newer read cancels the held one, and answers 404.
+      await refetch();
+      expect(listed()).toEqual([['Your text', typed]]);
+
+      await answer(1);
+      expect(listed()).toEqual([['Your text', typed]]);
+      await answer(0);
+      held = [];
+      await stillRecovered();
+    });
+
+    it.each(lateSuccesses)('keeps the deletion when $request answers after a newer 404', async ({ start }) => {
+      await open();
+      await start();
+      expect(held).toHaveLength(1);
+      db.delete('doc-1');
+      delay = () => false;
+      await refetch();
+      expect(listed()).toEqual([['Your text', typed]]);
+
+      await answerAll();
+      await stillRecovered();
+    });
+
+    it.each(lateSuccesses.slice(0, 2))(
+      'after a wrong 404, $request answering does not undo it, and the next read does',
+      async ({ start }) => {
+        await open();
+        await start();
+        delay = () => false;
+        intercept = (call) => (readsDocument(call) ? notFound() : undefined);
+        await refetch();
+        intercept = () => undefined;
+        expect(listed()).toEqual([['Your text', typed]]);
+
+        // A write's answer cannot tell whether the server took it before a deletion: only a read says it exists.
+        await answerAll();
+        expect(listed()).toEqual([['Your text', typed]]);
+        expect(unload().defaultPrevented).toBe(true);
+
+        await refetch();
+        expect(recovery()).toBeNull();
+        expect(textarea().value).toBe(typed);
+        type(later);
+        await elapse(1000);
+        expect(server().draft?.content).toBe(later);
+        expect(queryClient.getQueryData<Document>(queryKeys.document('doc-1'))?.draft?.content).toBe(later);
+        expect(unload().defaultPrevented).toBe(false);
+        await open('doc-2');
+        await elapse(1000);
+        expect(entryOf(queryClient, 'doc-1')).toBeUndefined();
+        expect(unload().defaultPrevented).toBe(false);
+      },
+    );
   });
 
   it('works as usual again once a read finds the document after a wrong 404', async () => {

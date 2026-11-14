@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useReducer } from 'react';
 import { api, inlineError, isNotFound, queryKeys } from '../api';
-import { entryOf, markDeleted } from '../autosave/useAutosave';
+import { entryOf } from '../autosave/useAutosave';
 import { Editor } from './Editor';
 import { DeletedDocument } from './TextRecovery';
 
@@ -24,18 +24,7 @@ export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: 
   const [, discarded] = useReducer((count: number) => count + 1, 0);
   const document = useQuery({
     queryKey: queryKeys.document(id),
-    queryFn: async () => {
-      let read: Document;
-      try {
-        read = await api.getDocument(id);
-      } catch (error) {
-        // Known before the editor goes: its release then keeps a text the writer edited.
-        if (isNotFound(error)) markDeleted(queryClient, id, true);
-        throw error;
-      }
-      markDeleted(queryClient, id, false);
-      return read;
-    },
+    queryFn: () => api.getDocument(id),
     enabled: id.length > 0,
     retry: (failureCount, error) => !isNotFound(error) && failureCount < 3,
   });

@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
-import { draftOf, useAutosave } from '../autosave/useAutosave';
+import { cacheDocument, draftOf, useAutosave } from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
@@ -70,7 +70,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const textAtRisk = state.status === 'retrying' || state.status === 'conflict' || state.status === 'rejected';
 
   const onSaved = async (saved: Document) => {
-    queryClient.setQueryData(queryKeys.document(saved.id), saved);
+    cacheDocument(queryClient, saved);
     // A version save can move the draft's counter: the machine takes it, and keeps what was typed meanwhile.
     autosave.refresh(draftOf(saved));
     await Promise.all([
@@ -142,7 +142,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     isConflict,
     onDocument: (saved) => {
       // The machine takes the draft from the cache, as from any read: after a stop, the view shows the newest text.
-      queryClient.setQueryData(queryKeys.document(saved.id), saved);
+      cacheDocument(queryClient, saved);
       void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });
     },

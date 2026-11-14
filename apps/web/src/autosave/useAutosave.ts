@@ -1,9 +1,9 @@
 import type { Document, DocumentDraft, DocumentSummary } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
-import type { QueryClient } from '@tanstack/react-query';
+import type { QueryClient, QueryState } from '@tanstack/react-query';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
-import { api, queryKeys, reachability } from '../api';
+import { api, isNotFound, queryKeys, reachability } from '../api';
 import { hasUnsavedChanges } from '../unsavedChanges';
 import { createAutosave, type Autosave, type AutosaveState, type Draft, type SaveResult } from './autosave';
 
@@ -44,8 +44,25 @@ export const toSaveResult = (error: unknown): SaveResult => {
   return { kind: 'failed', error };
 };
 
+/** Whether the document query holds a 404: the document no longer exists. */
+const goneState = (state: QueryState | undefined): boolean => state?.status === 'error' && isNotFound(state.error);
+
+/**
+ * Whether the document is known to be gone: its query holds a 404 (mirrored in its machine's entry, which keeps it
+ * through a failed refetch and once the query is dropped from the cache). Only a read of the document can say that it
+ * exists again: the answer of a write cannot tell whether the server took the write before the deletion.
+ */
+export const isGone = (queryClient: QueryClient, id: string): boolean =>
+  registryOf(queryClient).get(id)?.deleted ?? goneState(queryClient.getQueryState(queryKeys.document(id)));
+
+/** Puts a document a write answered with in the cache, unless the document is known to be gone. */
+export const cacheDocument = (queryClient: QueryClient, document: Document) => {
+  if (!isGone(queryClient, document.id)) queryClient.setQueryData(queryKeys.document(document.id), document);
+};
+
 /** A draft was just saved: it goes in the cache, and the document moves up the list, without a request. */
 const cacheSavedDraft = (queryClient: QueryClient, id: string, draft: DocumentDraft) => {
+  if (isGone(queryClient, id)) return;
   const updatedAt = new Date().toISOString();
   queryClient.setQueryData<Document>(queryKeys.document(id), (document) => {
     // A slow answer must not move the cached draft back under a newer one read since.
@@ -64,7 +81,10 @@ interface Entry {
   users: number;
   /** Whether the writer edited the text in this tab. */
   edited: boolean;
-  /** Whether a read of the document answered that it no longer exists. */
+  /**
+   * Whether the document query's last accepted answer, success or 404, was a 404. Written only by the registry's
+   * subscription to the query cache; kept when the query is dropped from the cache.
+   */
   deleted: boolean;
 }
 
@@ -84,8 +104,20 @@ const registries = new WeakMap<QueryClient, Map<string, Entry>>();
 const registryOf = (queryClient: QueryClient): Map<string, Entry> => {
   let registry = registries.get(queryClient);
   if (registry === undefined) {
-    registry = new Map();
-    registries.set(queryClient, registry);
+    const entries = new Map<string, Entry>();
+    registry = entries;
+    registries.set(queryClient, entries);
+    // The one writer of `deleted`: the state each document query settled on. Cancelled and superseded answers never
+    // reach it, and no write into the cache can turn a 404 into a success (see `isGone`).
+    queryClient.getQueryCache().subscribe(({ type, query }) => {
+      const [scope, id, sub] = query.queryKey as readonly unknown[];
+      if (type !== 'updated' || scope !== 'documents' || typeof id !== 'string' || sub !== undefined) return;
+      const entry = entries.get(id);
+      // Another failure (the server unreachable) says nothing either way: the last evidence stands.
+      if (entry !== undefined && (query.state.status === 'success' || goneState(query.state))) {
+        entry.deleted = query.state.status !== 'success';
+      }
+    });
   }
   return registry;
 };
@@ -102,8 +134,7 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
       try {
         const saved = await api.saveDraft(id, draft);
         reachability.reportSuccess();
-        // A late answer must not bring a document read as deleted back into the cache.
-        if (!entry.deleted) cacheSavedDraft(queryClient, id, saved);
+        cacheSavedDraft(queryClient, id, saved);
         return { kind: 'saved', draftVersion: saved.draftVersion };
       } catch (error) {
         reachability.reportError(error);
@@ -134,16 +165,6 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
  */
 export const entryOf = (queryClient: QueryClient, id: string): Readonly<Entry> | undefined =>
   registryOf(queryClient).get(id);
-
-/**
- * What a read of the document answered: that it no longer exists (a text the writer edited in it is then kept until
- * discarded), or that it exists, which undoes a wrong or transient 404 (the cache and the cleanup of a saved machine work
- * as usual again; no text is dropped by this).
- */
-export const markDeleted = (queryClient: QueryClient, id: string, deleted: boolean) => {
-  const entry = registryOf(queryClient).get(id);
-  if (entry !== undefined) entry.deleted = deleted;
-};
 
 /** Drops a document's machine without saving, for a document that no longer exists. */
 export const discardAutosave = (queryClient: QueryClient, id: string) => {
