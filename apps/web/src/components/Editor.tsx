@@ -1,18 +1,27 @@
 import type { Document } from '@reviewr/shared';
-import { contentMaxLength, describeError, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
+import {
+  ApiError,
+  conflictOf,
+  contentMaxLength,
+  describeError,
+  displayTitle,
+  revisionNameMaxLength,
+  titleMaxLength,
+  titleToSend,
+} from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
-import { cacheDocument, draftOf, useAutosave } from '../autosave/useAutosave';
+import { cacheDocument, draftOf, isGone, useAutosave } from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
 import { earlierTextLabel, HeldText } from './TextRecovery';
-import { HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
+import { ChevronIcon, HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
 import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
 interface Props {
@@ -35,8 +44,28 @@ const statusText = (state: AutosaveState, revision: number, changedSinceVersion:
     case 'rejected':
       return 'Not saved';
     case 'saved':
+      if (revision === 0) return 'Draft saved · no version yet';
       return changedSinceVersion ? `Draft saved · changed since revision ${revision}` : `Saved · revision ${revision}`;
   }
+};
+
+/** The title to send for what is typed, and to compare with the server's: null when blank (untitled). */
+const titleValue = (typed: string | null): string | null => titleToSend(typed ?? '') ?? null;
+
+/** How long the title waits after the last keystroke before it is saved, and before a failed rename is sent again. */
+const titleDebounceMs = 800;
+const titleRetryMs = 5000;
+
+/** Whether the server refused a rename (a 4xx): sending the same title again cannot help, a changed one may. */
+const refused = (error: unknown): boolean => error instanceof ApiError && error.status < 500;
+
+/** Why "Save version" created no version, when the draft itself was saved. */
+const versionError = (error: unknown): string => {
+  if (conflictOf(error)?.code === 'draft_conflict') {
+    return 'The version was not saved: the text changed while it was being saved. Your text is saved as a draft.';
+  }
+  const detail = inlineError(error);
+  return `The version could not be saved${detail ? ` (${detail})` : ''}. Your text is saved as a draft: try again.`;
 };
 
 /** What happened to a merged text that was not applied. */
@@ -56,74 +85,104 @@ const stopText = (stop: Stop): string => {
 export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
   const { autosave, state, discard } = useAutosave(document);
-  /** As typed: empty when the document is untitled. Not part of the draft: it is saved with the next version. */
+  /**
+   * The title as typed (empty when untitled), saved on its own by a rename, and the server's title as last read or
+   * confirmed. A title read from the server replaces the field unless the writer typed another one since: then the
+   * writer's is sent, and the last rename wins, as on the server.
+   */
   const [title, setTitle] = useState(document.title ?? '');
+  const [serverTitle, setServerTitle] = useState(document.title);
+  const titleDirty = titleValue(title) !== titleValue(serverTitle);
+
+  if (document.title !== serverTitle) {
+    if (!titleDirty) setTitle(document.title ?? '');
+    setServerTitle(document.title);
+  }
   const { content } = state;
   const [showHistory, setShowHistory] = useState(false);
   const [showStats, toggleStats] = useWritingStatsPanel();
   const todayBaseline = useTodayBaseline(document);
   const previousRevision = useLastRevisionBaseline(document);
-  const titleDirty = titleToSend(title) !== titleToSend(document.title ?? '');
   /** Whether "Save version" has something to save. */
-  const changedSinceVersion = titleDirty || content !== document.content;
+  const changedSinceVersion = content !== document.content;
   /** Text that leaving the page could lose, even though the autosave keeps trying in the background. */
   const textAtRisk = state.status === 'retrying' || state.status === 'conflict' || state.status === 'rejected';
 
-  const onSaved = async (saved: Document) => {
-    cacheDocument(queryClient, saved);
-    // A version save can move the draft's counter: the machine takes it, and keeps what was typed meanwhile.
-    autosave.refresh(draftOf(saved));
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) }),
-    ]);
-  };
+  /** Renames the document: no version, the content and the draft are left alone. */
+  const rename = useMutation({
+    mutationFn: (value: string | null) => api.renameDocument(document.id, value),
+    onSuccess: async (saved) => {
+      const key = queryKeys.document(saved.id);
+      // A read sent before this answer may still hold the old title: drop it, then read again.
+      const reading = queryClient.isFetching({ queryKey: key, exact: true }) > 0;
+      if (reading) await queryClient.cancelQueries({ queryKey: key, exact: true });
+      // Only the title: the answer's draft may be older than one saved since.
+      if (!isGone(queryClient, saved.id)) {
+        queryClient.setQueryData<Document>(key, (cached) => cached && { ...cached, title: saved.title });
+      }
+      if (reading) void queryClient.invalidateQueries({ queryKey: key, exact: true });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
+    },
+  });
+  const { mutate: sendTitle } = rename;
+  const titleRetry = rename.isError && rename.variables === titleValue(title);
+  /** A title refused as it is waits for a change or for the field to lose focus. */
+  const titleWaits = titleRetry && refused(rename.error);
+
+  // The title is saved soon after the writer stops typing; a failed rename is sent again after a while.
+  useEffect(() => {
+    if (!titleDirty || rename.isPending || titleWaits) return;
+    const timer = setTimeout(() => sendTitle(titleValue(title)), titleRetry ? titleRetryMs : titleDebounceMs);
+    return () => clearTimeout(timer);
+  }, [title, titleDirty, rename.isPending, titleRetry, titleWaits, sendTitle]);
 
   /**
-   * Saves a version: the draft first, then the old `PUT`, which turns a draft equal to its content into a revision.
-   * When the draft cannot be saved, nothing more happens: the status says why.
+   * Saves a version: the draft first, then the server's draft of the counter the machine holds as confirmed becomes a
+   * revision. Text typed meanwhile is not part of it: the autosave saves it as a draft. When the draft cannot be
+   * saved, nothing more happens: the status says why.
    */
   const save = useMutation({
-    mutationFn: async (): Promise<Document | undefined> => {
+    mutationFn: async (name: string | undefined): Promise<Document | undefined> => {
       if ((await autosave.flush()) !== 'saved') return undefined;
-      return api.updateDocument(document.id, {
-        title: titleToSend(title),
-        content: autosave.getSnapshot().base.content,
-        baseRevision: document.revision,
-      });
+      const { draftVersion } = autosave.getSnapshot().base;
+      let baseRevision = document.revision;
+      // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await api.createRevision(document.id, {
+            name,
+            draftVersion,
+            baseRevision: baseRevision === 0 ? null : baseRevision,
+          });
+        } catch (error) {
+          const conflict = conflictOf(error);
+          if (conflict?.code !== 'stale_revision' || attempt === 3) throw error;
+          baseRevision = conflict.revision;
+        }
+      }
     },
     onSuccess: async (saved) => {
-      if (saved !== undefined) await onSaved(saved);
+      if (saved === undefined) return;
+      cacheDocument(queryClient, saved);
+      autosave.refresh(draftOf(saved));
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) }),
+      ]);
+    },
+    onError: (error) => {
+      // The draft moved: the machine keeps the local text, and shows a conflict unless the draft holds that text.
+      const conflict = conflictOf(error);
+      if (conflict?.code === 'draft_conflict') autosave.refresh(conflict.draft, true);
     },
   });
 
-  /** After a stale revision: save the text as a version on top of the latest one, which stays in the history. */
-  const overwrite = useMutation({
-    mutationFn: async () => {
-      const latest = await api.getDocument(document.id);
-      return api.updateDocument(document.id, {
-        title: titleToSend(title),
-        content: autosave.getSnapshot().base.content,
-        baseRevision: latest.revision,
-      });
-    },
-    onSuccess: async (saved) => {
-      save.reset();
-      await onSaved(saved);
-    },
-  });
-
-  /** After a stale revision: drop the local text and title, and load the latest version. */
-  const reload = async () => {
-    const latest = await queryClient.fetchQuery({
-      queryKey: queryKeys.document(document.id),
-      queryFn: () => api.getDocument(document.id),
-      staleTime: 0,
-    });
-    setTitle(latest.title ?? '');
-    autosave.edit(latest.content);
-    save.reset();
-    await onSaved(latest);
+  /** The name of the next version, while the writer gives one. */
+  const [versionName, setVersionName] = useState<string | undefined>(undefined);
+  const saveVersion = (name?: string) => {
+    const trimmed = name?.trim().slice(0, revisionNameMaxLength);
+    save.mutate(trimmed === '' ? undefined : trimmed);
+    setVersionName(undefined);
   };
 
   /** Whether the reconciliation view is open, in place of the text, while the draft is in conflict. */
@@ -169,7 +228,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
 
   const canSave = changedSinceVersion && !save.isPending && state.status !== 'conflict' && state.status !== 'rejected';
   const saveNow = useEffectEvent(() => {
-    if (canSave) save.mutate();
+    if (canSave) saveVersion(versionName);
   });
 
   // Ctrl/Cmd + S saves a version.
@@ -184,19 +243,28 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Switching document keeps saving the text in the background: ask only when it is at risk, or for the title.
+  // Switching document keeps saving the text in the background: ask only when it is at risk, or for a title not saved.
   useEffect(() => setUnsavedChanges(titleDirty || textAtRisk), [titleDirty, textAtRisk]);
   useEffect(() => () => setUnsavedChanges(false), []);
 
   // Closing the page is guarded for every document at once, by `useAutosaveGuard` in the app.
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
-  const actionError = inlineError(save.error ?? remove.error ?? overwrite.error);
+  const actionError = save.isError ? versionError(save.error) : inlineError(remove.error);
   const { result: pendingResult, stop } = sessionState;
   /** The view replaces the text only while there is a conflict: once it is resolved, the text comes back. */
   const showReconciliation = reconciling && state.status === 'conflict';
   const historyLabel = showHistory ? 'Hide history' : 'History';
-  const status = save.isPending ? 'Saving…' : statusText(state, document.revision, changedSinceVersion);
+  /** The text's state first; then the title's, while it is not saved. */
+  const status = save.isPending
+    ? 'Saving version…'
+    : state.status !== 'saved' || !titleDirty
+      ? statusText(state, document.revision, changedSinceVersion)
+      : titleRetry
+        ? `Title not saved${titleWaits ? '' : ' · retrying'}`
+        : 'Saving title…';
+  const statusTooltip =
+    state.status === 'retrying' ? describeError(state.error) : titleRetry ? describeError(rename.error) : status;
 
   return (
     <div className="editor-layout">
@@ -204,9 +272,9 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
         <div className="toolbar">
           {toolbarStart}
           <span
-            className={state.status === 'saved' && !save.isPending ? 'status' : 'status dirty'}
+            className={state.status === 'saved' && !save.isPending && !titleDirty ? 'status' : 'status dirty'}
             role="status"
-            title={state.status === 'retrying' ? describeError(state.error) : status}
+            title={statusTooltip}
           >
             {status}
           </span>
@@ -232,17 +300,61 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
             <TrashIcon />
             <span className="toolbar-label">Delete</span>
           </button>
-          <button
-            className="toolbar-action primary"
-            disabled={!canSave}
-            onClick={() => save.mutate()}
-            aria-label="Save version"
-            title="Save version (Ctrl+S)"
-          >
-            <SaveIcon />
-            <span className="toolbar-label">Save version</span>
-          </button>
+          <div className="split-action">
+            <button
+              className="toolbar-action primary"
+              disabled={!canSave}
+              onClick={() => saveVersion()}
+              aria-label="Save version"
+              title="Save version (Ctrl+S)"
+            >
+              <SaveIcon />
+              <span className="toolbar-label">Save version</span>
+            </button>
+            <button
+              className={versionName === undefined ? 'toolbar-action primary' : 'toolbar-action primary active'}
+              disabled={!canSave && versionName === undefined}
+              onClick={() => setVersionName((name) => (name === undefined ? '' : undefined))}
+              aria-label="Name this version"
+              aria-expanded={versionName !== undefined}
+              title="Name this version"
+            >
+              <ChevronIcon />
+            </button>
+          </div>
         </div>
+
+        {versionName !== undefined && (
+          <form
+            className="version-name-form"
+            aria-label="Name this version"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (canSave) saveVersion(versionName);
+            }}
+          >
+            <input
+              aria-label="Version name"
+              placeholder="Name this version (optional)"
+              value={versionName}
+              maxLength={revisionNameMaxLength}
+              autoFocus
+              onChange={(event) => setVersionName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setVersionName(undefined);
+                }
+              }}
+            />
+            <button type="button" onClick={() => setVersionName(undefined)}>
+              Cancel
+            </button>
+            <button type="submit" className="primary" disabled={!canSave}>
+              Save
+            </button>
+          </form>
+        )}
 
         {showStats && (
           <div className="writing-stats-anchor">
@@ -294,14 +406,6 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
               </div>
             )
           )
-        ) : isConflict(save.error) ? (
-          <div className="banner">
-            <span>A newer version was saved elsewhere since you opened this document.</span>
-            <button onClick={() => void reload()}>Discard my changes</button>
-            <button className="primary" disabled={overwrite.isPending} onClick={() => overwrite.mutate()}>
-              Keep my version
-            </button>
-          </div>
         ) : (
           actionError && <div className="banner error">{actionError}</div>
         )}
@@ -353,6 +457,9 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
               value={title}
               maxLength={titleMaxLength}
               onChange={(event) => setTitle(event.target.value)}
+              onBlur={() => {
+                if (titleDirty && !rename.isPending) sendTitle(titleValue(title));
+              }}
             />
             <textarea
               className="content-input"

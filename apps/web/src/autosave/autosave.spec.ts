@@ -483,6 +483,26 @@ describe('createAutosave', () => {
       });
     });
 
+    it('with keepText, keeps a saved text over a different draft, as a conflict', () => {
+      start();
+      autosave.refresh({ content: 'Once upon a time', draftVersion: 4 }, true);
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'conflict',
+        content: 'Once',
+        server: { content: 'Once upon a time', draftVersion: 4 },
+      });
+    });
+
+    it('with keepText, takes a draft holding the local text as the base', () => {
+      start();
+      autosave.refresh({ content: 'Once', draftVersion: 4 }, true);
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'Once',
+        base: { content: 'Once', draftVersion: 4 },
+      });
+    });
+
     it('ignores an older or equal version', () => {
       start({ base: { content: 'Once', draftVersion: 5 } });
       autosave.refresh({ content: 'Stale', draftVersion: 4 });
