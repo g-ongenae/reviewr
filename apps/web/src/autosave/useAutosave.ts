@@ -1,9 +1,9 @@
 import type { Document, DocumentDraft, DocumentSummary } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
-import type { QueryClient } from '@tanstack/react-query';
+import type { QueryClient, QueryState } from '@tanstack/react-query';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
-import { api, queryKeys, reachability } from '../api';
+import { api, isNotFound, queryKeys, reachability } from '../api';
 import { hasUnsavedChanges } from '../unsavedChanges';
 import { createAutosave, type Autosave, type AutosaveState, type Draft, type SaveResult } from './autosave';
 
@@ -44,8 +44,25 @@ export const toSaveResult = (error: unknown): SaveResult => {
   return { kind: 'failed', error };
 };
 
+/** Whether the document query holds a 404: the document no longer exists. */
+const goneState = (state: QueryState | undefined): boolean => state?.status === 'error' && isNotFound(state.error);
+
+/**
+ * Whether the document is known to be gone: its query holds a 404 (mirrored in its machine's entry, which keeps it
+ * through a failed refetch and once the query is dropped from the cache). Only a read of the document can say that it
+ * exists again: the answer of a write cannot tell whether the server took the write before the deletion.
+ */
+export const isGone = (queryClient: QueryClient, id: string): boolean =>
+  registryOf(queryClient).get(id)?.deleted ?? goneState(queryClient.getQueryState(queryKeys.document(id)));
+
+/** Puts a document a write answered with in the cache, unless the document is known to be gone. */
+export const cacheDocument = (queryClient: QueryClient, document: Document) => {
+  if (!isGone(queryClient, document.id)) queryClient.setQueryData(queryKeys.document(document.id), document);
+};
+
 /** A draft was just saved: it goes in the cache, and the document moves up the list, without a request. */
 const cacheSavedDraft = (queryClient: QueryClient, id: string, draft: DocumentDraft) => {
+  if (isGone(queryClient, id)) return;
   const updatedAt = new Date().toISOString();
   queryClient.setQueryData<Document>(queryKeys.document(id), (document) => {
     // A slow answer must not move the cached draft back under a newer one read since.
@@ -62,7 +79,21 @@ interface Entry {
   autosave: Autosave;
   /** Editors showing this machine. */
   users: number;
+  /** Whether the writer edited the text in this tab. */
+  edited: boolean;
+  /**
+   * Whether the document query's last accepted answer, success or 404, was a 404. Written only by the registry's
+   * subscription to the query cache; kept when the query is dropped from the cache.
+   */
+  deleted: boolean;
 }
+
+/**
+ * Whether the machine holds text the writer may still need though it is saved: they edited it, and the document was
+ * deleted since, so the server's copy is gone. Kept until the writer discards it.
+ */
+const orphaned = (entry: Entry): boolean =>
+  entry.edited && entry.deleted && entry.autosave.getSnapshot().content.trim() !== '';
 
 /**
  * The machines of the open documents, one per document. A machine outlives its editor until its text is saved, so
@@ -73,8 +104,20 @@ const registries = new WeakMap<QueryClient, Map<string, Entry>>();
 const registryOf = (queryClient: QueryClient): Map<string, Entry> => {
   let registry = registries.get(queryClient);
   if (registry === undefined) {
-    registry = new Map();
-    registries.set(queryClient, registry);
+    const entries = new Map<string, Entry>();
+    registry = entries;
+    registries.set(queryClient, entries);
+    // The one writer of `deleted`: the state each document query settled on. Cancelled and superseded answers never
+    // reach it, and no write into the cache can turn a 404 into a success (see `isGone`).
+    queryClient.getQueryCache().subscribe(({ type, query }) => {
+      const [scope, id, sub] = query.queryKey as readonly unknown[];
+      if (type !== 'updated' || scope !== 'documents' || typeof id !== 'string' || sub !== undefined) return;
+      const entry = entries.get(id);
+      // Another failure (the server unreachable) says nothing either way: the last evidence stands.
+      if (entry !== undefined && (query.state.status === 'success' || goneState(query.state))) {
+        entry.deleted = query.state.status !== 'success';
+      }
+    });
   }
   return registry;
 };
@@ -85,7 +128,7 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
   if (existing !== undefined) return existing;
 
   const { id } = document;
-  const autosave = createAutosave({
+  const machine = createAutosave({
     base: draftOf(document),
     save: async (draft) => {
       try {
@@ -99,9 +142,35 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
       }
     },
   });
-  const entry = { autosave, users: 0 };
+  const entry: Entry = {
+    // Every edit goes through here: the entry remembers that the writer typed in this document.
+    autosave: {
+      ...machine,
+      edit: (content) => {
+        entry.edited = true;
+        machine.edit(content);
+      },
+    },
+    users: 0,
+    edited: false,
+    deleted: false,
+  };
   registry.set(id, entry);
   return entry;
+};
+
+/**
+ * The machine of a document, if this tab has one: an editor shows it, it still holds text the server does not have,
+ * or it holds text the writer edited in a document deleted since.
+ */
+export const entryOf = (queryClient: QueryClient, id: string): Readonly<Entry> | undefined =>
+  registryOf(queryClient).get(id);
+
+/** Drops a document's machine without saving, for a document that no longer exists. */
+export const discardAutosave = (queryClient: QueryClient, id: string) => {
+  const registry = registryOf(queryClient);
+  registry.get(id)?.autosave.dispose();
+  registry.delete(id);
 };
 
 /** An editor shows the machine: it is kept until every editor left. */
@@ -122,7 +191,7 @@ const release = (queryClient: QueryClient, id: string, entry: Entry) => {
     void autosave.flush();
     const check = () => {
       const { status } = autosave.getSnapshot();
-      if (entry.users > 0 || status === 'conflict' || status === 'rejected') {
+      if (entry.users > 0 || status === 'conflict' || status === 'rejected' || orphaned(entry)) {
         unsubscribe();
       } else if (status === 'saved') {
         const registry = registryOf(queryClient);
@@ -164,10 +233,7 @@ export const useAutosave = (document: Document): UseAutosave => {
     if (draft !== undefined) autosave.refresh({ content: draft.content, draftVersion: draft.draftVersion });
   }, [autosave, draft]);
 
-  const discard = () => {
-    registryOf(queryClient).delete(document.id);
-    autosave.dispose();
-  };
+  const discard = () => discardAutosave(queryClient, document.id);
 
   return { autosave, state, discard };
 };
@@ -181,7 +247,8 @@ export const useAutosaveGuard = () => {
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    const machines = () => [...registryOf(queryClient).values()].map((entry) => entry.autosave);
+    const entries = () => [...registryOf(queryClient).values()];
+    const machines = () => entries().map((entry) => entry.autosave);
     const flushAll = () => {
       for (const autosave of machines()) void autosave.flush();
     };
@@ -190,7 +257,10 @@ export const useAutosaveGuard = () => {
     };
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       flushAll();
-      if (hasUnsavedChanges() || machines().some((autosave) => autosave.getSnapshot().status !== 'saved')) {
+      if (
+        hasUnsavedChanges() ||
+        entries().some((entry) => entry.autosave.getSnapshot().status !== 'saved' || orphaned(entry))
+      ) {
         event.preventDefault();
       }
     };
