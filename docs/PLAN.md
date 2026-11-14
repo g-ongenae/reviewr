@@ -82,6 +82,7 @@ Web client — an autosave state machine, not just a debounce:
     - the texts an unfinished merge still holds, in no revision and not on screen, are listed in the editor, each with "copy" and an explicit "discard";
     - a document deleted elsewhere: while this tab holds text for it (unsaved text, a merged text, texts of a merge), the page lists each text with "copy" and "save as a new document" instead of "not found", and only an explicit "discard" leaves that state;
     - later: these texts are in memory only until the local buffer keeps them; an unsaved title is not offered;
+    - to decide: a text that was saved and whose editor was left is no longer held by the tab, so if the document is then deleted elsewhere the tab shows "not found". The risk behind it is a delete made from a stale view, which destroys text saved since: make the delete carry what it saw (revision and `draftVersion`, 409 otherwise), or keep deleted documents recoverable for a while;
   - later: "keep all mine / all theirs" for texts with many conflicts;
   - run the package's tests on a real Hermes runtime (only the Hermes compiler was checked);
 - flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short, until the local buffer is used there);
