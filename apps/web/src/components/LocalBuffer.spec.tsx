@@ -1188,7 +1188,7 @@ describe('the waiting texts, kept in line with the buffer', () => {
     const page = await load('#/documents/doc-2', { buffer });
     await elapse(100);
     expect(unload()).toBe(true);
-    const list = buffer.list;
+    const list = buffer.list.bind(buffer);
     buffer.list = () => Promise.resolve({ ok: false, reason: 'failed', error: new Error('failed'), entries: [] });
     await elapse(5000);
     await elapse(1000);
