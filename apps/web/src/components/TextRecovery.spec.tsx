@@ -59,6 +59,10 @@ const fakeApi = ({ method, path, body }: Call): Response => {
   if (document?.draft === undefined) return notFound();
   const { draft } = document;
   if (method === 'GET' && sub === undefined) return reply(200, document);
+  if (method === 'DELETE' && sub === undefined) {
+    db.delete(document.id);
+    return reply(204);
+  }
   if (method === 'PUT' && sub === 'draft') {
     const input = body as SaveDraftInput;
     if (draft.content === input.content) return reply(200, draft);
@@ -104,6 +108,9 @@ const otherDraft = (content: string) => {
 let calls: Call[];
 /** Answers a request instead of the fake API, when it returns a response. */
 let intercept: (call: Call) => Response | undefined;
+/** Requests matching `delay` are handled by the API at once, but their answer arrives only at `releaseHeld`. */
+let delay: (call: Call) => boolean;
+let held: (() => void)[];
 let queryClient: QueryClient;
 let rerender: ((id: string) => void) | undefined;
 
@@ -210,6 +217,8 @@ beforeEach(() => {
   created = 0;
   calls = [];
   intercept = () => undefined;
+  delay = () => false;
+  held = [];
   queryClient = createQueryClient();
   queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false, staleTime: Infinity } });
   for (const document of db.values()) queryClient.setQueryData(queryKeys.document(document.id), document);
@@ -226,7 +235,9 @@ beforeEach(() => {
     };
     if (call.method === 'GET' && call.path.includes('/revisions')) return Promise.resolve(reply(200, []));
     calls.push(call);
-    return Promise.resolve(intercept(call) ?? fakeApi(call));
+    const response = intercept(call) ?? fakeApi(call);
+    if (delay(call)) return new Promise<Response>((resolve) => held.push(() => resolve(response)));
+    return Promise.resolve(response);
   });
 });
 
@@ -273,6 +284,56 @@ describe('a document deleted elsewhere', () => {
     await leaveAndComeBack();
     expect(recovery()).not.toBeNull();
     expect(listed()).toEqual([['Your text', typed]]);
+  });
+
+  it('keeps a text this tab edited and saved, after leaving and coming back, until it is discarded', async () => {
+    await open();
+    type(typed);
+    await elapse(1000);
+    expect(server().draft?.content).toBe(typed);
+    db.delete('doc-1');
+    await refetch();
+    expect(listed()).toEqual([['Your text', typed]]);
+    expect(unload().defaultPrevented).toBe(true);
+
+    await leaveAndComeBack();
+    expect(listed()).toEqual([['Your text', typed]]);
+    expect(unload().defaultPrevented).toBe(true);
+  });
+
+  it('keeps a text whose save succeeded, when the answer arrives after the deletion was read', async () => {
+    await open();
+    delay = (call) => call.method === 'PUT';
+    type(typed);
+    await elapse(1000);
+    // The server took the text; its answer is late.
+    expect(server().draft?.content).toBe(typed);
+    db.delete('doc-1');
+    await refetch();
+    expect(listed()).toEqual([['Your text', typed]]);
+
+    delay = () => false;
+    for (const answer of held.splice(0)) answer();
+    await elapse();
+    expect(listed()).toEqual([['Your text', typed]]);
+    expect(unload().defaultPrevented).toBe(true);
+    await leaveAndComeBack();
+    expect(listed()).toEqual([['Your text', typed]]);
+  });
+
+  it('shows "not found" for a document deleted from this tab, with no warning', async () => {
+    await open();
+    type(typed);
+    await elapse(1000);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    await elapse();
+    expect(db.has('doc-1')).toBe(false);
+
+    await leaveAndComeBack();
+    expect(isNotFoundPage()).toBe(true);
+    expect(recovery()).toBeNull();
+    expect(unload().defaultPrevented).toBe(false);
   });
 
   it('shows "not found" when this tab never held text for it', async () => {
@@ -345,12 +406,12 @@ describe('a document deleted elsewhere', () => {
     it('discards every text only through the action that says so', async () => {
       await deletedDuringMerge();
       const ask = vi.spyOn(window, 'confirm').mockReturnValue(false);
-      fireEvent.click(screen.getByRole('button', { name: 'Discard these texts' }));
-      expect(ask).toHaveBeenCalledWith('Discard these texts? They are saved nowhere else.');
+      fireEvent.click(screen.getByRole('button', { name: 'Discard these copies' }));
+      expect(ask).toHaveBeenCalledWith('Discard the copies this tab holds? This tab will no longer show them.');
       expect(listed()).toEqual(all);
 
       ask.mockReturnValue(true);
-      fireEvent.click(screen.getByRole('button', { name: 'Discard these texts' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Discard these copies' }));
       await elapse();
       expect(isNotFoundPage()).toBe(true);
       expect(unload().defaultPrevented).toBe(false);

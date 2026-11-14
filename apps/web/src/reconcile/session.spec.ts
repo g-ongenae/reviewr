@@ -37,8 +37,9 @@ const failure = new Error('503 Service Unavailable');
  * other device's text it was confirmed with) and every result not discarded by the writer is the server's draft, in a
  * revision, or shown to the writer: the local text, the conflict's other text, the merged text, or a text listed by
  * `hiddenTexts`. Only what the session and the machine expose counts. Every text of another writer that a session's
- * write replaced is on the server or shown by a tab. A version named for a side holds a text of that side. Every
- * confirmation ends, and once the server is quiet every conflict ends applied.
+ * write replaced is on the server or shown by a tab. When a result is applied, every text its session was given before
+ * is in a revision, and the result is the local text or the draft. A version named for a side holds a text of that
+ * side. Every confirmation ends, and once the server is quiet every conflict ends applied.
  */
 describe('reconciliation session, randomised', () => {
   const texts = ['', 'A', 'B', 'C', 'D'];
@@ -298,7 +299,16 @@ describe('reconciliation session, randomised', () => {
       const state = tab.session().getSnapshot();
       steps.push(state.stop === undefined ? 'applied' : `stopped: ${state.stop.reason}`);
       if (state.result === undefined) {
-        // Applied: the result is the writer's text now, which they may change; the rest is kept.
+        // Applied: the result is the writer's text now, which they may change; the rest must be kept, which is
+        // checked before the expectations are cleared.
+        const versions = new Set(revisions.map((item) => item.content));
+        for (const text of tab.required) {
+          if (text !== result && !versions.has(text))
+            fail(`applied ${JSON.stringify(result)} without keeping ${JSON.stringify(text)}`);
+        }
+        if (tab.autosave.getSnapshot().content !== result && draft.content !== result) {
+          fail(`applied ${JSON.stringify(result)}, which is neither the local text nor the draft`);
+        }
         tab.required.clear();
         tab.pending.clear();
         // A replaced text that is the result is the draft again: from now on, only its writer can replace it.

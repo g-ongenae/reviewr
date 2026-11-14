@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useReducer } from 'react';
 import { api, inlineError, isNotFound, queryKeys } from '../api';
-import { autosaveOf } from '../autosave/useAutosave';
+import { entryOf, markDeleted } from '../autosave/useAutosave';
 import { Editor } from './Editor';
 import { DeletedDocument } from './TextRecovery';
 
@@ -24,7 +24,15 @@ export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: 
   const [, discarded] = useReducer((count: number) => count + 1, 0);
   const document = useQuery({
     queryKey: queryKeys.document(id),
-    queryFn: () => api.getDocument(id),
+    queryFn: async () => {
+      try {
+        return await api.getDocument(id);
+      } catch (error) {
+        // Known before the editor goes: its release then keeps a text the writer edited.
+        if (isNotFound(error)) markDeleted(queryClient, id);
+        throw error;
+      }
+    },
     enabled: id.length > 0,
     retry: (failureCount, error) => !isNotFound(error) && failureCount < 3,
   });
@@ -43,13 +51,14 @@ export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: 
       </div>
     );
     // A document deleted elsewhere while this tab holds text for it: the text stays reachable.
-    const autosave = id ? autosaveOf(queryClient, id) : undefined;
-    return autosave === undefined ? (
+    const entry = id ? entryOf(queryClient, id) : undefined;
+    return entry === undefined ? (
       notFound
     ) : (
       <DeletedDocument
         id={id}
-        autosave={autosave}
+        autosave={entry.autosave}
+        edited={entry.edited}
         title={document.data?.title}
         notFound={notFound}
         onOpen={onOpen}

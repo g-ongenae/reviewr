@@ -45,16 +45,21 @@ export const HeldText = ({ label, text, children }: HeldTextProps) => {
 const noSession: SessionState = { running: false, texts: [] };
 
 /**
- * Every text this tab holds for a document and that its server no longer has: the local text when it is not saved, the
- * merged text of a stopped merge, the other device's text of a conflict, and every text a merge was given. The first
+ * Every text this tab holds for a document its server no longer has: the local text when the writer edited it or it is
+ * not saved, the merged text of a stopped merge, the other device's text of a conflict, and every text a merge was given. The first
  * label wins for a text held twice; blank texts hold nothing to recover.
  */
-export const recoverableTexts = (machine: AutosaveState, session: SessionState): { label: string; text: string }[] => {
+export const recoverableTexts = (
+  machine: AutosaveState,
+  session: SessionState,
+  edited: boolean,
+): { label: string; text: string }[] => {
   const texts: { label: string; text: string }[] = [];
   const add = (text: string, label: string) => {
     if (text.trim() !== '' && !texts.some((item) => item.text === text)) texts.push({ label, text });
   };
-  if (machine.status !== 'saved') add(machine.content, 'Your text');
+  // Saved or not: the server's copy went with the document.
+  if (edited || machine.status !== 'saved') add(machine.content, 'Your text');
   if (session.result !== undefined) add(session.result, 'Your merged text, not applied');
   if (machine.status === 'conflict') add(machine.server.content, 'The other device’s text');
   for (const { text, side } of session.texts) add(text, earlierTextLabel(side));
@@ -65,6 +70,8 @@ interface DeletedDocumentProps {
   id: string;
   /** The machine this tab still has for the document. */
   autosave: Autosave;
+  /** Whether the writer edited the text in this tab. */
+  edited: boolean;
   /** The title of the deleted document, when it is known: the new documents take it. */
   title: string | null | undefined;
   /** Shown when the tab holds no text for the document. */
@@ -81,6 +88,7 @@ interface DeletedDocumentProps {
 export const DeletedDocument = ({
   id,
   autosave,
+  edited,
   title,
   notFound,
   onOpen,
@@ -107,11 +115,11 @@ export const DeletedDocument = ({
     },
   });
 
-  const texts = recoverableTexts(machine, sessionState);
+  const texts = recoverableTexts(machine, sessionState, edited);
   if (texts.length === 0) return notFound;
 
   const discard = () => {
-    if (!window.confirm('Discard these texts? They are saved nowhere else.')) return;
+    if (!window.confirm('Discard the copies this tab holds? This tab will no longer show them.')) return;
     discardAutosave(queryClient, id);
     onDiscarded();
   };
@@ -123,8 +131,8 @@ export const DeletedDocument = ({
       <section className="deleted-document-body" aria-labelledby="deleted-document-title">
         <h1 id="deleted-document-title">This document was deleted elsewhere</h1>
         <p>
-          This tab still holds text that was never saved in it. Save what you want to keep as a new document, or copy
-          it: it is saved nowhere else.
+          The original document is gone. These are the copies of its text that this tab still holds: save what you want
+          to keep as a new document, or copy it.
         </p>
         {error && <div className="banner error">Could not create the document: {error}</div>}
         {texts.map(({ label, text }) => (
@@ -136,7 +144,7 @@ export const DeletedDocument = ({
         ))}
         <footer className="deleted-document-footer">
           <button type="button" className="danger" disabled={create.isPending} onClick={discard}>
-            Discard these texts
+            Discard these copies
           </button>
         </footer>
       </section>

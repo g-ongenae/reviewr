@@ -62,7 +62,18 @@ interface Entry {
   autosave: Autosave;
   /** Editors showing this machine. */
   users: number;
+  /** Whether the writer edited the text in this tab. */
+  edited: boolean;
+  /** Whether a read of the document answered that it no longer exists. */
+  deleted: boolean;
 }
+
+/**
+ * Whether the machine holds text the writer may still need though it is saved: they edited it, and the document was
+ * deleted since, so the server's copy is gone. Kept until the writer discards it.
+ */
+const orphaned = (entry: Entry): boolean =>
+  entry.edited && entry.deleted && entry.autosave.getSnapshot().content.trim() !== '';
 
 /**
  * The machines of the open documents, one per document. A machine outlives its editor until its text is saved, so
@@ -85,13 +96,14 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
   if (existing !== undefined) return existing;
 
   const { id } = document;
-  const autosave = createAutosave({
+  const machine = createAutosave({
     base: draftOf(document),
     save: async (draft) => {
       try {
         const saved = await api.saveDraft(id, draft);
         reachability.reportSuccess();
-        cacheSavedDraft(queryClient, id, saved);
+        // A late answer must not bring a document read as deleted back into the cache.
+        if (!entry.deleted) cacheSavedDraft(queryClient, id, saved);
         return { kind: 'saved', draftVersion: saved.draftVersion };
       } catch (error) {
         reachability.reportError(error);
@@ -99,14 +111,35 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
       }
     },
   });
-  const entry = { autosave, users: 0 };
+  const entry: Entry = {
+    // Every edit goes through here: the entry remembers that the writer typed in this document.
+    autosave: {
+      ...machine,
+      edit: (content) => {
+        entry.edited = true;
+        machine.edit(content);
+      },
+    },
+    users: 0,
+    edited: false,
+    deleted: false,
+  };
   registry.set(id, entry);
   return entry;
 };
 
-/** The machine of a document, if this tab has one: an editor shows it, or it still holds text the server does not have. */
-export const autosaveOf = (queryClient: QueryClient, id: string): Autosave | undefined =>
-  registryOf(queryClient).get(id)?.autosave;
+/**
+ * The machine of a document, if this tab has one: an editor shows it, it still holds text the server does not have,
+ * or it holds text the writer edited in a document deleted since.
+ */
+export const entryOf = (queryClient: QueryClient, id: string): Readonly<Entry> | undefined =>
+  registryOf(queryClient).get(id);
+
+/** A read answered that the document no longer exists: a text the writer edited in it is kept until discarded. */
+export const markDeleted = (queryClient: QueryClient, id: string) => {
+  const entry = registryOf(queryClient).get(id);
+  if (entry !== undefined) entry.deleted = true;
+};
 
 /** Drops a document's machine without saving, for a document that no longer exists. */
 export const discardAutosave = (queryClient: QueryClient, id: string) => {
@@ -133,7 +166,7 @@ const release = (queryClient: QueryClient, id: string, entry: Entry) => {
     void autosave.flush();
     const check = () => {
       const { status } = autosave.getSnapshot();
-      if (entry.users > 0 || status === 'conflict' || status === 'rejected') {
+      if (entry.users > 0 || status === 'conflict' || status === 'rejected' || orphaned(entry)) {
         unsubscribe();
       } else if (status === 'saved') {
         const registry = registryOf(queryClient);
@@ -189,7 +222,8 @@ export const useAutosaveGuard = () => {
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    const machines = () => [...registryOf(queryClient).values()].map((entry) => entry.autosave);
+    const entries = () => [...registryOf(queryClient).values()];
+    const machines = () => entries().map((entry) => entry.autosave);
     const flushAll = () => {
       for (const autosave of machines()) void autosave.flush();
     };
@@ -198,7 +232,10 @@ export const useAutosaveGuard = () => {
     };
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       flushAll();
-      if (hasUnsavedChanges() || machines().some((autosave) => autosave.getSnapshot().status !== 'saved')) {
+      if (
+        hasUnsavedChanges() ||
+        entries().some((entry) => entry.autosave.getSnapshot().status !== 'saved' || orphaned(entry))
+      ) {
         event.preventDefault();
       }
     };
