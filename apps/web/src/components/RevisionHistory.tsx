@@ -1,9 +1,10 @@
-import type { Document, Revision } from '@reviewr/shared';
-import { displayTitle } from '@reviewr/shared';
-import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import type { Document, Revision, RevisionSummary } from '@reviewr/shared';
+import { displayTitle, revisionNameMaxLength } from '@reviewr/shared';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useId, useRef, useState } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import { formatDate } from '../format';
+import './RevisionHistory.css';
 
 interface Props {
   document: Document;
@@ -23,7 +24,7 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
     queryKey: queryKeys.revision(document.id, selected ?? 0),
     queryFn: () => api.getRevision(document.id, selected ?? 0),
     enabled: selected !== undefined,
-    staleTime: Infinity, // Revisions are immutable.
+    staleTime: Infinity, // The text of a revision never changes; only its name does, set from here.
   });
 
   const revisionsError = inlineError(revisions.error);
@@ -36,18 +37,13 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
       {revisionsError && <p className="error">{revisionsError}</p>}
       <ul className="revision-list">
         {revisions.data?.map((revision) => (
-          <li key={revision.revision}>
-            <button
-              className={revision.revision === selected ? 'revision-item selected' : 'revision-item'}
-              onClick={() => setSelected(revision.revision === selected ? undefined : revision.revision)}
-            >
-              <span>
-                Revision {revision.revision}
-                {revision.revision === document.revision && <span className="badge">current</span>}
-              </span>
-              <span className="muted small">{formatDate(revision.createdAt)}</span>
-            </button>
-          </li>
+          <RevisionRow
+            key={revision.revision}
+            revision={revision}
+            current={revision.revision === document.revision}
+            selected={revision.revision === selected}
+            onSelect={() => setSelected(revision.revision === selected ? undefined : revision.revision)}
+          />
         ))}
       </ul>
 
@@ -75,3 +71,164 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
     </aside>
   );
 };
+
+interface RowProps {
+  revision: RevisionSummary;
+  current: boolean;
+  selected: boolean;
+  onSelect: () => void;
+}
+
+/** One revision: its name first when it has one, and a pencil to name, rename or clear it in place. */
+const RevisionRow = ({ revision, current, selected, onSelect }: RowProps) => {
+  const [editing, setEditing] = useState(false);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const focusEditButton = useRef(false);
+
+  useEffect(() => {
+    if (!editing && focusEditButton.current) {
+      focusEditButton.current = false;
+      editButton.current?.focus();
+    }
+  }, [editing]);
+
+  const close = () => {
+    focusEditButton.current = true;
+    setEditing(false);
+  };
+
+  const label = `Revision ${revision.revision}`;
+  const date = formatDate(revision.createdAt);
+
+  return (
+    <li className={selected ? 'revision-row selected' : 'revision-row'}>
+      {editing ? (
+        <RevisionNameForm revision={revision} onDone={close} />
+      ) : (
+        <>
+          <button className={selected ? 'revision-item selected' : 'revision-item'} onClick={onSelect}>
+            {revision.name === null ? (
+              <>
+                <span>
+                  {label}
+                  {current && <span className="badge">current</span>}
+                </span>
+                <span className="muted small">{date}</span>
+              </>
+            ) : (
+              <>
+                <span className="revision-name-line">
+                  <span className="revision-name" title={revision.name}>
+                    {revision.name}
+                  </span>
+                  {current && <span className="badge">current</span>}
+                </span>
+                <span className="muted small">
+                  {label} · {date}
+                </span>
+              </>
+            )}
+          </button>
+          <button
+            ref={editButton}
+            className="icon-button revision-name-edit"
+            aria-label={
+              revision.name === null ? `Name revision ${revision.revision}` : `Rename revision ${revision.revision}`
+            }
+            title={revision.name === null ? 'Name this version' : 'Rename this version'}
+            onClick={() => setEditing(true)}
+          >
+            <PencilIcon />
+          </button>
+        </>
+      )}
+    </li>
+  );
+};
+
+interface FormProps {
+  revision: RevisionSummary;
+  onDone: () => void;
+}
+
+/** Inline field for a revision's name: Enter saves, Escape cancels, an empty name clears it. */
+const RevisionNameForm = ({ revision, onDone }: FormProps) => {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(revision.name ?? '');
+  const errorId = useId();
+  const save = useMutation({
+    mutationFn: (value: string) =>
+      api.nameRevision(revision.documentId, revision.revision, value.trim() === '' ? null : value),
+    onSuccess: (saved) => {
+      // Show the server's answer; the text of the revision is not touched.
+      queryClient.setQueryData<RevisionSummary[]>(queryKeys.revisions(saved.documentId), (list) =>
+        list?.map((item) => (item.revision === saved.revision ? { ...item, ...saved } : item)),
+      );
+      queryClient.setQueryData<Revision>(queryKeys.revision(saved.documentId, saved.revision), (full) =>
+        full === undefined ? undefined : { ...full, ...saved },
+      );
+      onDone();
+    },
+  });
+  const error = inlineError(save.error);
+
+  return (
+    <form
+      className="revision-name-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!save.isPending) save.mutate(name);
+      }}
+    >
+      <input
+        className="revision-name-input"
+        aria-label={`Name of revision ${revision.revision}`}
+        aria-describedby={error ? errorId : undefined}
+        aria-invalid={error ? true : undefined}
+        placeholder="Name this version"
+        value={name}
+        maxLength={revisionNameMaxLength}
+        autoFocus
+        onChange={(event) => setName(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            onDone();
+          }
+        }}
+      />
+      <div className="revision-name-actions">
+        <span className="muted small">Revision {revision.revision}</span>
+        <button type="button" className="revision-name-cancel" onClick={onDone}>
+          Cancel
+        </button>
+        <button type="submit" className="primary" disabled={save.isPending}>
+          {save.isPending ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {error && (
+        <p id={errorId} className="error small revision-name-error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+};
+
+const PencilIcon = () => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L4 16v4h4z" />
+    <path d="m15 5 4 4" />
+  </svg>
+);
