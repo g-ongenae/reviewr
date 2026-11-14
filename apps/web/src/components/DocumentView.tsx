@@ -1,18 +1,27 @@
-import { useQuery } from '@tanstack/react-query';
+import type { Document } from '@reviewr/shared';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
+import { useReducer } from 'react';
 import { api, inlineError, isNotFound, queryKeys } from '../api';
+import { autosaveOf } from '../autosave/useAutosave';
 import { Editor } from './Editor';
+import { DeletedDocument } from './TextRecovery';
 
 interface Props {
   id: string;
   onDeleted: () => void;
   onGoBack: () => void;
+  /** Opens another document: one created from a text of this one, after it was deleted. */
+  onOpen: (document: Document) => void;
   /** Shown at the start of the toolbar, e.g. the button that unfolds the sidebar. */
   toolbarStart?: ReactNode;
 }
 
 /** Loads a document, then hands it to the editor. */
-export const DocumentView = ({ id, onDeleted, onGoBack, toolbarStart }: Props) => {
+export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: Props) => {
+  const queryClient = useQueryClient();
+  /** Renders again once the writer discarded the texts of a deleted document. */
+  const [, discarded] = useReducer((count: number) => count + 1, 0);
   const document = useQuery({
     queryKey: queryKeys.document(id),
     queryFn: () => api.getDocument(id),
@@ -21,7 +30,7 @@ export const DocumentView = ({ id, onDeleted, onGoBack, toolbarStart }: Props) =
   });
 
   if (!id || (document.isError && isNotFound(document.error))) {
-    return (
+    const notFound = (
       <div className="not-found-page">
         {toolbarStart && <div className="not-found-toolbar">{toolbarStart}</div>}
         <section className="not-found" aria-labelledby="not-found-title">
@@ -32,6 +41,21 @@ export const DocumentView = ({ id, onDeleted, onGoBack, toolbarStart }: Props) =
           </button>
         </section>
       </div>
+    );
+    // A document deleted elsewhere while this tab holds text for it: the text stays reachable.
+    const autosave = id ? autosaveOf(queryClient, id) : undefined;
+    return autosave === undefined ? (
+      notFound
+    ) : (
+      <DeletedDocument
+        id={id}
+        autosave={autosave}
+        title={document.data?.title}
+        notFound={notFound}
+        onOpen={onOpen}
+        onDiscarded={discarded}
+        toolbarStart={toolbarStart}
+      />
     );
   }
 

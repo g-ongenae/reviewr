@@ -144,7 +144,7 @@ const draftSaves = (id = 'doc-1') =>
 /** The app around the document view: one query client for the whole test, and the app-level unload guard. */
 const Harness = ({ id }: { id: string }) => {
   useAutosaveGuard();
-  return <DocumentView key={id} id={id} onDeleted={() => {}} onGoBack={() => {}} />;
+  return <DocumentView key={id} id={id} onDeleted={() => {}} onGoBack={() => {}} onOpen={() => {}} />;
 };
 
 let queryClient: QueryClient;

@@ -1,5 +1,5 @@
 import type { CreateRevisionInput, Document, DocumentDraft, SaveDraftInput } from '@reviewr/shared';
-import type { Autosave, Draft } from '../autosave/autosave';
+import type { Autosave, AutosaveState, Draft } from '../autosave/autosave';
 
 const day = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
 
@@ -25,12 +25,22 @@ export type Stop =
   /** The local text changed while the confirmation ran: the result was not applied over it. */
   | { reason: 'changed' };
 
+/** A text the session was given, and must keep before a result is applied. */
+export interface HeldText {
+  text: string;
+  side: Side;
+  /** Whether the session verifiably kept it as a version. */
+  kept: boolean;
+}
+
 export interface SessionState {
   /** A confirmation is running: nothing may change the texts until it ends. */
   running: boolean;
   /** The text the writer confirmed, until it is applied or the writer discards it. */
   result?: string;
   stop?: Stop;
+  /** Every text the session was given and still holds, in the order it was given. Empty once a result is applied. */
+  texts: readonly HeldText[];
 }
 
 export interface ReconcileSession {
@@ -43,6 +53,8 @@ export interface ReconcileSession {
   confirm(result: string): Promise<void>;
   /** The writer discards the result of a stopped confirmation. */
   dismissResult(): void;
+  /** The writer discards a text the session holds and has not kept. Ignored while a confirmation runs. */
+  discardText(text: string): void;
 }
 
 export interface SessionOptions {
@@ -57,11 +69,6 @@ export interface SessionOptions {
    */
   onDocument: (document: Document) => void;
   now?: () => Date;
-}
-
-interface Given {
-  text: string;
-  side: Side;
 }
 
 const draftOf = (document: Document): Draft => {
@@ -84,14 +91,14 @@ export const createReconcileSession = (options: SessionOptions): ReconcileSessio
   const { id, autosave, api, isConflict, onDocument, now = () => new Date() } = options;
 
   /** The texts the session was given, in order: they must be kept before a result is applied. */
-  let given: Given[] = [];
+  let given: Omit<HeldText, 'kept'>[] = [];
   /** The texts this session verifiably kept. */
   let kept = new Set<string>();
-  let state: SessionState = { running: false };
+  let state: SessionState = { running: false, texts: [] };
   const listeners = new Set<() => void>();
 
-  const set = (next: SessionState) => {
-    state = next;
+  const set = (next: Omit<SessionState, 'texts'>) => {
+    state = { ...next, texts: given.map((item) => ({ ...item, kept: kept.has(item.text) })) };
     for (const listener of [...listeners]) listener();
   };
 
@@ -200,10 +207,30 @@ export const createReconcileSession = (options: SessionOptions): ReconcileSessio
       if (state.running || state.result === undefined) return;
       set({ running: false });
     },
+
+    discardText(text) {
+      if (state.running || kept.has(text) || !given.some((item) => item.text === text)) return;
+      given = given.filter((item) => item.text !== text);
+      set(state);
+    },
   };
 };
 
+/**
+ * The texts the session holds that are in no version and not on screen, where the writer could not otherwise copy them:
+ * an earlier state of either side, replaced since by that side's own edits. On screen are the local text, and, in
+ * conflict, the other device's text and the merged text (the view shows them). Blank texts hold nothing to recover.
+ */
+export const hiddenTexts = (session: SessionState, machine: AutosaveState): HeldText[] => {
+  const shown = new Set([machine.content, session.result]);
+  if (machine.status === 'conflict') shown.add(machine.server.content);
+  return session.texts.filter((item) => !item.kept && !shown.has(item.text) && item.text.trim() !== '');
+};
+
 const sessions = new WeakMap<Autosave, ReconcileSession>();
+
+/** The session of a machine, if an editor ever created one. */
+export const existingSession = (autosave: Autosave): ReconcileSession | undefined => sessions.get(autosave);
 
 /** The session of a document's machine, created on first use; it lives as long as the machine. */
 export const sessionFor = (options: SessionOptions): ReconcileSession => {

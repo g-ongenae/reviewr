@@ -7,10 +7,11 @@ import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
 import { draftOf, useAutosave } from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
-import { sessionFor, type Stop } from '../reconcile/session';
+import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
+import { earlierTextLabel, HeldText } from './TextRecovery';
 import { HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
 import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './WritingStats';
 
@@ -152,6 +153,8 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   );
   /** A merged text is being saved: the texts cannot change until it ends. */
   const busy = sessionState.running;
+  /** Earlier texts of the merge, in no version, that neither the text nor the view shows. */
+  const hidden = busy ? [] : hiddenTexts(sessionState, state);
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
@@ -301,6 +304,23 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           </div>
         ) : (
           actionError && <div className="banner error">{actionError}</div>
+        )}
+
+        {hidden.length > 0 && (
+          <div className="held-texts">
+            <p>
+              The merge also holds {hidden.length === 1 ? 'this earlier text' : 'these earlier texts'}, in no version
+              yet. Confirming a merge keeps {hidden.length === 1 ? 'it' : 'them'} as versions; copy what you need if you
+              give up on it.
+            </p>
+            {hidden.map(({ text, side }) => (
+              <HeldText key={text} label={earlierTextLabel(side)} text={text}>
+                <button type="button" onClick={() => session.discardText(text)}>
+                  Discard this text
+                </button>
+              </HeldText>
+            ))}
+          </div>
         )}
 
         {showReconciliation && state.status === 'conflict' ? (

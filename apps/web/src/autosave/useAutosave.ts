@@ -104,6 +104,17 @@ const entryFor = (queryClient: QueryClient, document: Document): Entry => {
   return entry;
 };
 
+/** The machine of a document, if this tab has one: an editor shows it, or it still holds text the server does not have. */
+export const autosaveOf = (queryClient: QueryClient, id: string): Autosave | undefined =>
+  registryOf(queryClient).get(id)?.autosave;
+
+/** Drops a document's machine without saving, for a document that no longer exists. */
+export const discardAutosave = (queryClient: QueryClient, id: string) => {
+  const registry = registryOf(queryClient);
+  registry.get(id)?.autosave.dispose();
+  registry.delete(id);
+};
+
 /** An editor shows the machine: it is kept until every editor left. */
 const acquire = (entry: Entry) => {
   entry.users++;
@@ -164,10 +175,7 @@ export const useAutosave = (document: Document): UseAutosave => {
     if (draft !== undefined) autosave.refresh({ content: draft.content, draftVersion: draft.draftVersion });
   }, [autosave, draft]);
 
-  const discard = () => {
-    registryOf(queryClient).delete(document.id);
-    autosave.dispose();
-  };
+  const discard = () => discardAutosave(queryClient, document.id);
 
   return { autosave, state, discard };
 };
