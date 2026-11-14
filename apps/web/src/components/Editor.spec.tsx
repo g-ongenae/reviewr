@@ -814,10 +814,13 @@ describe('Editor autosave', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Name this version' }));
       fireEvent.keyDown(screen.getByRole('textbox', { name: 'Version name' }), { key: 'Escape' });
       expect(screen.queryByRole('textbox', { name: 'Version name' })).toBeNull();
+      expect(window.document.activeElement).toBe(screen.getByRole('button', { name: 'Name this version' }));
 
       fireEvent.click(screen.getByRole('button', { name: 'Name this version' }));
       fireEvent.change(screen.getByRole('textbox', { name: 'Version name' }), { target: { value: 'Draft two' } });
       fireEvent.keyDown(window, { key: 's', ctrlKey: true });
+      // Saving gives the keyboard back to the text.
+      expect(window.document.activeElement).toBe(textarea());
       await elapse();
       expect(versions()).toEqual([['Draft two', 'The end.']]);
     });
@@ -847,6 +850,51 @@ describe('Editor autosave', () => {
       expect(textarea().value).toBe('The end. Or is it?');
       await elapse(1000);
       expect(server().draft?.content).toBe('The end. Or is it?');
+      expect(status()).toBe('Draft saved · changed since revision 3');
+    });
+
+    it('makes no version of text typed after the click and saved along with it, and says so', async () => {
+      open();
+      hold = (call) => call.path.endsWith('/draft');
+      type('X');
+      await elapse(1000);
+      // A draft request is in flight; the writer types, saves a version, and types again before it answers.
+      type('A');
+      fireEvent.click(saveButton());
+      type('B');
+      await releaseHeld();
+      await elapse();
+
+      expect(draftSaves().map((call) => (call.body as SaveDraftInput).content)).toEqual(['X', 'B']);
+      expect(calls.filter((call) => call.method === 'POST')).toEqual([]);
+      expect(versions()).toEqual([]);
+      expect(textarea().value).toBe('B');
+      expect(server().draft?.content).toBe('B');
+      expect(screen.getByText(/The version was not saved: the text changed while it was being saved/)).toBeTruthy();
+      expect(unload().defaultPrevented).toBe(false);
+    });
+
+    it('a late answer does not put back an older title or draft', async () => {
+      open();
+      type('The end.');
+      await elapse(1000);
+      // The version is saved on the server at once; its answer arrives after a rename and a draft save.
+      delay = (call) => call.method === 'POST';
+      fireEvent.click(saveButton());
+      await elapse();
+      expect(versions()).toEqual([[null, 'The end.']]);
+      fireEvent.change(screen.getByPlaceholderText(/^Untitled/), { target: { value: 'Renamed' } });
+      type('The end. Or is it?');
+      await elapse(1000);
+      expect(server()).toMatchObject({ title: 'Renamed', draft: { content: 'The end. Or is it?' } });
+
+      delay = () => false;
+      for (const answer of held.splice(0)) answer();
+      await elapse(100);
+      const cached = queryClient.getQueryData<Document>(queryKeys.document('doc-1'));
+      expect(cached).toMatchObject({ title: 'Renamed', revision: 3, content: 'The end.' });
+      expect(cached?.draft).toEqual(server().draft);
+      expect(screen.getByPlaceholderText<HTMLInputElement>(/^Untitled/).value).toBe('Renamed');
       expect(status()).toBe('Draft saved · changed since revision 3');
     });
 
@@ -974,7 +1022,7 @@ describe('Editor autosave', () => {
       });
       queryClient.setQueryData(queryKeys.document('doc-1'), server());
       open();
-      expect(status()).toBe('Draft saved · no version yet');
+      expect(status()).toBe('No version yet · draft saved');
 
       fireEvent.click(saveButton());
       await elapse();
@@ -1057,6 +1105,39 @@ describe('Editor autosave', () => {
       expect(renames()).toEqual([{ title: 'The keeper' }, { title: 'The keeper of the light' }]);
       expect(server().title).toBe('The keeper of the light');
       expect(titleField().value).toBe('The keeper of the light');
+    });
+
+    it.each([
+      { answer: 'held', lose: false },
+      { answer: 'lost', lose: true },
+    ])('sends the title typed back during a rename whose answer is $answer', async ({ lose }) => {
+      open();
+      hold = (call) => call.method === 'PATCH';
+      if (lose) {
+        intercept = (call) => {
+          if (call.method !== 'PATCH') return undefined;
+          intercept = () => undefined;
+          fakeApi(call);
+          return reply(503);
+        };
+      }
+      typeTitle('Renamed');
+      await elapse(800);
+      // Back to the title the document had: the rename to "Renamed" may already be stored.
+      typeTitle('The lighthouse keeper');
+      expect(status()).toBe('Saving title…');
+      await releaseHeld();
+      await elapse(100);
+      expect(titleField().value).toBe('The lighthouse keeper');
+      expect(unload().defaultPrevented).toBe(true);
+
+      await elapse(800);
+      await elapse(100);
+      expect(renames()).toEqual([{ title: 'Renamed' }, { title: 'The lighthouse keeper' }]);
+      expect(server().title).toBe('The lighthouse keeper');
+      expect(titleField().value).toBe('The lighthouse keeper');
+      expect(status()).toBe('Saved · revision 2');
+      expect(unload().defaultPrevented).toBe(false);
     });
 
     const renamedElsewhere = async (title: string) => {
