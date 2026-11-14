@@ -39,5 +39,18 @@ export const revisions = pgTable(
   (table) => [primaryKey({ columns: [table.documentId, table.revision] })],
 );
 
+/**
+ * One row per document created with a client-generated id (`POST /documents` with `id`), kept after the
+ * document is deleted (no foreign key), so that a creation sent again is recognised: the same body answers
+ * the document instead of creating a second one, a different body is refused, and a deleted document is
+ * answered as gone rather than created again.
+ */
+export const documentCreations = pgTable('document_creations', {
+  documentId: uuid('document_id').primaryKey(),
+  /** SHA-256 (hex) of the creation body as validated: title, content and `draftOnly`. */
+  requestHash: text('request_hash').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type DocumentRow = typeof documents.$inferSelect;
 export type RevisionRow = typeof revisions.$inferSelect;

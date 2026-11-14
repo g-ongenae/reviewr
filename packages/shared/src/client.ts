@@ -1,6 +1,7 @@
 import type {
   ApiErrorBody,
   CreateDocumentInput,
+  CreateDraftDocumentInput,
   CreateRevisionInput,
   Document,
   DocumentDraft,
@@ -61,9 +62,12 @@ export class ReviewrClient {
   }
 
   /**
-   * Create a document.
+   * Create a document. With `{ title, content }`, the content is its first revision and the draft starts equal to
+   * it. With a `CreateDraftDocumentInput`, it has only a draft, and the call can be sent again with the same body
+   * (it answers the same document): it rejects with a 422 `ApiError` if the `id` was used with another body, and
+   * a 410 if that document was deleted since.
    */
-  public async createDocument(input: CreateDocumentInput): Promise<Document> {
+  public async createDocument(input: CreateDocumentInput | CreateDraftDocumentInput): Promise<Document> {
     return this.request('POST', '/documents', input);
   }
 

@@ -1,4 +1,13 @@
-import { ConflictException, HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import {
+  ConflictException,
+  GoneException,
+  HttpStatus,
+  Inject,
+  Injectable,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import type {
   ConflictBody,
   Document,
@@ -9,7 +18,7 @@ import type {
 } from '@reviewr/shared';
 import { and, desc, eq } from 'drizzle-orm';
 import { databaseToken, type Database } from '../database/database.js';
-import { DocumentRow, documents, RevisionRow, revisions } from '../database/schema.js';
+import { documentCreations, DocumentRow, documents, RevisionRow, revisions } from '../database/schema.js';
 import {
   DocumentSummaryRow,
   RevisionSummaryRow,
@@ -19,7 +28,7 @@ import {
   toRevision,
   toRevisionSummary,
 } from './documents.mapper.js';
-import { CreateDocumentDto } from './dto/create-document.dto.js';
+import { CreateDocumentBodyDto } from './dto/create-document-body.dto.js';
 import { CreateRevisionDto } from './dto/create-revision.dto.js';
 import { NameRevisionDto } from './dto/name-revision.dto.js';
 import { RenameDocumentDto } from './dto/rename-document.dto.js';
@@ -28,6 +37,9 @@ import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
 /** Revision number of the first save of a document. */
 const firstRevision: number = 1;
+
+/** Revision number of a document that has only a draft. */
+const noRevision: number = 0;
 
 /** A 409 body without the fields every 409 shares, kept discriminated by `code`. */
 type ConflictDetail<T = ConflictBody> = T extends ConflictBody ? Omit<T, 'statusCode' | 'error'> : never;
@@ -60,6 +72,46 @@ const assertFound = <T>(row: T | undefined, id: string): T => {
 
 /** Transaction handle of the database. */
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/**
+ * Fingerprint of a creation body as validated (a blank title is already null), to tell a creation sent again
+ * from another one that reuses its id.
+ */
+const creationHash = (input: CreateDocumentBodyDto): string =>
+  createHash('sha256')
+    .update(JSON.stringify([input.title, input.content, input.draftOnly === true]))
+    .digest('hex');
+
+/**
+ * Record the creation of the document `id` with a client-generated id. Answers undefined when this is the first
+ * creation with this id, or the document as it is now when the same creation was already made.
+ *
+ * The insert of the record waits for a concurrent creation with the same id to commit or roll back, then either
+ * inserts (the other one rolled back) or skips; the select after it, a new statement, sees the committed record.
+ * Fails with 422 if the id was used with another body, and 410 if its document was deleted since: sending a
+ * creation again never brings a deleted document back.
+ */
+const claimCreation = async (tx: Transaction, id: string, requestHash: string): Promise<Document | undefined> => {
+  const claimed: unknown[] = await tx
+    .insert(documentCreations)
+    .values({ documentId: id, requestHash })
+    .onConflictDoNothing()
+    .returning({ documentId: documentCreations.documentId });
+  if (claimed.length > 0) {
+    return undefined;
+  }
+
+  const [creation] = await tx.select().from(documentCreations).where(eq(documentCreations.documentId, id));
+  if (creation?.requestHash !== requestHash) {
+    throw new UnprocessableEntityException(`Document ${id} was already created with another body`);
+  }
+  const [row] = await tx.select().from(documents).where(eq(documents.id, id));
+  if (row === undefined) {
+    throw new GoneException(`Document ${id} was deleted`);
+  }
+
+  return toDocument(row);
+};
 
 /**
  * Make `title` and `content` the new head revision of a locked document, and the draft equal to it.
@@ -138,20 +190,40 @@ export class DocumentsService {
 
   /**
    * Create a document and its first revision. The draft starts equal to that revision.
+   *
+   * With `draftOnly`, no revision: the head is empty at revision 0 and the draft holds the content, based on no
+   * revision (null). With a client-generated `id`, the same creation sent again answers the document as it is now
+   * (see `claimCreation`); an id already taken by a document created without one is refused with 422.
    */
-  public async create(input: CreateDocumentDto): Promise<Document> {
+  public async create(input: CreateDocumentBodyDto): Promise<Document> {
     return this.db.transaction(async (tx) => {
+      if (input.id !== undefined) {
+        const existing: Document | undefined = await claimCreation(tx, input.id, creationHash(input));
+        if (existing !== undefined) {
+          return existing;
+        }
+      }
+      const draftOnly: boolean = input.draftOnly === true;
       const [row] = await tx
         .insert(documents)
         .values({
+          id: input.id,
           title: input.title,
-          content: input.content,
-          revision: firstRevision,
+          content: draftOnly ? '' : input.content,
+          revision: draftOnly ? noRevision : firstRevision,
           draftContent: input.content,
-          draftBaseRevision: firstRevision,
+          // eslint-disable-next-line no-null/no-null -- the draft of a document without a revision has no base
+          draftBaseRevision: draftOnly ? null : firstRevision,
         })
+        .onConflictDoNothing()
         .returning();
-      const created: DocumentRow = assertFound(row, 'new');
+      if (row === undefined) {
+        throw new UnprocessableEntityException(`Document ${input.id ?? 'new'} already exists`);
+      }
+      if (draftOnly) {
+        return toDocument(row);
+      }
+      const created: DocumentRow = row;
       await tx.insert(revisions).values({
         documentId: created.id,
         revision: created.revision,
@@ -176,6 +248,9 @@ export class DocumentsService {
    * is first committed as a revision of its own, then the save fails with 409 `stale_revision` at that
    * new revision. To a client that knows only revisions this is "changed elsewhere": it reloads the
    * draft text, or retries on the new revision with the draft kept in the history.
+   *
+   * A document without a revision yet looks to such a client like an empty text at revision 0. Its save, based
+   * on 0, becomes revision 1; a draft it never saw, and that the save would overwrite, is kept first, as above.
    */
   public async update(id: string, input: UpdateDocumentDto): Promise<Document> {
     const result: Document | ConflictDetail = await this.db.transaction(async (tx) => {
@@ -257,6 +332,9 @@ export class DocumentsService {
    *
    * So a success says that the draft text of `draftVersion` is the head, not that this call created the
    * revision or applied its `name`.
+   *
+   * On a document without a revision yet, the base is null or 0, and the version saved is revision 1. An empty
+   * draft there is the (empty) head, so it is a no-op: no empty first version.
    */
   public async createRevision(id: string, input: CreateRevisionDto): Promise<Document> {
     return this.db.transaction(async (tx) => {
@@ -273,8 +351,9 @@ export class DocumentsService {
       if (current.draftContent === current.content) {
         return toDocument(current);
       }
-      if (current.revision !== input.baseRevision) {
-        throw conflict(staleRevision(current.revision, input.baseRevision));
+      const baseRevision: number = input.baseRevision ?? noRevision;
+      if (current.revision !== baseRevision) {
+        throw conflict(staleRevision(current.revision, baseRevision));
       }
 
       return toDocument(await appendRevision(tx, current, current.title, current.draftContent, input.name));

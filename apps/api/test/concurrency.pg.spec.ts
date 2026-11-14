@@ -1,6 +1,7 @@
 /* eslint-disable no-null/no-null -- an unnamed version is sent as null, as the API does */
 import 'reflect-metadata';
-import { ConflictException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { ConflictException, UnprocessableEntityException } from '@nestjs/common';
 import type { ConflictBody, Document, DocumentDraft } from '@reviewr/shared';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
@@ -10,7 +11,8 @@ import * as schema from '../src/database/schema.js';
 import { DocumentsService } from '../src/documents/documents.service.js';
 
 /**
- * Row-lock tests of `saveDraft`, `update` and `createRevision` on a real PostgreSQL, with several
+ * Row-lock tests of `saveDraft`, `update` and `createRevision`, and of creations sent again with the same id
+ * (the unique key of their record), on a real PostgreSQL, with several
  * connections (the e2e tests run on PGlite, which runs one transaction at a time).
  *
  * `TEST_DATABASE_URL` points at a server where the user may create databases; the file creates its own
@@ -330,6 +332,43 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
           ['v2'],
           results.map((r) => ({ revision: r.revision, draftVersion: r.draft?.draftVersion ?? 0 })),
         );
+      }
+    });
+
+    it('the same creation sent concurrently creates one document, answered to every request', async () => {
+      for (let round: number = 0; round < rounds; round += 1) {
+        const input = { id: randomUUID(), title: 'Chapitre', content: 'premier jet', draftOnly: true as const };
+        const results = await Promise.all(Array.from({ length: racers }, async () => service.create(input)));
+
+        expect(results.map((r) => [r.id, r.revision, r.content])).toEqual(Array(racers).fill([input.id, 0, '']));
+        expect(results.map((r) => r.draft)).toEqual(
+          Array(racers).fill({ content: 'premier jet', draftVersion: 1, baseRevision: null }),
+        );
+        const { rows } = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM documents WHERE id = $1', [
+          input.id,
+        ]);
+        expect(rows[0]?.n).toBe(1);
+        expect(await revisionsOf(input.id)).toEqual([]);
+      }
+    });
+
+    it('concurrent creations with the same id and different bodies: one is created, the others refused', async () => {
+      for (let round: number = 0; round < rounds; round += 1) {
+        const id: string = randomUUID();
+        const results = await Promise.allSettled(
+          Array.from({ length: racers }, async (_, index) =>
+            service.create({ id, title: null, content: `texte ${index}`, draftOnly: true }),
+          ),
+        );
+        const created: Document[] = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
+        const refused: unknown[] = results.flatMap((r) => (r.status === 'rejected' ? [r.reason as unknown] : []));
+
+        expect(created).toHaveLength(1);
+        expect(refused).toHaveLength(racers - 1);
+        for (const reason of refused) {
+          expect(reason).toBeInstanceOf(UnprocessableEntityException);
+        }
+        expect((await service.get(id)).draft?.content).toBe(created[0]?.draft?.content);
       }
     });
 

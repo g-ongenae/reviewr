@@ -3,7 +3,7 @@ import { Transform } from 'class-transformer';
 import { IsOptional, IsString, MaxLength } from 'class-validator';
 
 /**
- * Body of `POST /documents`.
+ * Title and content of `POST /documents`, also extended by the body of `PUT /documents/:id`.
  */
 export class CreateDocumentDto implements CreateDocumentInput {
   /**
