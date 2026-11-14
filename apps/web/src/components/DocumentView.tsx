@@ -29,7 +29,11 @@ export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: 
     retry: (failureCount, error) => !isNotFound(error) && failureCount < 3,
   });
 
-  if (!id || (document.isError && isNotFound(document.error))) {
+  // A document known to be gone stays so while a later read is pending or fails for another reason (the server
+  // unreachable): only a read that finds the document says otherwise. Until then, the texts this tab holds for it
+  // stay reachable.
+  const entry = id ? entryOf(queryClient, id) : undefined;
+  if (!id || (document.isError && isNotFound(document.error)) || entry?.deleted === true) {
     const notFound = (
       <div className="not-found-page">
         {toolbarStart && <div className="not-found-toolbar">{toolbarStart}</div>}
@@ -43,7 +47,6 @@ export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: 
       </div>
     );
     // A document deleted elsewhere while this tab holds text for it: the text stays reachable.
-    const entry = id ? entryOf(queryClient, id) : undefined;
     return entry === undefined ? (
       notFound
     ) : (

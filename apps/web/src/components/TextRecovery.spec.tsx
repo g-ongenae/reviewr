@@ -329,6 +329,38 @@ describe('a document deleted elsewhere', () => {
     expect(unload().defaultPrevented).toBe(true);
   });
 
+  it('keeps the texts reachable while later reads of the deleted document fail for another reason', async () => {
+    await open();
+    type(typed);
+    await elapse(1000);
+    db.delete('doc-1');
+    await refetch();
+    expect(listed()).toEqual([['Your text', typed]]);
+
+    // The server becomes unreachable. A failed read says nothing about the document: the deletion stays known, and
+    // the page must not turn into "could not load" with the text out of reach.
+    intercept = (call) =>
+      call.method === 'GET' && call.path === '/documents/doc-1'
+        ? reply(503, { statusCode: 503, message: 'Service Unavailable' })
+        : undefined;
+    await act(async () => {
+      void queryClient.refetchQueries({ queryKey: queryKeys.document('doc-1') });
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(recovery()).not.toBeNull();
+    expect(listed()).toEqual([['Your text', typed]]);
+    expect(screen.getByRole('button', { name: 'Save as a new document' })).not.toBeNull();
+
+    // The same once the app forgot the query: while the read is pending, and once it has failed.
+    await leaveAndComeBack();
+    expect(recovery()).not.toBeNull();
+    expect(listed()).toEqual([['Your text', typed]]);
+    await elapse(10_000);
+    expect(recovery()).not.toBeNull();
+    expect(listed()).toEqual([['Your text', typed]]);
+    expect(unload().defaultPrevented).toBe(true);
+  });
+
   it('keeps a text whose save succeeded, when the answer arrives after the deletion was read', async () => {
     await open();
     delay = (call) => call.method === 'PUT';
