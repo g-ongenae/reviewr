@@ -11,12 +11,12 @@ import { CreateDocumentDto } from './create-document.dto.js';
  */
 export class CreateDocumentBodyDto extends CreateDocumentDto implements Partial<CreateDraftDocumentInput> {
   /** Client-generated document id: makes the creation safe to send again (see `CreateDraftDocumentInput`). */
-  @ValidateIf((_: CreateDocumentBodyDto, value: unknown) => value !== undefined)
+  @ValidateIf((dto: CreateDocumentBodyDto) => dto.id !== undefined)
   @IsUUID('all')
   public id?: string;
 
   /** Create no revision, only a draft holding `content`. Only `true` is accepted: omit it to create a revision. */
-  @ValidateIf((_: CreateDocumentBodyDto, value: unknown) => value !== undefined)
+  @ValidateIf((dto: CreateDocumentBodyDto) => dto.draftOnly !== undefined)
   @Equals(true)
   public draftOnly?: true;
 }
