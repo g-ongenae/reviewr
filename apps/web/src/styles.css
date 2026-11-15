@@ -226,6 +226,56 @@ button.danger {
   }
 }
 
+/* "Save version" and the button that names the version before saving it, joined as one control. */
+.split-action {
+  display: inline-flex;
+  flex: none;
+}
+
+.split-action > :first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.split-action > :last-child {
+  margin-left: 1px;
+  padding-inline: 0.3rem;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.split-action > .active {
+  background: var(--accent-dark);
+  color: #fff;
+}
+
+.version-name-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.version-name-form input {
+  flex: 1 1 8rem;
+  min-width: 0;
+  max-width: 24rem;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+}
+
+.version-name-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
 .status.dirty {
   color: var(--accent);
 }

@@ -385,7 +385,7 @@ describe('a document deleted elsewhere', () => {
     const later = `${typed} Il dormait enfin.`;
     const readsDocument = (call: Call) => call.method === 'GET' && call.path === '/documents/doc-1';
     const savesDraft = (call: Call) => call.method === 'PUT' && call.path === '/documents/doc-1/draft';
-    const savesVersion = (call: Call) => call.method === 'PUT' && call.path === '/documents/doc-1';
+    const savesVersion = (call: Call) => call.method === 'POST' && call.path === '/documents/doc-1/revisions';
     /** A read the app starts on its own (window focus, a remount), without waiting for it. */
     const startRead = async () => {
       act(() => void queryClient.refetchQueries({ queryKey: queryKeys.document('doc-1') }));

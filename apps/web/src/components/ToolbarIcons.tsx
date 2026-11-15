@@ -42,3 +42,10 @@ export const SaveIcon = () => (
     <path d="M7 3v4a1 1 0 0 0 1 1h7" />
   </Icon>
 );
+
+/** Opens more choices for the action beside it. */
+export const ChevronIcon = () => (
+  <Icon>
+    <path d="m6 9 6 6 6-6" />
+  </Icon>
+);
