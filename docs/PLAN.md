@@ -74,8 +74,9 @@ Web client — an autosave state machine, not just a debounce:
   - later: a page typed while the server is unreachable is kept in memory only, until the local buffer keeps it; a title typed on a page with no text is not saved until some text is typed;
 - local buffer in IndexedDB, restored after a crash or a failed request; it also keeps the base (server draft and `draftVersion` the edits started from):
   - the storage module `apps/web/src/autosave/localBuffer.ts`: writes land in call order, a delete can be conditional on the confirmed text, it never throws into the editor, and its schema is versioned for the outbox (done);
-  - use it from the editor and the Composer: write on every edit, delete once the server confirmed the save, restore on start; when the buffer answers a failure (unavailable, full, stalled), tell the writer the local copy is not being kept, and never reload or discard the text in memory;
-  - two tabs editing the same document share one entry, so the buffer keeps only the text written last: give each tab its own entry or a lock;
+  - used from the editor (done): every edit of a document that exists is written with its base, deleted once the server confirmed that exact text, and restored on start and before the document is shown; if the server moved meanwhile, the usual conflict runs with the right base; when the buffer cannot keep the text, one notice says so, and nothing in memory is reloaded or discarded;
+  - two tabs editing the same document (done): each tab writes its own entries and holds a lock while it lives; after a crash, the most recent copy becomes the local text and every other one stays listed, to copy or discard, until it is saved;
+  - later: a page whose document does not exist yet is not buffered (its entry must carry the client id and the creation body already sent, or a restore could create a second document); the texts of an unfinished merge, the text of a document deleted elsewhere and an unsaved title are still in memory only;
 - offline mode: an unreachable server (network error, 502/503/504) shows a "Server unreachable" notification, never a blocking error; edits and versions go to an outbox and are sent on reconnect;
 - reconciliation view when both sides moved: three-way word merge of base, mine and theirs, non-overlapping changes applied, conflicts resolved by the writer (mine, theirs, both, edit), the losing side kept as a named version (see [ARCHITECTURE.md](ARCHITECTURE.md#offline-and-reconciliation)):
   - the merge itself: the pure `@reviewr/merge` package, where overlapping, adjacent and ambiguous changes (repeated text) are conflicts (done);
@@ -90,7 +91,7 @@ Web client — an autosave state machine, not just a debounce:
     - to decide: a text that was saved and whose editor was left is no longer held by the tab, so if the document is then deleted elsewhere the tab shows "not found". The risk behind it is a delete made from a stale view, which destroys text saved since: make the delete carry what it saw (revision and `draftVersion`, 409 otherwise), or keep deleted documents recoverable for a while;
   - later: "keep all mine / all theirs" for texts with many conflicts;
   - run the package's tests on a real Hermes runtime (only the Hermes compiler was checked);
-- flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short, until the local buffer is used there);
+- flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short: the local buffer then brings the text back at the next start on this device);
 - tests with delayed responses, failed requests, typing during creation, and offline edits reconciled against a moved server draft.
 
 Mobile: switch to the draft and revision endpoints; restore goes into the editor as on the web. Same offline outbox (SQLite) and the same merge package; the phone is where offline writing happens most.

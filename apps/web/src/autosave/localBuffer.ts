@@ -6,7 +6,7 @@
  * three-way with the server's draft later. The key is the document id, or a key made by the client for a document that
  * does not exist on the server yet (its `base` is then `null`).
  *
- * Like the autosave core, it is framework-free: no React, no HTTP, and nothing imports it yet.
+ * Like the autosave core, it is framework-free: no React, no HTTP.
  *
  * Guarantees:
  *
@@ -32,16 +32,14 @@
  * - **Upgrades are not blocked by this tab.** When another tab opens a newer version, this connection closes itself;
  *   the next call reopens (and fails with `failed` if this tab's code is older than the database).
  *
+ * Used by `deviceBuffer.ts`, which mirrors the autosave machines into it under one key per tab and document, and
+ * restores what closed or crashed tabs left.
+ *
  * Not done yet:
  *
- * - **Wiring.** Nothing writes to the buffer yet. The editor and the Composer will `put` on every edit, `delete` with
- *   `ifContent` once the autosave core confirmed a save, and `list` on start to restore text left by a crash.
  * - **Outbox.** Pending operations (create, save draft, save version, rename) and their replay on reconnect are a
  *   separate store, added by a later schema version.
- * - **Multi-tab coordination.** Tabs share one database and nothing coordinates them. Two tabs editing the same
- *   document write under the same key, so the buffer holds whichever text was written last: the other tab's unsent
- *   text is then only in that tab's memory (and its own autosave), and is lost from the buffer if that tab crashes.
- *   On the server, the stale `draftVersion` of the second save is still caught as a conflict.
+ * - **Pages not created yet.** Their entries would need the creation's client id and body: nothing writes them yet.
  */
 
 /** The server draft the local edits started from. */

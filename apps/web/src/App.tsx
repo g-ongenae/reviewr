@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { isCreated, newDocumentId, useAutosaveGuard } from './autosave/useAutosave';
 import { DocumentList } from './components/DocumentList';
 import { DocumentView } from './components/DocumentView';
+import { LocalCopyNotice } from './components/LocalCopyNotice';
 import { ServerStatus } from './components/ServerStatus';
 import { SidebarToggle } from './components/SidebarToggle';
 import { confirmDiscardChanges } from './unsavedChanges';
@@ -61,7 +62,9 @@ export const App = () => {
           toolbarStart={sidebarOpen ? undefined : sidebarToggle}
         />
       </main>
-      <ServerStatus />
+      <ServerStatus>
+        <LocalCopyNotice />
+      </ServerStatus>
     </div>
   );
 };

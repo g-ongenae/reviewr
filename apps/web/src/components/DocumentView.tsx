@@ -3,9 +3,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useReducer, useState } from 'react';
 import { api, inlineError, isNotFound, queryKeys } from '../api';
-import { blankDocument, entryOf, isCreated } from '../autosave/useAutosave';
+import { blankDocument, entryOf, isCreated, useRestored, useWaitingTexts } from '../autosave/useAutosave';
 import { Editor } from './Editor';
-import { DeletedDocument } from './TextRecovery';
+import { DeletedDocument, HeldText, keptCopyLabel } from './TextRecovery';
 
 interface Props {
   id: string;
@@ -51,6 +51,9 @@ export const DocumentView = ({
   useEffect(() => {
     if (blankPage !== undefined && !uncreated) created();
   }, [blankPage, uncreated]);
+  // What this device kept of the document's text comes first: the server's text is not shown before it is restored.
+  const restored = useRestored(id, blankPage !== undefined);
+  const waiting = useWaitingTexts(id);
 
   if (uncreated) {
     return (
@@ -61,6 +64,35 @@ export const DocumentView = ({
         onDeleted={onDeleted}
         toolbarStart={toolbarStart}
       />
+    );
+  }
+
+  const loading = (
+    <div className="padded">
+      {toolbarStart}
+      <p className="muted">Loading…</p>
+    </div>
+  );
+  if (restored === 'pending') return loading;
+  if (restored === 'deferred') {
+    // Texts this device kept for the document wait for the server, to be decided on its draft.
+    return (
+      <div className="padded">
+        {toolbarStart}
+        <p className="muted">This document will open as soon as the server is back.</p>
+        {waiting.length > 0 && (
+          <div className="held-texts">
+            <p>
+              This device kept {waiting.length === 1 ? 'a text' : 'texts'} of yours for this document that the server
+              does not have yet. {waiting.length === 1 ? 'It is' : 'They are'} saved once the server is back; until
+              then, copy what you need.
+            </p>
+            {waiting.map((text) => (
+              <HeldText key={text} label={keptCopyLabel} text={text} />
+            ))}
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -98,14 +130,7 @@ export const DocumentView = ({
     );
   }
 
-  if (document.isPending) {
-    return (
-      <div className="padded">
-        {toolbarStart}
-        <p className="muted">Loading…</p>
-      </div>
-    );
-  }
+  if (document.isPending) return loading;
   if (document.isError) {
     const message = inlineError(document.error);
     return (
