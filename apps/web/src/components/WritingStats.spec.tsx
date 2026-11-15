@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createQueryClient } from '../queryClient';
-import { Composer } from './Composer';
+import { blankDocument } from '../autosave/useAutosave';
 import { Editor } from './Editor';
 
 const fetchMock = vi.mocked(fetch);
@@ -114,7 +114,7 @@ describe('WritingStatsPanel', () => {
   });
 
   it('has no last revision before the first save', () => {
-    renderWithQueries(<Composer onCreated={() => {}} />);
+    renderWithQueries(<Editor document={blankDocument('new-1')} isNew onDeleted={() => {}} />);
     expect(screen.queryByText('Last revision')).toBeNull();
   });
 
@@ -126,8 +126,8 @@ describe('WritingStatsPanel', () => {
   });
 
   it('can be hidden, and stays hidden on the next document', () => {
-    renderWithQueries(<Composer onCreated={() => {}} />);
-    fireEvent.change(screen.getByLabelText('New document'), { target: { value: 'A first line' } });
+    renderWithQueries(<Editor document={blankDocument('new-1')} isNew onDeleted={() => {}} />);
+    fireEvent.change(document.querySelector('textarea') as HTMLTextAreaElement, { target: { value: 'A first line' } });
     expect(stat('Words', 'Today')).toBe('+3');
     expect(stat('Characters', 'Today')).toBe('+12−0');
 

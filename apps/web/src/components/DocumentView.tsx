@@ -1,14 +1,20 @@
 import type { Document } from '@reviewr/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { useReducer } from 'react';
+import { useEffect, useEffectEvent, useReducer, useState } from 'react';
 import { api, inlineError, isNotFound, queryKeys } from '../api';
-import { entryOf } from '../autosave/useAutosave';
+import { blankDocument, entryOf, isCreated } from '../autosave/useAutosave';
 import { Editor } from './Editor';
 import { DeletedDocument } from './TextRecovery';
 
 interface Props {
   id: string;
+  /** The blank page: a document that may not exist on the server yet, created by its first save. */
+  blank?: boolean;
+  /** The blank page's document was just created. */
+  onCreated?: () => void;
+  /** The blank page's creation was refused: its text is now on the blank page `id`, to be created again. */
+  onCreateAgain?: (id: string) => void;
   onDeleted: () => void;
   onGoBack: () => void;
   /** Opens another document: one created from a text of this one, after it was deleted. */
@@ -18,16 +24,45 @@ interface Props {
 }
 
 /** Loads a document, then hands it to the editor. */
-export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: Props) => {
+export const DocumentView = ({
+  id,
+  blank = false,
+  onCreated,
+  onCreateAgain,
+  onDeleted,
+  onGoBack,
+  onOpen,
+  toolbarStart,
+}: Props) => {
   const queryClient = useQueryClient();
   /** Renders again once the writer discarded the texts of a deleted document. */
   const [, discarded] = useReducer((count: number) => count + 1, 0);
+  /** The blank page's document until the server has it: nothing is read from the server for it before. */
+  const [blankPage] = useState(() => (blank ? blankDocument(id) : undefined));
   const document = useQuery({
     queryKey: queryKeys.document(id),
     queryFn: () => api.getDocument(id),
-    enabled: id.length > 0,
+    enabled: id.length > 0 && (blankPage === undefined || isCreated(queryClient, id)),
     retry: (failureCount, error) => !isNotFound(error) && failureCount < 3,
   });
+  // Its creation puts the document in the cache: reading `data` here renders the page again then.
+  const uncreated = blankPage !== undefined && document.data === undefined && !isCreated(queryClient, id);
+  const created = useEffectEvent(() => onCreated?.());
+  useEffect(() => {
+    if (blankPage !== undefined && !uncreated) created();
+  }, [blankPage, uncreated]);
+
+  if (uncreated) {
+    return (
+      <Editor
+        document={blankPage}
+        isNew
+        onCreateAgain={onCreateAgain}
+        onDeleted={onDeleted}
+        toolbarStart={toolbarStart}
+      />
+    );
+  }
 
   // A document known to be gone stays so while a later read is pending or fails for another reason (the server
   // unreachable): only a read that finds the document says otherwise. Until then, the texts this tab holds for it
@@ -85,5 +120,6 @@ export const DocumentView = ({ id, onDeleted, onGoBack, onOpen, toolbarStart }: 
     );
   }
 
+  // The same element as the blank page's above: once created, the page stays the same editor.
   return <Editor document={document.data} onDeleted={onDeleted} toolbarStart={toolbarStart} />;
 };

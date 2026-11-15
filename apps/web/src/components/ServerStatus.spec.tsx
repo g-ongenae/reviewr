@@ -5,8 +5,9 @@ import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { reachability } from '../api';
 import { createQueryClient } from '../queryClient';
-import { Composer } from './Composer';
+import { blankDocument } from '../autosave/useAutosave';
 import { DocumentList } from './DocumentList';
+import { Editor } from './Editor';
 import { RevisionHistory } from './RevisionHistory';
 import { ServerStatus } from './ServerStatus';
 
@@ -97,18 +98,17 @@ describe('ServerStatus', () => {
     expect(screen.queryByText(/status 500/)).toBeNull();
   });
 
-  it('lets the writer keep their text when saving fails because the server is unreachable', async () => {
+  it('lets the writer keep their text when a new page cannot be created because the server is unreachable', async () => {
     serve(badGateway);
-    renderWithServerStatus(<Composer onCreated={() => {}} />);
+    renderWithServerStatus(<Editor document={blankDocument('new-1')} isNew onDeleted={() => {}} />);
 
-    const textarea = screen.getByLabelText<HTMLTextAreaElement>('New document');
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: 'A first line' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    expect(await screen.findByText('Server unreachable')).toBeTruthy();
+    expect(await screen.findByText('Server unreachable', undefined, { timeout: 3000 })).toBeTruthy();
     expect(textarea.value).toBe('A first line');
     expect(textarea.disabled).toBe(false);
-    expect(screen.getByText('Unsaved changes')).toBeTruthy();
+    expect(screen.getByText('Not saved · retrying')).toBeTruthy();
     expect(document.querySelector('.banner')).toBeNull();
   });
 });

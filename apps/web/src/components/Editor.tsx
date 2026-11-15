@@ -14,7 +14,7 @@ import type { ReactNode } from 'react';
 import { useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
-import { cacheDocument, draftOf, isGone, useAutosave } from '../autosave/useAutosave';
+import { cacheDocument, createAgain, draftOf, isGone, useAutosave } from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
@@ -26,6 +26,10 @@ import { useWritingStatsPanel, WritingStatsPanel, WritingStatsToggle } from './W
 
 interface Props {
   document: Document;
+  /** The document does not exist on the server yet (the blank page): the autosave creates it. */
+  isNew?: boolean;
+  /** The creation was refused: the text was moved to the blank page `id`, to be created again. */
+  onCreateAgain?: (id: string) => void;
   onDeleted: () => void;
   toolbarStart?: ReactNode;
 }
@@ -91,21 +95,23 @@ const stopText = (stop: Stop): string => {
   }
 };
 
-export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
+export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
-  const { autosave, state, discard } = useAutosave(document);
+  const { autosave, state, discard, pendingTitle, keepTitle } = useAutosave(document, isNew);
   /**
    * The title as typed (empty when untitled), saved on its own by a rename. Every edit of the field is numbered, and
    * the field is saved only once the server confirmed a rename sent at its latest edit: an edit back to an earlier
    * title is an edit like any other, sent again, since an answer may arrive, or be lost, for the one before it.
    */
-  const [title, setTitle] = useState(document.title ?? '');
-  const [titleEdit, setTitleEdit] = useState(0);
+  // A title typed before the document existed, on an earlier editor of this page, is still to be saved.
+  const [title, setTitle] = useState(() => (isNew ? pendingTitle : undefined) ?? document.title ?? '');
+  const [titleEdit, setTitleEdit] = useState(isNew && pendingTitle !== undefined ? 1 : 0);
   const [titleSaved, setTitleSaved] = useState(0);
   const titleDirty = titleSaved < titleEdit;
   const editTitle = (value: string) => {
     setTitle(value);
     setTitleEdit((edit) => edit + 1);
+    if (isNew) keepTitle(value);
   };
   /** The server's title as last read or confirmed: a new one replaces the field only when no edit is unsaved. */
   const [serverTitle, setServerTitle] = useState(document.title);
@@ -120,8 +126,15 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   const previousRevision = useLastRevisionBaseline(document);
   /** Whether "Save version" has something to save. */
   const changedSinceVersion = content !== document.content;
-  /** Text that leaving the page could lose, even though the autosave keeps trying in the background. */
-  const textAtRisk = state.status === 'retrying' || state.status === 'conflict' || state.status === 'rejected';
+  /**
+   * Text that leaving the page could lose, even though the autosave keeps trying in the background. A text whose
+   * document is not created yet is in no list: only this blank page leads back to it.
+   */
+  const textAtRisk =
+    state.status === 'retrying' ||
+    state.status === 'conflict' ||
+    state.status === 'rejected' ||
+    (isNew && content.trim() !== '');
 
   /** Renames the document: no version, the content and the draft are left alone. */
   const rename = useMutation({
@@ -146,12 +159,13 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   /** A title refused as it is waits for a change or for the field to lose focus. */
   const titleWaits = titleRetry && refused(rename.error);
 
-  // The title is saved soon after the writer stops typing; a failed rename is sent again after a while.
+  // The title is saved soon after the writer stops typing, once the document exists; a failed rename is sent again
+  // after a while.
   useEffect(() => {
-    if (!titleDirty || rename.isPending || titleWaits) return;
+    if (isNew || !titleDirty || rename.isPending || titleWaits) return;
     const timer = setTimeout(() => sendTitle(title, titleEdit), titleRetry ? titleRetryMs : titleDebounceMs);
     return () => clearTimeout(timer);
-  }, [title, titleEdit, titleDirty, rename.isPending, titleRetry, titleWaits, sendTitle]);
+  }, [isNew, title, titleEdit, titleDirty, rename.isPending, titleRetry, titleWaits, sendTitle]);
 
   /**
    * Saves a version: the draft first, then the server's draft of the counter the machine holds as confirmed becomes a
@@ -229,6 +243,9 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     }
   };
 
+  /** The blank page, nothing typed yet: it welcomes the writer. */
+  const welcome = isNew && content === '' && title === '';
+
   /** Whether the reconciliation view is open, in place of the text, while the draft is in conflict. */
   const [reconciling, setReconciling] = useState(false);
   // Once the conflict is resolved, the next one starts with the banner again.
@@ -270,7 +287,13 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
     },
   });
 
-  const canSave = changedSinceVersion && !save.isPending && state.status !== 'conflict' && state.status !== 'rejected';
+  const canSave =
+    changedSinceVersion &&
+    // A blank page is never created: there is nothing to save as a version.
+    (!isNew || content.trim() !== '') &&
+    !save.isPending &&
+    state.status !== 'conflict' &&
+    state.status !== 'rejected';
   const saveNow = useEffectEvent(() => {
     if (canSave) saveVersion(versionName);
   });
@@ -302,11 +325,16 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
   /** The text's state first; then the title's, while it is not saved. */
   const status = save.isPending
     ? 'Saving version…'
-    : state.status !== 'saved' || !titleDirty
-      ? statusText(state, document.revision, changedSinceVersion)
-      : titleRetry
-        ? `Title not saved${titleWaits ? '' : ' · retrying'}`
-        : 'Saving title…';
+    : isNew && state.status === 'saved'
+      ? // The blank page: nothing typed yet, or only a title, saved with the text once there is one.
+        titleDirty
+        ? 'Unsaved changes'
+        : ''
+      : state.status !== 'saved' || !titleDirty
+        ? statusText(state, document.revision, changedSinceVersion)
+        : titleRetry
+          ? `Title not saved${titleWaits ? '' : ' · retrying'}`
+          : 'Saving title…';
   const statusTooltip =
     state.status === 'retrying' ? describeError(state.error) : titleRetry ? describeError(rename.error) : status;
 
@@ -326,6 +354,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           <WritingStatsToggle open={showStats} onToggle={toggleStats} />
           <button
             className={showHistory ? 'toolbar-action active' : 'toolbar-action'}
+            disabled={isNew}
             onClick={() => setShowHistory((value) => !value)}
             aria-label={historyLabel}
             aria-expanded={showHistory}
@@ -336,7 +365,7 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
           </button>
           <button
             className="toolbar-action danger"
-            disabled={remove.isPending}
+            disabled={isNew || remove.isPending}
             onClick={() => window.confirm('Delete this document and its whole history?') && remove.mutate()}
             aria-label="Delete"
             title="Delete"
@@ -406,12 +435,23 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
             <WritingStatsPanel
               content={content}
               baseline={todayBaseline}
-              lastRevision={{ content: document.content, previous: previousRevision }}
+              // No version yet: nothing to compare with.
+              lastRevision={
+                document.revision === 0 ? undefined : { content: document.content, previous: previousRevision }
+              }
             />
           </div>
         )}
 
-        {state.status === 'rejected' ? (
+        {state.status === 'rejected' && isNew ? (
+          // The server's message names the document's id, which says nothing to the writer: it is in the tooltip.
+          <div className="banner error" role="alert" title={describeError(state.error)}>
+            <span>This text could not be saved as a new document. It is kept here: try again to save it.</span>
+            <button className="primary" onClick={() => onCreateAgain?.(createAgain(queryClient, document.id))}>
+              Try again
+            </button>
+          </div>
+        ) : state.status === 'rejected' ? (
           <div className="banner error" role="alert">
             <span>
               {state.permanent
@@ -507,19 +547,26 @@ export const Editor = ({ document, onDeleted, toolbarStart }: Props) => {
               maxLength={titleMaxLength}
               onChange={(event) => editTitle(event.target.value)}
               onBlur={() => {
-                if (titleDirty && !rename.isPending) sendTitle(title, titleEdit);
+                if (!isNew && titleDirty && !rename.isPending) sendTitle(title, titleEdit);
               }}
             />
             <textarea
               ref={textField}
               className="content-input"
-              placeholder="Start writing…"
+              // The blank page's welcome already invites to write.
+              placeholder={welcome ? undefined : 'Start writing…'}
               value={content}
               maxLength={contentMaxLength}
               readOnly={busy}
               onChange={(event) => autosave.edit(event.target.value)}
               autoFocus
             />
+            {welcome && (
+              <div className="blank-page-welcome" aria-hidden="true">
+                <h1>What do you want to tell today?</h1>
+                <p>Or start reviewing an existing text from the sidebar.</p>
+              </div>
+            )}
           </>
         )}
       </section>
