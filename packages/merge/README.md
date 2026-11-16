@@ -39,3 +39,37 @@ const text = resolveMerge(result, resolutions);
     by paragraph, and tokens are never matched across an unchanged line. Base `Avant. Oui.\nOui.\nAprès.`, mine
     deleting a `Oui.` line and adding 1,100 words at the end, theirs `Avant. Si.\nOui.\nAprès.` merges silently.
 - A conflict is resolved with `'mine'`, `'theirs'`, `'both'` (mine then theirs, exactly as written) or `{ edit }`.
+
+## Tests on Hermes
+
+The phone runs JavaScript on Hermes, whose regular expressions, strings and sorting are not V8's. `pnpm test` runs the
+specs on Node with Vitest; `pnpm --filter @reviewr/merge test:hermes` runs the **same specs** on the Hermes VM that
+React Native 0.88 ships (the CI's `hermes` job does it on every push), three times:
+
+1. on Node, to check the harness itself;
+2. on Hermes from source, as in a development build;
+3. on Hermes from bytecode compiled by `hermesc -O`, as in a release build.
+
+How: `hermes/run.mjs` transpiles each file of `src` with TypeScript (target ES2023, as the package's build), wraps it as
+a CommonJS module and bundles it with `hermes/harness.js`, a small stand-in for Vitest (`describe`, `it`, `it.each`,
+`expect` with `toBe`, `toEqual`, `toContainEqual`, `toBeGreaterThan`, `toBeLessThan`, `toThrow`). Each failure is
+printed with its name and the run fails if any case fails, or if no case ran. No spec is left out: the 856 cases run on
+both engines.
+
+The binaries: React Native 0.88.0 uses Hermes `260318099.0.4` (its `hermes-compiler` dependency), from the tag
+`hermes-v260318099.0.4` of facebook/hermes. That release publishes no standalone VM for Linux (npm has the compiler only,
+Maven the iOS and Android libraries), so `hermes/get-hermes.sh` builds `hermes` and `hermesc` from the tag's source
+tarball, pinned by commit and checked by SHA-256, into `.hermes/` (ignored by git). It needs cmake, ninja, a C++
+compiler and the ICU headers (`sudo apt-get install cmake ninja-build libicu-dev`); a few minutes on 4 cores.
+
+```sh
+packages/merge/hermes/get-hermes.sh   # once
+pnpm --filter @reviewr/merge test:hermes
+```
+
+Not exactly the phone: on Linux, Hermes uses ICU for `String.prototype.normalize` and locale functions, where Android
+uses Java and iOS CoreFoundation (only a spec uses `normalize`, to build its input). Regular expressions, including
+`\p{…}`, use Hermes' own Unicode tables on every platform.
+
+Another package can reuse this: `run.mjs` bundles any `src` whose specs import only `vitest` and relative files, and
+needs only its paths to be set from the package it runs for (move `hermes/` to a shared place then).

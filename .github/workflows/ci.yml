@@ -51,11 +51,14 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile --filter @reviewr/merge
+      # The VM links the system ICU: a new Ubuntu release (ImageOS, e.g. ubuntu24) gets a new build.
+      - id: image
+        run: echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
       - id: cache
         uses: actions/cache@v4
         with:
           path: packages/merge/.hermes/260318099.0.4/bin
-          key: hermes-${{ env.ImageOS }}-${{ hashFiles('packages/merge/hermes/get-hermes.sh') }}
+          key: hermes-${{ steps.image.outputs.os }}-${{ hashFiles('packages/merge/hermes/get-hermes.sh') }}
       - if: steps.cache.outputs.cache-hit != 'true'
         run: sudo apt-get install -y --no-install-recommends ninja-build libicu-dev
       # A no-op when the cache has the binaries.

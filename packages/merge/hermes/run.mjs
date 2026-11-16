@@ -7,7 +7,7 @@
  * `vitest` is replaced by `harness.js`, and the specs are required in order. Usage: node hermes/run.mjs
  * Looks for `hermes` and `hermesc` in $HERMES_BIN, or where `get-hermes.sh` puts them.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,17 +87,21 @@ console.log(`Bundled ${specs.join(', ')} into ${relative(process.cwd(), script)}
 
 execFileSync(join(bin, 'hermesc'), ['-O', '-emit-binary', '-out', bytecode, script], { stdio: 'inherit' });
 
-let failed = false;
+// A run passes if it exits with 0 and its last line says that every case passed, as many as on Node.
+const counts = [];
 for (const [title, command, args] of [
   ['On Node (V8), to check the harness:', process.execPath, [script]],
   ['On Hermes, from source:', join(bin, 'hermes'), [script]],
   ['On Hermes, from bytecode compiled by hermesc -O:', join(bin, 'hermes'), ['-b', bytecode]],
 ]) {
   console.log(`\n${title}`);
-  try {
-    execFileSync(command, args, { stdio: 'inherit' });
-  } catch {
-    failed = true;
-  }
+  const { status, stdout, stderr } = spawnSync(command, args, { encoding: 'utf8' });
+  process.stdout.write(stdout);
+  process.stderr.write(stderr);
+  const summary = /: (\d+) passed, 0 failed, (\d+) cases\n$/u.exec(stdout);
+  counts.push(status === 0 && summary !== null && summary[1] === summary[2] ? Number(summary[2]) : Number.NaN);
 }
-process.exit(failed ? 1 : 0);
+if (!counts.every((count) => count === counts[0] && count > 0)) {
+  console.error('\nThe specs did not all pass on every run, or the runs did not count the same cases.');
+  process.exit(1);
+}
