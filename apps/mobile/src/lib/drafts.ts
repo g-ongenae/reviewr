@@ -52,7 +52,14 @@ export interface DraftsOptions {
   /** A document the server answered with: its text and revision (a version, a reconciliation), or its title. */
   onDocument: (document: Document, part: 'text' | 'title') => void;
   debounceMs?: number;
+  now?: () => Date;
 }
+
+/** How a restore ended: `refused` while a conflict or a deletion holds the text, `failed` when it could not be kept. */
+export type RestoreOutcome = { kind: 'restored' } | { kind: 'refused' } | { kind: 'failed'; error: unknown };
+
+/** Names the version a restore keeps by its day, as `versionName` of `@reviewr/reconcile` does. */
+const day = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
 
 /** What the app keeps for an open document, outside its screen: the autosave, its reconciliation, the title. */
 export interface Entry {
@@ -78,13 +85,20 @@ export interface Drafts {
   /** Saves every document now (the app goes to the background). */
   flushAll(): void;
   /** Saves the draft, then makes it a version. Undefined when the draft could not be saved: the status says why. */
-  saveVersion(id: string, revision: number): Promise<Document | undefined>;
+  saveVersion(id: string, revision: number, name?: string): Promise<Document | undefined>;
   /** In a draft conflict: keeps the other device's text as a version, then saves the local text. */
   keepMine(id: string): Promise<void>;
   /** Whether "restore" may replace the text on screen now: not while a conflict or a deletion holds it. */
   canRestore(id: string): boolean;
-  /** Puts an old version's title and text in the editor as an edit. False when `canRestore` is false. */
-  restore(id: string, version: { title: string | null; content: string }): boolean;
+  /**
+   * Puts an old version's title and text in the editor as an edit. A text on screen that is not the head revision's
+   * (`head`) is first kept as a version; if it cannot be, nothing is restored. `refused` when `canRestore` is false.
+   */
+  restore(
+    id: string,
+    version: { title: string | null; content: string },
+    head: { revision: number; content: string },
+  ): Promise<RestoreOutcome>;
   /** Drops a deleted document's entry without saving. */
   discard(id: string): void;
 }
@@ -99,7 +113,7 @@ export const shownDocument = (drafts: Drafts, id: string, read: Document | undef
   read ?? drafts.get(id)?.document;
 
 export const createDrafts = (options: DraftsOptions): Drafts => {
-  const { report, onDraft, onDocument, debounceMs } = options;
+  const { report, onDraft, onDocument, debounceMs, now = () => new Date() } = options;
   const entries = new Map<string, Entry>();
 
   const reported = async <T>(request: () => Promise<T>): Promise<T> => {
@@ -140,6 +154,7 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
       api,
       isConflict,
       onDocument: (saved) => onDocument(saved, 'text'),
+      now,
     });
     const title = createTitleSaver({
       initial: document.title,
@@ -190,6 +205,35 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
     return state.status !== 'conflict' && !(state.status === 'rejected' && state.permanent);
   };
 
+  const saveVersion = async (id: string, revision: number, name?: string): Promise<Document | undefined> => {
+    const { autosave } = entryOf(id);
+    const text = autosave.getSnapshot().content;
+    if ((await autosave.flush()) !== 'saved') return undefined;
+    // The flush may end on a later text, typed after the tap and sent along with it: that one is not the version.
+    const { draftVersion, content } = autosave.getSnapshot().base;
+    if (content !== text) throw textMoved;
+    let baseRevision = revision;
+    // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const saved = await api.createRevision(id, {
+          name,
+          draftVersion,
+          baseRevision: baseRevision === 0 ? null : baseRevision,
+        });
+        autosave.refresh(draftOf(saved));
+        onDocument(saved, 'text');
+        return saved;
+      } catch (error) {
+        const conflict = conflictOf(error);
+        // The draft moved elsewhere: the local text stays, and is a conflict unless the draft holds it.
+        if (conflict?.code === 'draft_conflict') autosave.refresh(conflict.draft, true);
+        if (conflict?.code !== 'stale_revision' || attempt === 3) throw error;
+        baseRevision = conflict.revision;
+      }
+    }
+  };
+
   const read = (document: Document) => {
     const entry = entries.get(document.id);
     if (entry === undefined) return;
@@ -233,33 +277,7 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
       }
     },
 
-    async saveVersion(id, revision) {
-      const { autosave } = entryOf(id);
-      const text = autosave.getSnapshot().content;
-      if ((await autosave.flush()) !== 'saved') return undefined;
-      // The flush may end on a later text, typed after the tap and sent along with it: that one is not the version.
-      const { draftVersion, content } = autosave.getSnapshot().base;
-      if (content !== text) throw textMoved;
-      let baseRevision = revision;
-      // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
-      for (let attempt = 1; ; attempt++) {
-        try {
-          const saved = await api.createRevision(id, {
-            draftVersion,
-            baseRevision: baseRevision === 0 ? null : baseRevision,
-          });
-          autosave.refresh(draftOf(saved));
-          onDocument(saved, 'text');
-          return saved;
-        } catch (error) {
-          const conflict = conflictOf(error);
-          // The draft moved elsewhere: the local text stays, and is a conflict unless the draft holds it.
-          if (conflict?.code === 'draft_conflict') autosave.refresh(conflict.draft, true);
-          if (conflict?.code !== 'stale_revision' || attempt === 3) throw error;
-          baseRevision = conflict.revision;
-        }
-      }
-    },
+    saveVersion,
 
     async keepMine(id) {
       const { autosave, session } = entryOf(id);
@@ -269,12 +287,28 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
 
     canRestore,
 
-    restore(id, version) {
-      if (!canRestore(id)) return false;
+    async restore(id, version, head) {
+      if (!canRestore(id)) return { kind: 'refused' };
       const { autosave, title } = entryOf(id);
+      const text = autosave.getSnapshot().content;
+      // The text on screen may be in no version: it is kept as one before it is replaced.
+      if (text !== head.content) {
+        let kept: Document | undefined;
+        try {
+          kept = await saveVersion(id, head.revision, `Before restore — ${day.format(now())}`);
+        } catch (error) {
+          return { kind: 'failed', error };
+        }
+        if (kept === undefined) {
+          const state = autosave.getSnapshot();
+          if (state.status === 'retrying' || state.status === 'rejected') return { kind: 'failed', error: state.error };
+          return { kind: 'refused' };
+        }
+      }
+      if (!canRestore(id) || autosave.getSnapshot().content !== text) return { kind: 'failed', error: textMoved };
       title.edit(version.title ?? '');
       autosave.edit(version.content);
-      return true;
+      return { kind: 'restored' };
     },
 
     discard(id) {

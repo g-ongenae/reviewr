@@ -16,6 +16,7 @@ const setup = (content = 'base') => {
     onDraft: () => undefined,
     onDocument: (document) => documents.push(document),
     debounceMs,
+    now: () => new Date('2026-11-16T10:00:00Z'),
   });
   const entry = drafts.open(server.read());
   const leave = drafts.hold('doc');
@@ -305,24 +306,54 @@ describe('createDrafts', () => {
   });
 
   describe('restore', () => {
-    it('puts the old version in the editor as an edit, saved as the draft without a revision', async () => {
+    const old = { title: 'Old title', content: 'an old text' };
+
+    it('keeps the text it replaces as a version, then puts the old one in the editor as the draft', async () => {
       const { server, drafts, entry, state } = setup();
       entry.autosave.edit('today');
-      await wait(debounceMs);
-      expect(drafts.restore('doc', { title: 'Old title', content: 'an old text' })).toBe(true);
+      expect(await drafts.restore('doc', old, server.read())).toEqual({ kind: 'restored' });
+      expect(server.revisions.at(-1)).toMatchObject({ revision: 2, content: 'today', name: 'Before restore — 16 Nov' });
       expect(state()).toMatchObject({ status: 'unsaved', content: 'an old text' });
       expect(entry.title.getSnapshot().value).toBe('Old title');
       await wait(debounceMs);
       expect(server.draft.content).toBe('an old text');
       expect(server.document.title).toBe('Old title');
+      expect(server.revisions).toHaveLength(2);
+    });
+
+    it('needs no version when the text on screen is the head revision', async () => {
+      const { server, drafts, state } = setup();
+      expect(await drafts.restore('doc', old, server.read())).toEqual({ kind: 'restored' });
+      expect(state().content).toBe('an old text');
       expect(server.revisions).toHaveLength(1);
+    });
+
+    it('restores nothing when the text cannot be kept first, and leaves the editor untouched', async () => {
+      const { server, drafts, entry, state } = setup();
+      server.failing = new NetworkError(new TypeError('offline'));
+      entry.autosave.edit('today');
+      expect(await drafts.restore('doc', old, server.read())).toMatchObject({ kind: 'failed' });
+      expect(state().content).toBe('today');
+      expect(entry.title.getSnapshot().value).toBe('');
+      server.failing = undefined;
+      await wait(30_000);
+      expect(server.draft.content).toBe('today');
+    });
+
+    it('restores nothing when the draft moved elsewhere while the text was being kept', async () => {
+      const { server, drafts, entry, state } = setup();
+      entry.autosave.edit('today');
+      await wait(debounceMs);
+      server.otherDevice('theirs');
+      expect(await drafts.restore('doc', old, server.read())).toMatchObject({ kind: 'failed' });
+      expect(state()).toMatchObject({ status: 'conflict', content: 'today' });
     });
 
     it('is refused while a conflict holds the text, which stays', async () => {
       const context = setup();
       await conflict(context);
       expect(context.drafts.canRestore('doc')).toBe(false);
-      expect(context.drafts.restore('doc', { title: null, content: 'an old text' })).toBe(false);
+      expect(await context.drafts.restore('doc', old, context.server.read())).toEqual({ kind: 'refused' });
       expect(context.state().content).toBe('mine');
     });
   });

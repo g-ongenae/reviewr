@@ -25,16 +25,26 @@ export default function HistoryScreen() {
   });
   const currentRevision = revisions.data?.[0]?.revision;
 
-  // Restoring puts the old version in the editor as an edit: the autosave sends it as the draft, and no revision is
-  // created. Not while a change made on another device holds the text: that would drop the text on screen.
-  const restore = () => {
-    if (preview.data === undefined) return;
-    if (draftsOf(queryClient).restore(id, preview.data)) {
+  // Restoring puts the old version in the editor as an edit: the autosave sends it as the draft. The text it replaces
+  // is kept as a version first, unless it is the head's. Never while a conflict or a deletion holds the text.
+  const [restoring, setRestoring] = useState(false);
+  const restore = async () => {
+    if (preview.data === undefined || document.data === undefined) return;
+    setRestoring(true);
+    const outcome = await draftsOf(queryClient).restore(id, preview.data, document.data);
+    setRestoring(false);
+    if (outcome.kind === 'restored') {
       router.back();
-    } else {
+    } else if (outcome.kind === 'refused') {
       Alert.alert(
         'Not restored',
         'This document was changed on another device, or deleted: your text in the editor is kept as it is. Resolve that first.',
+      );
+    } else {
+      const detail = inlineError(outcome.error) ?? 'the server is unreachable';
+      Alert.alert(
+        'Not restored',
+        `Your current text could not be kept as a version first (${detail}), so nothing was restored. Your text is still in the editor.`,
       );
     }
   };
@@ -83,8 +93,12 @@ export default function HistoryScreen() {
                   <>
                     <Text style={[styles.previewText, { color: theme.text }]}>{preview.data.content}</Text>
                     {item.revision !== currentRevision && (
-                      <Pressable style={[styles.restoreButton, { backgroundColor: theme.accent }]} onPress={restore}>
-                        <Text style={styles.restoreLabel}>Restore into editor</Text>
+                      <Pressable
+                        style={[styles.restoreButton, { backgroundColor: theme.accent }]}
+                        disabled={restoring}
+                        onPress={() => void restore()}
+                      >
+                        <Text style={styles.restoreLabel}>{restoring ? 'Restoring…' : 'Restore into editor'}</Text>
                       </Pressable>
                     )}
                   </>
