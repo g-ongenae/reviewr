@@ -161,7 +161,8 @@ let running = false;
  * Registers an asynchronous assertion. The test gets a thenable, not the promise, so the runner knows whether the
  * test took the outcome: then a failure is the test's to throw or to handle, as with a promise in Vitest. Outside a
  * test, as in Vitest, it is the promise itself and nobody else's business: a failure nobody handles is an unhandled
- * rejection, which stops a run that has not started its tests yet, and ends Node with an error after a run.
+ * rejection, which fails a run that starts right after the specs were collected, and ends Node with an error after a
+ * run.
  */
 const asyncAssertion = (promise) => {
   if (asyncAssertions === undefined) {
@@ -542,9 +543,10 @@ const createHarness = (log) => {
     }
     running = true;
     const unhandled = [];
-    // Watched before anything else, so that a rejection left unhandled while the specs were collected is seen too.
-    const stopWatching = watchUnhandledRejections((reason) => unhandled.push(reason));
+    let stopWatching = () => {};
     try {
+      // Watched before anything else, so that a rejection left unhandled while the specs were collected is seen too.
+      stopWatching = watchUnhandledRejections((reason) => unhandled.push(reason));
       await runTests(engine, unhandled);
     } finally {
       stopWatching();
