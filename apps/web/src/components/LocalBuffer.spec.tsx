@@ -1,4 +1,10 @@
-import type { CreateDraftDocumentInput, Document, DocumentSummary, SaveDraftInput } from '@reviewr/shared';
+import type {
+  CreateDraftDocumentInput,
+  Document,
+  DocumentSummary,
+  RenameDocumentInput,
+  SaveDraftInput,
+} from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, within, type RenderResult } from '@testing-library/react';
@@ -10,6 +16,7 @@ import { App } from '../App';
 import { configureDeviceBuffer, type Locks } from '../autosave/deviceBuffer';
 import {
   openLocalBuffer,
+  type BufferEntry,
   type BufferFailureReason,
   type LocalBuffer,
   type LocalBufferOptions,
@@ -39,8 +46,15 @@ const original = 'Il veillait.';
 let db: Map<string, Document>;
 /** Every text the server ever saved as a draft. */
 let everSaved: Set<string>;
+/** The body of each creation the server took, by id: kept after a deletion, as the server keeps the id. */
+let creations: Map<string, string>;
 
-/** The API's rules for listing and reading documents, and for saving a draft. */
+const error = (statusCode: number, message: string) => reply(statusCode, { statusCode, message });
+
+/**
+ * The API's rules for listing and reading documents, saving a draft and renaming; and for a creation: the same id and
+ * body answer the document as it is now, another body is refused (422), and so is the id of a deleted document (410).
+ */
 const fakeApi = ({ method, path, body }: Call): Response => {
   if (method === 'GET' && path === '/health') return reply(200, { status: 'ok' });
   if (method === 'GET' && path === '/documents') {
@@ -55,8 +69,14 @@ const fakeApi = ({ method, path, body }: Call): Response => {
   }
   if (method === 'POST' && path === '/documents') {
     const input = body as CreateDraftDocumentInput;
-    const existing = db.get(input.id);
-    if (existing !== undefined) return reply(201, existing);
+    const key = JSON.stringify([input.title ?? null, input.content, input.draftOnly]);
+    const recorded = creations.get(input.id);
+    if (recorded !== undefined) {
+      if (recorded !== key) return error(422, `Document ${input.id} was already created with another body`);
+      const existing = db.get(input.id);
+      return existing === undefined ? error(410, `Document ${input.id} was deleted`) : reply(201, existing);
+    }
+    creations.set(input.id, key);
     const created: Document = {
       id: input.id,
       title: input.title ?? null,
@@ -86,6 +106,12 @@ const fakeApi = ({ method, path, body }: Call): Response => {
     everSaved.add(input.content);
     return reply(200, saved);
   }
+  if (method === 'PATCH' && sub === undefined) {
+    const { title } = body as RenameDocumentInput;
+    const renamed = { ...document, title: title?.trim() ? title : null };
+    db.set(document.id, renamed);
+    return reply(200, renamed);
+  }
   return notFound();
 };
 
@@ -104,6 +130,8 @@ const serverDraft = () => db.get('doc-1')?.draft?.content;
 let calls: Call[];
 /** Requests matching `lose` fail as a network error: the server is unreachable. */
 let lose: (call: Call) => boolean;
+/** Requests matching `loseAnswer` reach the server, but their answer is lost: the page sees a network error. */
+let loseAnswer: (call: Call) => boolean;
 /** Requests matching `hold` wait for `releaseHeld`. */
 let hold: (call: Call) => boolean;
 let held: (() => void)[];
@@ -166,6 +194,8 @@ let heldLocks: Map<string, number>;
 let claimsWait: boolean;
 let pendingClaims: { tab: number; grant: () => void }[];
 let tabs: number;
+/** The pages opened in this test: whatever they still hold stops with the test, so no machine saves into the next. */
+const opened: QueryClient[] = [];
 
 const locksOf = (tab: number): Locks => ({
   request: (name: string, ...rest: unknown[]) => {
@@ -234,7 +264,7 @@ const crashable = (real: LocalBuffer = openLocalBuffer(bufferOptions())): Crasha
     get: (key) => call(() => real.get(key)),
     list: () => call(() => real.list()),
     put: (key, value) => {
-      const record = { content: value.content, base: value.base };
+      const record = { content: value.content, base: value.base, page: value.page };
       return call(() => (buffer.faults.put ? Promise.resolve(failure(buffer.faults.put)) : real.put(key, record)));
     },
     delete: (key, condition) =>
@@ -304,6 +334,7 @@ const load = async (hash = '#/documents/doc-1', options: LoadOptions = {}) => {
       await settle();
     },
   };
+  opened.push(queryClient);
   await elapse();
   return page;
 };
@@ -343,8 +374,10 @@ beforeEach(() => {
     ]),
   );
   everSaved = new Set();
+  creations = new Map();
   calls = [];
   lose = () => false;
+  loseAnswer = () => false;
   hold = () => false;
   held = [];
   factory = new IDBFactory();
@@ -364,12 +397,17 @@ beforeEach(() => {
     };
     calls.push(call);
     if (lose(call)) return Promise.reject(new TypeError('Failed to fetch'));
+    if (loseAnswer(call)) {
+      fakeApi(call);
+      return Promise.reject(new TypeError('Failed to fetch'));
+    }
     if (hold(call)) return new Promise<Response>((resolve) => held.push(() => resolve(fakeApi(call))));
     return Promise.resolve(fakeApi(call));
   });
 });
 
 afterEach(async () => {
+  for (const queryClient of opened.splice(0)) abandonAutosave(queryClient);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
   });
@@ -382,6 +420,7 @@ afterEach(async () => {
 });
 
 const isDraftSave = (call: Call) => call.method === 'PUT' && call.path.endsWith('/draft');
+const isCreation = (call: Call) => call.method === 'POST' && call.path === '/documents';
 
 describe('the local buffer, in one tab', () => {
   it('keeps every edit with its base, and deletes it once the server confirmed that very text', async () => {
@@ -760,14 +799,6 @@ describe('two tabs on one document', () => {
     expect(textarea(two).value).toBe('Le texte du premier onglet.');
     expect(listed(two)).toEqual([]);
   });
-
-  it('writes nothing for a page whose document is not created yet', async () => {
-    lose = () => true;
-    const page = await load('');
-    type(page, 'Une page neuve.');
-    await elapse(1000);
-    expect(await stored()).toEqual([]);
-  });
 });
 
 describe('adoption, through crashes and races', () => {
@@ -925,7 +956,8 @@ describe('adoption, through crashes and races', () => {
     expect(held).toHaveLength(1);
     type(first, 'Une page neuve.');
     await settle();
-    expect(await stored()).toEqual([]);
+    const { id: created } = calls.find(isCreation)?.body as CreateDraftDocumentInput;
+    expect(await stored()).toEqual([[`tab-1 ${created}`, 'Une page neuve.']]);
 
     lose = isDraftSave;
     await releaseHeld();
@@ -1237,5 +1269,365 @@ describe('the waiting texts, kept in line with the buffer', () => {
     expect(serverDraft()).toBe('Hors ligne.');
     expect(unload()).toBe(false);
     expect(textarea(page).value).toBe(original);
+  });
+});
+
+describe('a page whose document does not exist yet', () => {
+  const unload = () => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  /** The documents created from pages. */
+  const created = () => [...db.values()].filter((document) => document.id !== 'doc-1' && document.id !== 'doc-2');
+  /** Their drafts, sorted. */
+  const pages = () =>
+    created()
+      .map((document) => document.draft?.content)
+      .sort();
+  const creationsSent = () => calls.filter(isCreation).map((call) => call.body as CreateDraftDocumentInput);
+  /** Every creation sent for one id had the same body. */
+  const oneBodyPerId = () => {
+    const bodies = new Map<string, Set<string>>();
+    for (const { id, content } of creationsSent()) bodies.set(id, (bodies.get(id) ?? new Set()).add(content));
+    return [...bodies.values()].every((set) => set.size === 1);
+  };
+  /** Every record of the buffer, as stored. */
+  const records = async () => {
+    let entries: BufferEntry[] = [];
+    await raw(async (buffer) => {
+      entries = (await buffer.list()).entries;
+    });
+    return entries.map(({ key, content, base, page }) => ({ key, content, base, page }));
+  };
+  const titleField = (page: Page) => page.view.container.querySelector<HTMLInputElement>('.title-input');
+  const tryAgain = (page: Page) => within(page.view.container).queryByRole('button', { name: 'Try again' });
+
+  it('keeps a page typed before anything was sent, and creates it once after a crash', async () => {
+    const first = await load('');
+    type(first, 'Une page.');
+    await settle();
+    const [record] = await records();
+    expect(record).toMatchObject({ content: 'Une page.', base: null, page: { creation: null } });
+    const id = record?.key.replace(/^tab-1 /, '') ?? '';
+    await first.crash();
+    expect(creationsSent()).toEqual([]);
+
+    const second = await load('');
+    expect(textarea(second).value).toBe('Une page.');
+    await elapse(1000);
+    expect(pages()).toEqual(['Une page.']);
+    expect(creationsSent()).toEqual([{ id, content: 'Une page.', draftOnly: true }]);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('sends the same creation again after its answer was lost, then the text typed since as a draft', async () => {
+    loseAnswer = isCreation;
+    const first = await load('');
+    type(first, 'Une page.');
+    await elapse(1000);
+    expect(pages()).toEqual(['Une page.']);
+    type(first, 'Une page neuve.');
+    await settle();
+    expect(await records()).toMatchObject([
+      { content: 'Une page neuve.', base: null, page: { creation: 'Une page.' } },
+    ]);
+    await first.crash();
+
+    loseAnswer = () => false;
+    const second = await load('');
+    expect(textarea(second).value).toBe('Une page neuve.');
+    await elapse(1000);
+    expect(pages()).toEqual(['Une page neuve.']);
+    expect(created()).toHaveLength(1);
+    expect(new Set(creationsSent().map(({ content }) => content))).toEqual(new Set(['Une page.']));
+    expect(oneBodyPerId()).toBe(true);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('saves the text typed after the creation was answered, once, at the document’s address', async () => {
+    lose = isDraftSave;
+    const first = await load('');
+    type(first, 'Une page.');
+    await elapse(1000);
+    type(first, 'Une page neuve.');
+    await elapse(1000);
+    const id = created()[0]?.id ?? '';
+    expect(pages()).toEqual(['Une page.']);
+    expect(await records()).toEqual([
+      { key: `tab-1 ${id}`, content: 'Une page neuve.', base: { content: 'Une page.', draftVersion: 1 } },
+    ]);
+    await first.crash();
+
+    lose = () => false;
+    const second = await load(`#/documents/${id}`);
+    expect(textarea(second).value).toBe('Une page neuve.');
+    await elapse(1000);
+    expect(pages()).toEqual(['Une page neuve.']);
+    expect(creationsSent()).toHaveLength(1);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('brings the page back on the blank page while the server is unreachable, editable, and creates it once', async () => {
+    lose = () => true;
+    const first = await load('');
+    type(first, 'Hors ligne.');
+    await elapse(1000);
+    await first.crash();
+
+    const second = await load('');
+    expect(textarea(second).value).toBe('Hors ligne.');
+    expect(textarea(second).readOnly).toBe(false);
+    type(second, 'Hors ligne, encore.');
+    await elapse(1000);
+    // The gone tab's entry went once this tab's write of its text was answered.
+    const [kept, ...others] = await records();
+    expect(others).toEqual([]);
+    expect(kept?.key).toMatch(/^tab-2 /);
+    expect(kept).toMatchObject({ content: 'Hors ligne, encore.', page: { creation: 'Hors ligne.' } });
+    expect(unload()).toBe(true);
+
+    lose = () => false;
+    await elapse(30_000);
+    expect(pages()).toEqual(['Hors ligne, encore.']);
+    expect(new Set(creationsSent().map(({ content }) => content))).toEqual(new Set(['Hors ligne.']));
+    expect(oneBodyPerId()).toBe(true);
+    expect(textarea(second).value).toBe('Hors ligne, encore.');
+    expect(await stored()).toEqual([]);
+    expect(unload()).toBe(false);
+  });
+
+  it('shows a restored page on “+ New document” when the app opens on another document', async () => {
+    lose = () => true;
+    const first = await load('');
+    type(first, 'Une page.');
+    await elapse(1000);
+    await first.crash();
+
+    lose = isCreation;
+    const second = await load();
+    expect(textarea(second).value).toBe(original);
+    fireEvent.click(within(second.view.container).getByRole('button', { name: '+ New document' }));
+    await elapse();
+    expect(textarea(second).value).toBe('Une page.');
+  });
+
+  it('comes back refused when its document was deleted before the reload, and “Try again” creates it once', async () => {
+    loseAnswer = isCreation;
+    const first = await load('');
+    type(first, 'Une page.');
+    await elapse(1000);
+    const id = created()[0]?.id ?? '';
+    db.delete(id);
+    loseAnswer = () => false;
+    await elapse(2000);
+    expect(tryAgain(first)).not.toBeNull();
+    await first.crash();
+
+    const second = await load('');
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Une page.');
+    expect(tryAgain(second)).not.toBeNull();
+    expect(creationsSent().every((body) => body.id === id && body.content === 'Une page.')).toBe(true);
+
+    fireEvent.click(tryAgain(second) as HTMLElement);
+    await elapse(1000);
+    expect(pages()).toEqual(['Une page.']);
+    expect(oneBodyPerId()).toBe(true);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('comes back refused when its id holds another text, and “Try again” creates it once under a new id', async () => {
+    const taken = '11111111-1111-4111-8111-111111111111';
+    vi.spyOn(crypto, 'randomUUID').mockReturnValueOnce(taken);
+    creations.set(taken, JSON.stringify([null, 'Un autre texte.', true]));
+    db.set(taken, {
+      id: taken,
+      title: null,
+      revision: 0,
+      content: '',
+      createdAt: '2026-11-01T10:00:00.000Z',
+      updatedAt: '2026-11-01T10:00:00.000Z',
+      draft: { content: 'Un autre texte.', draftVersion: 1, baseRevision: null },
+    });
+    const first = await load('');
+    type(first, 'Une page.');
+    await elapse(1000);
+    expect(tryAgain(first)).not.toBeNull();
+    await first.crash();
+
+    const second = await load('');
+    await elapse(1000);
+    expect(textarea(second).value).toBe('Une page.');
+    expect(tryAgain(second)).not.toBeNull();
+    fireEvent.click(tryAgain(second) as HTMLElement);
+    await elapse(1000);
+    expect(pages()).toEqual(['Un autre texte.', 'Une page.']);
+    expect(db.get(taken)?.draft?.content).toBe('Un autre texte.');
+    expect(await stored()).toEqual([]);
+  });
+
+  it('restores the pages of two tabs as two documents, one of them on the blank page', async () => {
+    lose = () => true;
+    const one = await load('');
+    const two = await load('');
+    type(one, 'La page du premier onglet.');
+    await settle();
+    type(two, 'La page du second onglet.');
+    await elapse(1000);
+    await one.crash();
+    await two.crash();
+
+    const three = await load('');
+    expect(['La page du premier onglet.', 'La page du second onglet.']).toContain(textarea(three).value);
+    lose = () => false;
+    await elapse(30_000);
+    expect(pages()).toEqual(['La page du premier onglet.', 'La page du second onglet.']);
+    expect(oneBodyPerId()).toBe(true);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('never adopts a page another living tab restored, and creates it once after both are gone', async () => {
+    lose = () => true;
+    const first = await load('');
+    type(first, 'Une page.');
+    await elapse(1000);
+    await first.crash();
+
+    const second = await load('');
+    expect(textarea(second).value).toBe('Une page.');
+    const third = await load('');
+    await elapse(1000);
+    expect(textarea(third).value).toBe('');
+    expect((await stored()).map(([key, text]) => [key.split(' ')[0], text])).toEqual([['tab-2', 'Une page.']]);
+    await second.crash();
+    await third.crash();
+
+    lose = () => false;
+    const fourth = await load('');
+    expect(textarea(fourth).value).toBe('Une page.');
+    await elapse(1000);
+    expect(pages()).toEqual(['Une page.']);
+    expect(oneBodyPerId()).toBe(true);
+    expect(await stored()).toEqual([]);
+  });
+
+  it('brings back the title typed on the page, and saves it once the document exists', async () => {
+    lose = () => true;
+    const first = await load('');
+    fireEvent.change(titleField(first) as HTMLInputElement, { target: { value: 'Le phare' } });
+    type(first, 'Une page.');
+    await elapse(1000);
+    expect(await records()).toMatchObject([{ page: { creation: 'Une page.', title: 'Le phare' } }]);
+    await first.crash();
+
+    lose = () => false;
+    const second = await load('');
+    expect(titleField(second)?.value).toBe('Le phare');
+    await elapse(1000);
+    await elapse(1000);
+    expect(created().map(({ title, draft }) => [title, draft?.content])).toEqual([['Le phare', 'Une page.']]);
+  });
+
+  it('forgets a page erased before anything was sent', async () => {
+    const first = await load('');
+    type(first, 'Une page.');
+    await settle();
+    type(first, '');
+    await settle();
+    expect(await stored()).toEqual([]);
+  });
+
+  describe('a crash around the creation request, with the writes not committed yet dropped', () => {
+    it('before it: nothing is sent before the creation’s text is kept, and the last text kept comes back', async () => {
+      const first = await load('');
+      type(first, 'Une page');
+      await settle();
+      first.buffer?.pause();
+      type(first, 'Une page neuve.');
+      await elapse(1000);
+      expect(creationsSent()).toEqual([]);
+      await first.crash();
+
+      const second = await load('');
+      expect(textarea(second).value).toBe('Une page');
+      await elapse(1000);
+      expect(pages()).toEqual(['Une page']);
+      expect(await stored()).toEqual([]);
+    });
+
+    it('during it: the creation that reached the server is sent again as it was', async () => {
+      hold = isCreation;
+      const first = await load('');
+      type(first, 'Une page.');
+      await elapse(1000);
+      expect(held).toHaveLength(1);
+      first.buffer?.pause();
+      type(first, 'Une page neuve.');
+      await settle();
+      await first.crash();
+      // The request had left: the server takes it after the page is gone.
+      await releaseHeld();
+      expect(pages()).toEqual(['Une page.']);
+
+      const second = await load('');
+      expect(textarea(second).value).toBe('Une page.');
+      await elapse(1000);
+      expect(pages()).toEqual(['Une page.']);
+      expect(oneBodyPerId()).toBe(true);
+      expect(await stored()).toEqual([]);
+    });
+
+    it('after it: the text typed since comes back, and is saved on the document the creation made', async () => {
+      hold = isCreation;
+      const first = await load('');
+      type(first, 'Une page.');
+      await elapse(1000);
+      type(first, 'Une page neuve.');
+      await settle();
+      first.buffer?.pause();
+      lose = isDraftSave;
+      await releaseHeld();
+      await elapse(1000);
+      expect(pages()).toEqual(['Une page.']);
+      await first.crash();
+
+      lose = () => false;
+      const second = await load('');
+      expect(textarea(second).value).toBe('Une page neuve.');
+      await elapse(1000);
+      expect(pages()).toEqual(['Une page neuve.']);
+      expect(created()).toHaveLength(1);
+      expect(oneBodyPerId()).toBe(true);
+      expect(await stored()).toEqual([]);
+    });
+  });
+
+  it('says so when the buffer cannot keep a page, and typing and the creation go on', async () => {
+    const failing = crashable();
+    failing.faults.put = 'quota';
+    const page = await load('', { buffer: failing });
+    type(page, 'Une page.');
+    await elapse(1000);
+    expect(notice(page)).not.toBeNull();
+    expect(textarea(page).value).toBe('Une page.');
+    type(page, 'Une page neuve.');
+    await elapse(1000);
+    expect(pages()).toEqual(['Une page neuve.']);
+  });
+
+  it('reads a buffer written by the current version as before', async () => {
+    // Records as the version before pages wrote them: no `page`. One with no base and no page was never written, and
+    // is left alone.
+    await raw(async (buffer) => {
+      await buffer.put('tab-0 doc-1', { content: 'Il veillait, seul.', base: { content: original, draftVersion: 1 } });
+      await buffer.put('tab-0 page-0', { content: 'Sans page.', base: null });
+    });
+    const page = await load();
+    await elapse(1000);
+    expect(textarea(page).value).toBe('Il veillait, seul.');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+    expect(creationsSent()).toEqual([]);
+    expect(await stored()).toEqual([['tab-0 page-0', 'Sans page.']]);
   });
 });

@@ -228,6 +228,64 @@ describe('openLocalBuffer', () => {
     });
   });
 
+  describe('pages not created on the server yet', () => {
+    /** Writes records as they are, without the module. */
+    const rawPut = async (...records: object[]) => {
+      const db = await rawOpen(factory, localBufferSchema.length, (db) => localBufferSchema[0]?.(db, undefined!));
+      await new Promise<void>((resolve) => {
+        const tx = db.transaction('drafts', 'readwrite');
+        for (const record of records) tx.objectStore('drafts').put(record);
+        tx.oncomplete = () => resolve();
+      });
+      db.close();
+    };
+
+    it('stores what a page’s creation needs, and keeps it only without a base', async () => {
+      const buffer = open();
+      await buffer.put('tab page', {
+        content: 'Une page neuve.',
+        base: null,
+        page: { creation: 'Une page.', title: 'Le phare' },
+      });
+      await buffer.put('tab blank', { content: 'Une page.', base: null, page: { creation: null } });
+      await buffer.put('tab doc', {
+        content: 'Il veillait.',
+        base: { content: 'Il', draftVersion: 1 },
+        page: { creation: null },
+      });
+
+      expect((await buffer.get('tab page')).entry?.page).toEqual({ creation: 'Une page.', title: 'Le phare' });
+      expect((await buffer.get('tab blank')).entry?.page).toEqual({ creation: null });
+      expect((await buffer.get('tab doc')).entry).not.toHaveProperty('page');
+    });
+
+    it('reads a buffer written by the current version as before: no record has a page', async () => {
+      // The records the version before pages wrote, at the same schema version: no migration is needed.
+      await rawPut(
+        { key: 'tab doc', content: 'Il veillait.', base: { content: 'Il', draftVersion: 1 }, updatedAt: 5 },
+        { key: 'tab new', content: 'Sans page.', base: null, updatedAt: 4 },
+      );
+
+      expect((await open().list()).entries).toEqual([
+        { key: 'tab doc', content: 'Il veillait.', base: { content: 'Il', draftVersion: 1 }, updatedAt: 5 },
+        { key: 'tab new', content: 'Sans page.', base: null, updatedAt: 4 },
+      ]);
+    });
+
+    it('leaves a malformed page out, and keeps the text', async () => {
+      await rawPut(
+        { key: 'a', content: 'Un', base: null, page: { creation: 3 } },
+        { key: 'b', content: 'Deux', base: null, page: 'x' },
+        { key: 'c', content: 'Trois', base: null, page: { creation: 'Trois', title: 7 } },
+      );
+      const buffer = open();
+
+      expect((await buffer.get('a')).entry).toEqual({ key: 'a', content: 'Un', base: null, updatedAt: 0 });
+      expect((await buffer.get('b')).entry).toEqual({ key: 'b', content: 'Deux', base: null, updatedAt: 0 });
+      expect((await buffer.get('c')).entry?.page).toEqual({ creation: 'Trois' });
+    });
+  });
+
   describe('schema upgrades', () => {
     const v2 = [...localBufferSchema, addOutbox];
 

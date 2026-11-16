@@ -1,6 +1,4 @@
-import { useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
-import { isCreated, newDocumentId, useAutosaveGuard } from './autosave/useAutosave';
+import { useAutosaveGuard, useBlankPage } from './autosave/useAutosave';
 import { DocumentList } from './components/DocumentList';
 import { DocumentView } from './components/DocumentView';
 import { LocalCopyNotice } from './components/LocalCopyNotice';
@@ -11,14 +9,13 @@ import { useSelectedDocumentId } from './useHashRoute';
 import { useSidebar } from './useSidebar';
 
 export const App = () => {
-  const queryClient = useQueryClient();
   const [selectedId, select] = useSelectedDocumentId();
   /**
    * The blank page: a document that does not exist yet, created by its first save. Once created, it keeps its page
-   * (same id, same editor) and takes its address; the next blank page gets a new id.
+   * (same id, same editor) and takes its address; the next blank page gets a new id, or is a page restored from this
+   * device that is not created yet.
    */
-  const [blankId, setBlankId] = useState(newDocumentId);
-  if (selectedId === undefined && isCreated(queryClient, blankId)) setBlankId(newDocumentId());
+  const [blankId, setBlankId] = useBlankPage(selectedId);
   const id = selectedId ?? blankId;
   const [sidebarOpen, toggleSidebar] = useSidebar();
   useAutosaveGuard();
