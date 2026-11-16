@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { checkMobileHermes } from './lockfile.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = join(here, '..');
@@ -29,14 +30,10 @@ const fail = (message) => {
 const pin = Object.fromEntries(
   [...readFileSync(join(here, 'hermes.env'), 'utf8').matchAll(/^(\w+)=(.*)$/gmu)].map((match) => [match[1], match[2]]),
 );
-const lock = readFileSync(join(packageDir, '..', '..', 'pnpm-lock.yaml'), 'utf8');
-const resolved = [...new Set([...lock.matchAll(/^ {2}hermes-compiler@([^:(]+):/gmu)].map((match) => match[1]))];
-if (resolved.length !== 1 || resolved[0] !== pin.HERMES_VERSION) {
-  fail(
-    `pnpm-lock.yaml resolves hermes-compiler ${resolved.join(', ') || '(none)'}, but the tests run on Hermes ` +
-      `${pin.HERMES_VERSION}. Update packages/merge/hermes/hermes.env to the tag hermes-v<version> of facebook/hermes ` +
-      '(its commit and the SHA-256 of its source tarball), then rebuild with get-hermes.sh.',
-  );
+try {
+  checkMobileHermes(readFileSync(join(packageDir, '..', '..', 'pnpm-lock.yaml'), 'utf8'), pin.HERMES_VERSION);
+} catch (error) {
+  fail(error.message);
 }
 
 const bin = process.env.HERMES_BIN ?? join(packageDir, '.hermes', pin.HERMES_VERSION, 'bin');
@@ -44,7 +41,7 @@ if (!existsSync(join(bin, 'hermes')) || !existsSync(join(bin, 'hermesc'))) {
   fail(`No hermes and hermesc in ${bin}. Build them with packages/merge/hermes/get-hermes.sh (see README).`);
 }
 
-// The cases Vitest collects. The harness's own spec checks it against Vitest and has no meaning on Hermes.
+// The cases Vitest collects. The specs of this tooling (hermes/*.spec.mjs) check it on Node, not the engine.
 mkdirSync(out, { recursive: true });
 const listFile = join(out, 'vitest-list.json');
 execFileSync(join(packageDir, 'node_modules', '.bin', 'vitest'), ['list', `--json=${listFile}`], {
@@ -53,7 +50,7 @@ execFileSync(join(packageDir, 'node_modules', '.bin', 'vitest'), ['list', `--jso
 });
 const listed = JSON.parse(readFileSync(listFile, 'utf8'))
   .map(({ name, file }) => ({ name, file: relative(packageDir, file).split('\\').join('/') }))
-  .filter(({ file }) => file !== 'hermes/harness.spec.mjs');
+  .filter(({ file }) => !file.startsWith('hermes/'));
 const unsupported = listed.filter(({ file }) => !/^src\/.+\.ts$/u.test(file));
 if (unsupported.length > 0) {
   fail(`Vitest runs spec files this script cannot bundle: ${[...new Set(unsupported.map(({ file }) => file))]}`);

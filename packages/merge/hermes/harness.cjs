@@ -31,7 +31,12 @@ const format = (template, values) => {
 /** Whether an array has only index properties, so comparing its indexes compares all of it. */
 const isPlainArray = (array) =>
   Object.getPrototypeOf(array) === Array.prototype &&
-  Object.keys(array).every((key) => String(Number(key)) === key && Number(key) < array.length);
+  !hasEnumerableSymbol(array) &&
+  Object.keys(array).every((key) => /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < array.length);
+
+/** Whether a value has enumerable symbol properties, which the harness does not compare. */
+const hasEnumerableSymbol = (value) =>
+  Object.getOwnPropertySymbols(value).some((symbol) => Object.prototype.propertyIsEnumerable.call(value, symbol));
 
 /** Vitest's `toEqual`: recursive equality, where `undefined`, a missing property and an array hole are the same. */
 const equals = (a, b) => {
@@ -61,6 +66,9 @@ const equals = (a, b) => {
   }
   if (Object.getPrototypeOf(a) !== Object.prototype || Object.getPrototypeOf(b) !== Object.prototype) {
     throw new Error('the Hermes harness only compares plain objects and arrays');
+  }
+  if (hasEnumerableSymbol(a) || hasEnumerableSymbol(b)) {
+    throw new Error('the Hermes harness only compares objects without symbol properties');
   }
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
 

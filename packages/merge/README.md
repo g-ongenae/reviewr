@@ -56,8 +56,8 @@ with TypeScript (target ES2023, as the package's build), wraps it as a CommonJS 
 `toBe`, `toEqual`, `toContainEqual`, `toBeGreaterThan`, `toBeLessThan`, `toThrow`). A run passes only if every case
 passed and its case names are exactly Vitest's; a spec file outside `src` or not in TypeScript fails the script. Each
 failure is printed with its name. `hermes/harness.spec.mjs`, run by `pnpm test`, checks the harness's matchers against
-Vitest's (sparse arrays, nested objects, `undefined`, `NaN`, `-0`); it is the one spec not run on Hermes. No spec of
-`src` is left out.
+Vitest's (sparse arrays, extra array keys and symbols, nested objects, `undefined`, `NaN`, `-0`). It and
+`hermes/lockfile.spec.mjs` test this tooling and are the only specs not run on Hermes. No spec of `src` is left out.
 
 Limits, each failing loudly rather than passing: tests must be synchronous (a `describe` or a test that returns a
 promise is an error), and specs may import only `vitest` and relative files. What runs is a CommonJS transform of the
@@ -65,8 +65,10 @@ sources, not Metro's bundle of the built package: it covers the engine, not the 
 
 The binaries: `hermes/hermes.env` holds the one definition of the version, used by both scripts and the CI cache key.
 React Native 0.88.0 uses Hermes `260318099.0.4` (its `hermes-compiler` dependency), from the tag
-`hermes-v260318099.0.4` of facebook/hermes. `run.mjs` fails if `pnpm-lock.yaml` resolves another `hermes-compiler`
-(after a React Native upgrade), and says how to update the pin. That release publishes no standalone VM for Linux (npm
+`hermes-v260318099.0.4` of facebook/hermes. `run.mjs` follows `pnpm-lock.yaml` from the `apps/mobile` importer to its
+resolved `react-native`, then to that snapshot's `hermes-compiler`, and fails if a link is missing or the version is
+not the pin (after a React Native upgrade), saying how to update it. `hermes/lockfile.mjs` reads the lockfile strictly
+(no YAML library is installed here) and fails on any YAML it does not recognise. That release publishes no standalone VM for Linux (npm
 has the compiler only, Maven the iOS and Android libraries), so `hermes/get-hermes.sh` builds `hermes` and `hermesc`
 from the tag's source tarball, pinned by commit and checked by SHA-256, with `Intl` on as React Native builds it, into
 `.hermes/` (ignored by git). It needs cmake, ninja, a C++ compiler and the ICU headers

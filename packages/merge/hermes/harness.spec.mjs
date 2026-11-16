@@ -78,9 +78,41 @@ describe('the Hermes harness', () => {
     expect(passes(() => harness.expect(actual).toBe(expected))).toBe(passes(() => expect(actual).toBe(expected)));
   });
 
-  it('rejects arrays with extra properties instead of ignoring them', () => {
-    const tagged = Object.assign(['a'], { extra: 'b' });
-    expect(() => harness.expect(tagged).toEqual(['a'])).toThrow('only compares arrays without extra properties');
+  /** Whether a matcher passes, counting the harness's refusal of unsupported values as a failure. */
+  const passesOrRefuses = (assertion) => {
+    try {
+      assertion();
+
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const symbol = Symbol('extra');
+
+  it.each([
+    ['a named property on an array', Object.assign(['a'], { extra: 'lost' }), ['a']],
+    ['a negative key on an array', Object.assign(['a'], { '-1': 'lost' }), ['a']],
+    ['a fractional key on an array', Object.assign(['a', 'b'], { 0.5: 'lost' }), ['a', 'b']],
+    ['a key with a leading zero on an array', Object.assign(['a', 'b'], { '01': 'lost' }), ['a', 'b']],
+    ['a symbol on an array', Object.assign(['a'], { [symbol]: 'lost' }), ['a']],
+    ['a symbol on an object', { a: 1, [symbol]: 'lost' }, { a: 1 }],
+  ])('fails, as Vitest does, on %s, in both directions', (_name, extra, plain) => {
+    for (const [actual, expected] of [
+      [extra, plain],
+      [plain, extra],
+    ]) {
+      expect(passes(() => expect(actual).toEqual(expected))).toBe(false);
+      expect(passesOrRefuses(() => harness.expect(actual).toEqual(expected))).toBe(false);
+      expect(passesOrRefuses(() => harness.expect([actual]).toContainEqual(expected))).toBe(false);
+    }
+  });
+
+  it('refuses extra array properties and symbols instead of ignoring them', () => {
+    expect(() => harness.expect(Object.assign(['a'], { '-1': 'lost' })).toEqual(['a'])).toThrow(
+      'only compares arrays without extra properties',
+    );
+    expect(() => harness.expect({ [symbol]: 1 }).toEqual({})).toThrow('without symbol properties');
   });
 
   it('rejects an async describe', () => {
