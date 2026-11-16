@@ -610,34 +610,26 @@ describe('the Hermes harness, asynchronous', () => {
     ]);
   });
 
-  it('refuses to run after an asynchronous assertion made outside a test that nobody awaited', async () => {
-    const lines = [];
-    const own = createHarness((line) => lines.push(line));
-    // As at the top of a spec file, or in the body of a describe.
-    void own.expect(Promise.resolve('lost')).resolves.toBe('saved');
-    own.it('passes', () => {});
-    await expect(own.run('Node')).rejects.toThrow('an asynchronous assertion made outside a test was not awaited');
-    expect(lines).toEqual([]);
-    // One that was awaited is the business of the code that awaited it.
-    await own
-      .expect(Promise.resolve('lost'))
-      .resolves.toBe('saved')
-      .catch(() => {});
-    await own.run('Node');
-    expect(lines.at(-1)).toBe('Node: 1 passed, 0 failed, 1 cases');
-  });
-
-  it('gives the assertions back to the test that started another run', async () => {
+  it('runs one run at a time: a run inside a test or beside another is refused', async () => {
+    const refusal = 'the Hermes harness runs one run at a time, not inside or beside another';
     const lines = [];
     const outer = createHarness((line) => lines.push(line));
-    outer.it('outer', async () => {
+    outer.it('starts a run', async () => {
       const inner = createHarness(() => {});
       inner.it('inner', () => {});
       await inner.run('Node');
-      void outer.expect(Promise.resolve('lost')).resolves.toBe('saved');
     });
     await expect(outer.run('Node')).rejects.toThrow('1 of 1 cases failed on Node');
-    expect(lines[0]).toBe('FAIL outer\n     expected the promise to resolve to "saved", got "lost"');
+    expect(lines[0]).toBe(`FAIL starts a run\n     ${refusal}`);
+
+    const [first, second] = [createHarness(() => {}), createHarness(() => {})];
+    first.it('first', () => {});
+    second.it('second', () => {});
+    const outcomes = await Promise.allSettled([first.run('Node'), second.run('Node')]);
+    expect(outcomes[0].status).toBe('fulfilled');
+    expect(outcomes[1].reason.message).toBe(refusal);
+    // The refused one left nothing behind: it runs once the other has ended.
+    await second.run('Node');
   });
 
   it('runs beforeEach and afterEach in the order Vitest does', async () => {
@@ -746,11 +738,16 @@ describe('the Hermes harness, asynchronous', () => {
     expect([globalThis.setTimeout, globalThis.setInterval]).toEqual(realTimers);
   });
 
-  it('fails a test that leaves a rejection unhandled, and exits with a non-zero status when a case fails', () => {
-    const runChild = (tests) =>
+  it('fails on a rejection left unhandled, in a test or outside, and exits with a non-zero status', () => {
+    const runChild = (tests, after = '') =>
       spawnSync(
         process.execPath,
-        ['-e', `const { describe, it, run } = require(${JSON.stringify(harnessPath)});\n${tests}\nrun('Node');`],
+        [
+          '-e',
+          `const { describe, it, expect, run } = require(${JSON.stringify(harnessPath)});
+          ${tests}
+          run('Node').then(() => { ${after} });`,
+        ],
         { encoding: 'utf8' },
       );
     const failing = runChild(`describe('d', () => {
@@ -765,5 +762,25 @@ describe('the Hermes harness, asynchronous', () => {
     const passing = runChild(`it('passes', async () => { await null; });`);
     expect(passing.stdout).toContain('Node: 1 passed, 0 failed, 1 cases');
     expect(passing.status).toBe(0);
+
+    // An asynchronous assertion made outside a test is a plain promise, as in Vitest: nobody waits for it, and its
+    // failure, if nobody handles it, is an unhandled rejection. Before the tests it stops the run; after, it ends Node.
+    const lost = `void expect(Promise.resolve('lost')).resolves.toBe('saved');`;
+    const failure = 'expected the promise to resolve to "saved", got "lost"';
+    const before = runChild(`${lost} it('passes', () => {});`);
+    expect(before.stderr).toContain(`unhandled rejection before the first test: Error: ${failure}`);
+    expect(before.stdout).not.toContain('passed');
+    expect(before.status).not.toBe(0);
+    const inDescribe = runChild(`describe('d', () => { ${lost} it('passes', () => {}); });`);
+    expect(inDescribe.stderr).toContain(`unhandled rejection before the first test: Error: ${failure}`);
+    expect(inDescribe.status).not.toBe(0);
+    const after = runChild(`it('passes', () => {});`, lost);
+    expect(after.stdout).toContain('Node: 1 passed, 0 failed, 1 cases');
+    expect(after.stderr).toContain(failure);
+    expect(after.status).not.toBe(0);
+    const awaited = runChild(
+      `expect(Promise.resolve('lost')).resolves.toBe('saved').catch(() => {}); it('passes', () => {});`,
+    );
+    expect(awaited.status).toBe(0);
   });
 });

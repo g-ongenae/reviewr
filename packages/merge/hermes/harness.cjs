@@ -145,28 +145,28 @@ const show = (value) => (typeof value === 'function' ? value.name : JSON.stringi
 const mockCalls = new WeakMap();
 
 /**
- * The asynchronous assertions (`resolves`) made while no test runs: when the specs are collected, or by code that uses
- * `expect` without a run. Nobody waits for them, so each must be awaited where it is made: a run refuses to start after
- * one whose outcome nobody took. In Vitest such an assertion is a plain promise, and its failure fails the run.
- */
-const outsideAssertions = [];
-
-/**
- * The list the asynchronous assertions go to: the one of the running test, from before its hooks to its end, else
- * `outsideAssertions`. The runner owns the outcome of a test's assertions: at the end of the test, one that failed fails
- * the test unless the test took its outcome (`await`, `then`, `catch`), and one still pending fails it. As Vitest, which
- * keeps them per test and waits for those of the test's body before the test passes; stricter for one that never
+ * The asynchronous assertions (`resolves`) of the running test, from before its hooks to its end; undefined while no
+ * test runs. The runner owns their outcome: at the end of the test, one that failed fails the test unless the test took
+ * its outcome (a call of `then`, `catch` or `finally`, as `await` makes), and one still pending fails it. As Vitest,
+ * which keeps them per test and waits for those of the test's body before the test passes; stricter for one that never
  * settles and was made in a hook or after the body, which Vitest does not wait for. A continuation that a test left
- * behind and that asserts during the next test is counted for that one. A run started inside a test (harness.spec.mjs)
- * gives the list back to that test when it ends.
+ * behind and that asserts during the next test is counted for that one. Only one run at a time has tests, see `run`.
  */
-let asyncAssertions = outsideAssertions;
+let asyncAssertions;
+
+/** Whether a run is in progress: a second one, inside a test or beside it, would take over `asyncAssertions`. */
+let running = false;
 
 /**
  * Registers an asynchronous assertion. The test gets a thenable, not the promise, so the runner knows whether the
- * test took the outcome: then a failure is the test's to throw or to handle, as with a promise in Vitest.
+ * test took the outcome: then a failure is the test's to throw or to handle, as with a promise in Vitest. Outside a
+ * test, as in Vitest, it is the promise itself and nobody else's business: a failure nobody handles is an unhandled
+ * rejection, which stops a run that has not started its tests yet, and ends Node with an error after a run.
  */
 const asyncAssertion = (promise) => {
+  if (asyncAssertions === undefined) {
+    return promise;
+  }
   const record = { settled: false, failed: false, error: undefined, taken: false };
   promise.then(
     () => {
@@ -535,8 +535,25 @@ const createHarness = (log) => {
     }
   };
 
-  /** Runs the tests; resolves if all passed, rejects otherwise. */
+  /** Runs the tests; resolves if all passed, rejects otherwise. One run at a time. */
   const run = async (engine) => {
+    if (running) {
+      throw new Error('the Hermes harness runs one run at a time, not inside or beside another');
+    }
+    running = true;
+    const unhandled = [];
+    // Watched before anything else, so that a rejection left unhandled while the specs were collected is seen too.
+    const stopWatching = watchUnhandledRejections((reason) => unhandled.push(reason));
+    try {
+      await runTests(engine, unhandled);
+    } finally {
+      stopWatching();
+      asyncAssertions = undefined;
+      running = false;
+    }
+  };
+
+  const runTests = async (engine, unhandled) => {
     // What advanceTimersByTimeAsync relies on: the host runs all microtasks, however many, before its next task.
     let drained = false;
     void Promise.resolve()
@@ -559,59 +576,51 @@ const createHarness = (log) => {
       );
     }
 
-    // Settled by now, if they ever settle: the task above ran after every microtask.
-    if (outsideAssertions.splice(0).some((record) => !record.taken)) {
-      throw new Error('an asynchronous assertion made outside a test was not awaited: nothing checked its outcome');
+    // As Vitest, where an assertion made outside a test is a plain promise: its failure, unhandled, fails the run.
+    if (unhandled.length > 0) {
+      throw new Error(`unhandled rejection before the first test: ${String(unhandled[0])}`);
     }
 
-    const unhandled = [];
-    const stopWatching = watchUnhandledRejections((reason) => unhandled.push(reason));
-    const owner = asyncAssertions;
     let failed = 0;
-    try {
-      for (const test of tests) {
-        const errors = [];
-        const assertions = [];
-        asyncAssertions = assertions;
-        // As Vitest: outer hooks first before, last after, the afterEach hooks of a describe in reverse order; a
-        // failing beforeEach skips the rest and the test, the afterEach hooks run anyway.
-        const beforeEach = test.suites.flatMap((suite) => suite.beforeEach);
-        const afterEach = [...test.suites].reverse().flatMap((suite) => [...suite.afterEach].reverse());
-        try {
-          for (const body of beforeEach) {
-            callHook(body, 'beforeEach');
-          }
-          await settle(test.body());
-          await settleAssertions(assertions);
-        } catch (error) {
-          errors.push(error);
+    for (const test of tests) {
+      const errors = [];
+      const assertions = [];
+      asyncAssertions = assertions;
+      // As Vitest: outer hooks first before, last after, the afterEach hooks of a describe in reverse order; a
+      // failing beforeEach skips the rest and the test, the afterEach hooks run anyway.
+      const beforeEach = test.suites.flatMap((suite) => suite.beforeEach);
+      const afterEach = [...test.suites].reverse().flatMap((suite) => [...suite.afterEach].reverse());
+      try {
+        for (const body of beforeEach) {
+          callHook(body, 'beforeEach');
         }
-        try {
-          for (const body of afterEach) {
-            callHook(body, 'afterEach');
-          }
-        } catch (error) {
-          errors.push(error);
+        await settle(test.body());
+        await settleAssertions(assertions);
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        for (const body of afterEach) {
+          callHook(body, 'afterEach');
         }
-        // Lets the engine report the rejections left unhandled by this test.
-        await nextTask();
-        errors.push(...unhandled.splice(0).map((reason) => new Error(`unhandled rejection: ${String(reason)}`)));
-        for (const record of assertions) {
-          if (!record.settled) {
-            errors.push(new Error('an asynchronous assertion never settles'));
-          } else if (record.failed && !record.taken) {
-            errors.push(record.error);
-          }
-        }
-        if (errors.length > 0) {
-          failed++;
-          const messages = errors.map((error) => (error instanceof Error ? error.message : String(error)));
-          log(`FAIL ${test.name}\n     ${messages.join('\n     ')}`);
+      } catch (error) {
+        errors.push(error);
+      }
+      // Lets the engine report the rejections left unhandled by this test.
+      await nextTask();
+      errors.push(...unhandled.splice(0).map((reason) => new Error(`unhandled rejection: ${String(reason)}`)));
+      for (const record of assertions) {
+        if (!record.settled) {
+          errors.push(new Error('an asynchronous assertion never settles'));
+        } else if (record.failed && !record.taken) {
+          errors.push(record.error);
         }
       }
-    } finally {
-      stopWatching();
-      asyncAssertions = owner;
+      if (errors.length > 0) {
+        failed++;
+        const messages = errors.map((error) => (error instanceof Error ? error.message : String(error)));
+        log(`FAIL ${test.name}\n     ${messages.join('\n     ')}`);
+      }
     }
     log(`CASES ${JSON.stringify(tests.map((test) => test.name))}`);
     log(`${engine}: ${tests.length - failed} passed, ${failed} failed, ${tests.length} cases`);
