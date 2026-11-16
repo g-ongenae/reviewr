@@ -7,7 +7,7 @@ import {
   type Draft,
   type SaveResult,
   type Timers,
-} from './autosave';
+} from './autosave.js';
 
 interface PendingSave {
   draft: Draft;
