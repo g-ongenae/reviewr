@@ -145,10 +145,55 @@ const show = (value) => (typeof value === 'function' ? value.name : JSON.stringi
 const mockCalls = new WeakMap();
 
 /**
- * The asynchronous assertions (`resolves`) made by the test that is running. As Vitest, the runner waits for each of
- * them before the test passes, so one the test did not await still fails it, also when it never settles.
+ * The asynchronous assertions (`resolves`) made since the running test started, in its hooks too; outside a run, a list
+ * nobody reads. The runner owns their outcome: at the end of the test, one that failed fails the test unless the test
+ * took its outcome (`await`, `then`, `catch`), and one still pending fails it. As Vitest, which keeps them per test and
+ * waits for those of the test's body before the test passes; stricter for one that never settles and was made in a
+ * hook or after the body, which Vitest does not wait for. A continuation that a test left behind and that asserts
+ * during the next test is counted for that one.
  */
-const asyncAssertions = [];
+let asyncAssertions = [];
+
+/**
+ * Registers an asynchronous assertion. The test gets a thenable, not the promise, so the runner knows whether the
+ * test took the outcome: then a failure is the test's to throw or to handle, as with a promise in Vitest.
+ */
+const asyncAssertion = (promise) => {
+  const record = { settled: false, failed: false, error: undefined, taken: false };
+  promise.then(
+    () => {
+      record.settled = true;
+    },
+    (error) => {
+      record.settled = true;
+      record.failed = true;
+      record.error = error;
+    },
+  );
+  asyncAssertions.push(record);
+  const take = () => {
+    record.taken = true;
+
+    return promise;
+  };
+
+  return {
+    then: (onFulfilled, onRejected) => take().then(onFulfilled, onRejected),
+    catch: (onRejected) => take().catch(onRejected),
+    finally: (onFinally) => take().finally(onFinally),
+  };
+};
+
+/** Waits until every assertion of the list has settled, those added meanwhile too, or the host has no task left. */
+const settleAssertions = async (assertions) => {
+  const pending = () => assertions.some((record) => !record.settled);
+  while (pending()) {
+    await nextTask();
+    if (pending() && pendingHostTasks === 0) {
+      return;
+    }
+  }
+};
 
 const expect = (actual) => {
   const check = (pass, message) => {
@@ -233,25 +278,24 @@ const expect = (actual) => {
       },
     },
     resolves: {
-      toBe: (expected) => {
-        const assertion = (async () => {
-          if (!isThenable(actual)) {
-            throw new Error('the Hermes harness only supports resolves on a promise');
-          }
-          let value;
-          try {
-            value = await actual;
-          } catch (error) {
-            throw new Error(`expected the promise to resolve, it rejected with ${String(error)}`);
-          }
-          check(Object.is(value, expected), `expected the promise to resolve to ${show(expected)}, got ${show(value)}`);
-        })();
-        // The runner waits for it even when the test does not: its failure is the test's, not an unhandled rejection.
-        asyncAssertions.push(assertion);
-        assertion.catch(() => {});
-
-        return assertion;
-      },
+      toBe: (expected) =>
+        asyncAssertion(
+          (async () => {
+            if (!isThenable(actual)) {
+              throw new Error('the Hermes harness only supports resolves on a promise');
+            }
+            let value;
+            try {
+              value = await actual;
+            } catch (error) {
+              throw new Error(`expected the promise to resolve, it rejected with ${String(error)}`);
+            }
+            check(
+              Object.is(value, expected),
+              `expected the promise to resolve to ${show(expected)}, got ${show(value)}`,
+            );
+          })(),
+        ),
     },
   };
 };
@@ -513,6 +557,8 @@ const createHarness = (log) => {
     try {
       for (const test of tests) {
         const errors = [];
+        const assertions = [];
+        asyncAssertions = assertions;
         // As Vitest: outer hooks first before, last after, the afterEach hooks of a describe in reverse order; a
         // failing beforeEach skips the rest and the test, the afterEach hooks run anyway.
         const beforeEach = test.suites.flatMap((suite) => suite.beforeEach);
@@ -521,9 +567,8 @@ const createHarness = (log) => {
           for (const body of beforeEach) {
             callHook(body, 'beforeEach');
           }
-          asyncAssertions.length = 0;
           await settle(test.body());
-          await settle(Promise.all(asyncAssertions));
+          await settleAssertions(assertions);
         } catch (error) {
           errors.push(error);
         }
@@ -537,6 +582,13 @@ const createHarness = (log) => {
         // Lets the engine report the rejections left unhandled by this test.
         await nextTask();
         errors.push(...unhandled.splice(0).map((reason) => new Error(`unhandled rejection: ${String(reason)}`)));
+        for (const record of assertions) {
+          if (!record.settled) {
+            errors.push(new Error('an asynchronous assertion never settles'));
+          } else if (record.failed && !record.taken) {
+            errors.push(record.error);
+          }
+        }
         if (errors.length > 0) {
           failed++;
           const messages = errors.map((error) => (error instanceof Error ? error.message : String(error)));
@@ -545,6 +597,7 @@ const createHarness = (log) => {
       }
     } finally {
       stopWatching();
+      asyncAssertions = [];
     }
     log(`CASES ${JSON.stringify(tests.map((test) => test.name))}`);
     log(`${engine}: ${tests.length - failed} passed, ${failed} failed, ${tests.length} cases`);

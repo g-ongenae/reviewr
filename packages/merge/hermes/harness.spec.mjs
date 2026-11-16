@@ -552,9 +552,62 @@ describe('the Hermes harness, asynchronous', () => {
       'FAIL never settles\n     the test never settles',
       'FAIL awaits a failing resolves\n     expected the promise to resolve to "saved", got "failed"',
       'FAIL does not await a failing resolves\n     expected the promise to resolve to "saved", got "failed"',
-      'FAIL does not await a resolves that never settles\n     the test never settles',
+      'FAIL does not await a resolves that never settles\n     an asynchronous assertion never settles',
     ]);
     expect(log).toEqual(['passed', 'not awaited', 'ran']);
+  });
+
+  it('owns every asynchronous assertion of a test: made in a hook, made late, or handled by the test', async () => {
+    const lines = [];
+    const own = createHarness((line) => lines.push(line));
+    const lost = () => void own.expect(Promise.resolve('lost')).resolves.toBe('saved');
+    own.describe('a failing assertion in beforeEach', () => {
+      own.beforeEach(lost);
+      own.it('fails the test', () => {});
+    });
+    own.describe('a failing assertion in afterEach', () => {
+      own.afterEach(lost);
+      own.it('fails the test', () => {});
+    });
+    own.describe('an assertion that never settles in beforeEach', () => {
+      own.beforeEach(() => void own.expect(new Promise(() => {})).resolves.toBe('saved'));
+      own.it('fails the test', () => {});
+    });
+    own.it('fails with an assertion made after the body returned', () => {
+      let chain = Promise.resolve();
+      for (let i = 0; i < 20; i++) {
+        chain = chain.then(() => {});
+      }
+      void chain.then(lost);
+    });
+    own.it('fails with an assertion made after the others settled', () => {
+      void own
+        .expect(Promise.resolve('saved'))
+        .resolves.toBe('saved')
+        .then(() => Promise.resolve())
+        .then(lost);
+    });
+    own.it('fails once when the test awaits the failure', async () => {
+      await own.expect(Promise.resolve('lost')).resolves.toBe('saved');
+    });
+    // As Vitest: a failure the test handled is the test's business.
+    own.it('passes when the test handles the failure', async () => {
+      await own
+        .expect(Promise.resolve('lost'))
+        .resolves.toBe('saved')
+        .catch(() => {});
+    });
+    own.it('passes after them: their assertions are not counted for it', () => {});
+    await expect(own.run('Node')).rejects.toThrow('6 of 8 cases failed on Node');
+    const failure = 'expected the promise to resolve to "saved", got "lost"';
+    expect(lines.filter((line) => line.startsWith('FAIL'))).toEqual([
+      `FAIL a failing assertion in beforeEach > fails the test\n     ${failure}`,
+      `FAIL a failing assertion in afterEach > fails the test\n     ${failure}`,
+      'FAIL an assertion that never settles in beforeEach > fails the test\n     an asynchronous assertion never settles',
+      `FAIL fails with an assertion made after the body returned\n     ${failure}`,
+      `FAIL fails with an assertion made after the others settled\n     ${failure}`,
+      `FAIL fails once when the test awaits the failure\n     ${failure}`,
+    ]);
   });
 
   it('runs beforeEach and afterEach in the order Vitest does', async () => {
