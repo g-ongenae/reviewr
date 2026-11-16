@@ -1,5 +1,5 @@
 /*
- * Runs the package's specs on the Hermes VM that React Native ships, the two ways a phone runs JavaScript: from source
+ * Runs a package's specs on the Hermes VM that React Native ships, the two ways a phone runs JavaScript: from source
  * (a development build) and from bytecode compiled by `hermesc -O` (a release build). The same bundle also runs on
  * Node first, so a case that fails only on Hermes is an engine difference, not a harness bug.
  *
@@ -7,19 +7,23 @@
  * exactly these names, all passed. The bundle is made with TypeScript alone: each file of `src` is transpiled to
  * CommonJS and wrapped in a function, `vitest` is replaced by `harness.cjs`, and the specs are required in order.
  *
- * Usage: node hermes/run.mjs. Looks for `hermes` and `hermesc` in $HERMES_BIN, or where `get-hermes.sh` puts them.
+ * Usage: node hermes/run.mjs [package directory]  (default: packages/merge, where this tooling lives). Looks for
+ * `hermes` and `hermesc` in $HERMES_BIN, or where `get-hermes.sh` puts them.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, posix, relative } from 'node:path';
+import { basename, dirname, join, posix, relative, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { checkMobileHermes } from './lockfile.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const packageDir = join(here, '..');
+const packageDir = resolvePath(process.argv[2] ?? join(here, '..'));
+const name = basename(packageDir);
 const sourceDir = join(packageDir, 'src');
-const out = join(packageDir, '.hermes', 'out');
+// The binaries and the bundles stay in packages/merge/.hermes, whichever package runs.
+const hermesDir = join(here, '..', '.hermes');
+const out = join(hermesDir, 'out');
 
 const fail = (message) => {
   console.error(message);
@@ -31,19 +35,19 @@ const pin = Object.fromEntries(
   [...readFileSync(join(here, 'hermes.env'), 'utf8').matchAll(/^(\w+)=(.*)$/gmu)].map((match) => [match[1], match[2]]),
 );
 try {
-  checkMobileHermes(readFileSync(join(packageDir, '..', '..', 'pnpm-lock.yaml'), 'utf8'), pin.HERMES_VERSION);
+  checkMobileHermes(readFileSync(join(here, '..', '..', '..', 'pnpm-lock.yaml'), 'utf8'), pin.HERMES_VERSION);
 } catch (error) {
   fail(error.message);
 }
 
-const bin = process.env.HERMES_BIN ?? join(packageDir, '.hermes', pin.HERMES_VERSION, 'bin');
+const bin = process.env.HERMES_BIN ?? join(hermesDir, pin.HERMES_VERSION, 'bin');
 if (!existsSync(join(bin, 'hermes')) || !existsSync(join(bin, 'hermesc'))) {
   fail(`No hermes and hermesc in ${bin}. Build them with packages/merge/hermes/get-hermes.sh (see README).`);
 }
 
 // The cases Vitest collects. The specs of this tooling (hermes/*.spec.mjs) check it on Node, not the engine.
 mkdirSync(out, { recursive: true });
-const listFile = join(out, 'vitest-list.json');
+const listFile = join(out, `${name}-vitest-list.json`);
 execFileSync(join(packageDir, 'node_modules', '.bin', 'vitest'), ['list', `--json=${listFile}`], {
   cwd: packageDir,
   stdio: ['ignore', 'ignore', 'inherit'],
@@ -114,8 +118,8 @@ load('vitest').run(typeof HermesInternal === 'object'
 })();
 `;
 
-const script = join(out, 'merge.cjs');
-const bytecode = join(out, 'merge.hbc');
+const script = join(out, `${name}.cjs`);
+const bytecode = join(out, `${name}.hbc`);
 writeFileSync(script, bundle);
 console.log(`Bundled ${specs.join(', ')} into ${relative(process.cwd(), script)}`);
 console.log(`Vitest collects ${expectedNames.length} cases in them; Hermes ${pin.HERMES_VERSION} from ${bin}`);
