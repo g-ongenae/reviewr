@@ -183,7 +183,14 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
       autosave,
       api,
       isConflict,
-      onDocument: (saved) => onDocument(saved, 'text'),
+      // The session's document goes to the machine here, not through a screen: when the other device wrote again
+      // and no editor is shown, the entry still learns that text, and lists it. Its title is not the newest known.
+      onDocument: (saved) => {
+        autosave.refresh(draftOf(saved));
+        const entry = entries.get(id);
+        if (entry !== undefined) entry.document = { ...saved, title: entry.document.title };
+        onDocument(saved, 'text');
+      },
       now,
     });
     const title = createTitleSaver({

@@ -226,8 +226,6 @@ describe('createDrafts', () => {
       server.release();
       await keeping;
       expect(entry.session.getSnapshot().stop).toEqual({ reason: 'moved' });
-      // The document the session published reaches the machine through the cache and the screen.
-      drafts.read(context.documents.at(-1)!);
       expect(state()).toMatchObject({ status: 'conflict', content: 'mine', server: { content: 'theirs, again' } });
       const hidden = heldTexts(entry).map(({ text }) => text);
       expect(hidden).toContain('theirs, again');
@@ -238,6 +236,35 @@ describe('createDrafts', () => {
       await wait();
       expect(state()).toMatchObject({ status: 'saved', content: 'mine' });
       expect(heldTexts(entry)).toEqual([]);
+    });
+
+    it('learns the text the other device wrote during "Keep mine" with no editor shown, and lists it', async () => {
+      const context = setup();
+      const { server, drafts, entry, leave, state } = context;
+      // The other device's first text is already a version: only its second one is in no version.
+      server.otherDevice('T1');
+      server.otherVersion('T1');
+      entry.autosave.edit('mine');
+      await wait(debounceMs);
+      expect(state()).toMatchObject({ status: 'conflict', server: { content: 'T1' } });
+
+      server.paused = true;
+      const keeping = drafts.keepMine('doc');
+      leave();
+      server.otherDevice('T2');
+      server.paused = false;
+      server.release();
+      await keeping;
+      await wait();
+      expect(entry.session.getSnapshot().stop).toEqual({ reason: 'moved' });
+
+      // No screen read the document, and the server can no longer give it.
+      server.gone = true;
+      expect(drafts.get('doc')).toBe(entry);
+      expect(state()).toMatchObject({ status: 'conflict', content: 'mine', server: { content: 'T2' } });
+      expect(entry.document.draft?.content).toBe('T2');
+      expect(heldTexts(entry).map(({ text }) => text)).toEqual(['T2']);
+      expect(server.overwritten.filter((item) => !item.kept)).toEqual([]);
     });
 
     it('holds the other device’s text when "Keep mine" stopped and the document is then deleted', async () => {
