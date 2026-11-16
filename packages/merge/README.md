@@ -39,3 +39,55 @@ const text = resolveMerge(result, resolutions);
     by paragraph, and tokens are never matched across an unchanged line. Base `Avant. Oui.\nOui.\nAprès.`, mine
     deleting a `Oui.` line and adding 1,100 words at the end, theirs `Avant. Si.\nOui.\nAprès.` merges silently.
 - A conflict is resolved with `'mine'`, `'theirs'`, `'both'` (mine then theirs, exactly as written) or `{ edit }`.
+
+## Tests on Hermes
+
+The phone runs JavaScript on Hermes, whose regular expressions, strings and sorting are not V8's. `pnpm test` runs the
+specs on Node with Vitest; `pnpm --filter @reviewr/merge test:hermes` runs the **same cases** on the Hermes VM that
+React Native ships (the CI's `hermes` job does it on every push), three times:
+
+1. on Node, to check the harness itself;
+2. on Hermes from source, as in a development build;
+3. on Hermes from bytecode compiled by `hermesc -O`, as in a release build.
+
+How: `hermes/run.mjs` asks `vitest list` for the spec files and the names of their cases, transpiles each file of `src`
+with TypeScript (target ES2023, as the package's build), wraps it as a CommonJS module and bundles it with
+`hermes/harness.cjs`, a small stand-in for Vitest (`describe`, `it`, `it.each` with `%s` and `%i`, `expect` with
+`toBe`, `toEqual`, `toContainEqual`, `toBeGreaterThan`, `toBeLessThan`, `toThrow`). A run passes only if every case
+passed and its case names are exactly Vitest's; a spec file outside `src` or not in TypeScript fails the script. Each
+failure is printed with its name. `hermes/harness.spec.mjs`, run by `pnpm test`, checks the harness's matchers against
+Vitest's (sparse arrays, extra array keys and symbols, nested objects, `undefined`, `NaN`, `-0`). It and
+`hermes/lockfile.spec.mjs` test this tooling and are the only specs not run on Hermes. No spec of `src` is left out.
+
+Limits, each failing loudly rather than passing: tests must be synchronous (a `describe` or a test that returns a
+promise is an error), and specs may import only `vitest` and relative files. What runs is a CommonJS transform of the
+sources, not Metro's bundle of the built package: it covers the engine, not the app's bundler.
+
+The binaries: `hermes/hermes.env` holds the one definition of the version, used by both scripts and the CI cache key.
+React Native 0.88.0 uses Hermes `260318099.0.4` (its `hermes-compiler` dependency), from the tag
+`hermes-v260318099.0.4` of facebook/hermes. `run.mjs` follows `pnpm-lock.yaml` from the `apps/mobile` importer to its
+resolved `react-native`, then to that snapshot's `hermes-compiler`, and fails if a link is missing or the version is
+not the pin (after a React Native upgrade), saying how to update it. `hermes/lockfile.mjs` reads the lockfile strictly
+(no YAML library is installed here) and fails on any YAML it does not recognise. That release publishes no standalone VM for Linux (npm
+has the compiler only, Maven the iOS and Android libraries), so `hermes/get-hermes.sh` builds `hermes` and `hermesc`
+from the tag's source tarball, pinned by commit and checked by SHA-256, with `Intl` on as React Native builds it, into
+`.hermes/` (ignored by git). It needs cmake, ninja, a C++ compiler and the ICU headers
+(`sudo apt-get install cmake ninja-build libicu-dev`); a few minutes on 4 cores.
+
+```sh
+packages/merge/hermes/get-hermes.sh   # once
+pnpm --filter @reviewr/merge test:hermes
+```
+
+How this VM differs from the phone's: same engine, version and bytecode compiler, but
+
+- `Intl`, `String.prototype.normalize`, `localeCompare` and the `toLocale…` methods use ICU here (the version of the
+  runner's system), where Android uses Java's (`java.text`, `android.icu`) and iOS Apple's Foundation: locale data and
+  edge cases can differ. The package calls none of them; one spec uses `normalize` to build its input;
+- regular expressions (`\p{…}` included), case mapping of plain strings, string iteration and sorting use Hermes' own
+  code and Unicode tables on every platform: those are what the tokenizer relies on;
+- release build without the debugger, so no difference in results, but no inspector either;
+- the timing cases run on the CI runner's CPU, not a phone's.
+
+Another package can reuse this: `run.mjs` bundles any `src` whose specs import only `vitest` and relative files, and
+needs only its paths to be set from the package it runs for (move `hermes/` to a shared place then).

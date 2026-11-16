@@ -21,7 +21,8 @@
     "dev": "tsc -p tsconfig.build.json --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:hermes": "node hermes/run.mjs"
   },
   "devDependencies": {
     "@algoan/eslint-config": "^3.0.0",
