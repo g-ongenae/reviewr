@@ -67,7 +67,8 @@ never settles, or that leaves a rejected promise unhandled (Node's `unhandledRej
 fails, as it fails Vitest's run. So does a test whose `resolves` assertion fails without the test handling it, or never
 settles, awaited or not: the runner keeps the asynchronous assertions of each test, as Vitest does, and checks them when
 the test ends. It is stricter than Vitest for one that never settles and was made in a hook or after the test's body,
-which Vitest does not wait for. A fake clock never gives a timer handle that an earlier fake clock gave, as in Vitest.
+which Vitest does not wait for. One made outside a test must be awaited there, or the run refuses to start. A fake clock
+never gives a timer handle that an earlier fake clock gave, as in Vitest.
 
 Limits, each failing loudly rather than passing: hooks are synchronous and inside a `describe`, `describe` is
 synchronous, a test may only wait for promises and the fake timers (not real ones), only `setTimeout(callback, ms)` and

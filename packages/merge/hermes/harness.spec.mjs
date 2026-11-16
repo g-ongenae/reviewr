@@ -610,6 +610,36 @@ describe('the Hermes harness, asynchronous', () => {
     ]);
   });
 
+  it('refuses to run after an asynchronous assertion made outside a test that nobody awaited', async () => {
+    const lines = [];
+    const own = createHarness((line) => lines.push(line));
+    // As at the top of a spec file, or in the body of a describe.
+    void own.expect(Promise.resolve('lost')).resolves.toBe('saved');
+    own.it('passes', () => {});
+    await expect(own.run('Node')).rejects.toThrow('an asynchronous assertion made outside a test was not awaited');
+    expect(lines).toEqual([]);
+    // One that was awaited is the business of the code that awaited it.
+    await own
+      .expect(Promise.resolve('lost'))
+      .resolves.toBe('saved')
+      .catch(() => {});
+    await own.run('Node');
+    expect(lines.at(-1)).toBe('Node: 1 passed, 0 failed, 1 cases');
+  });
+
+  it('gives the assertions back to the test that started another run', async () => {
+    const lines = [];
+    const outer = createHarness((line) => lines.push(line));
+    outer.it('outer', async () => {
+      const inner = createHarness(() => {});
+      inner.it('inner', () => {});
+      await inner.run('Node');
+      void outer.expect(Promise.resolve('lost')).resolves.toBe('saved');
+    });
+    await expect(outer.run('Node')).rejects.toThrow('1 of 1 cases failed on Node');
+    expect(lines[0]).toBe('FAIL outer\n     expected the promise to resolve to "saved", got "lost"');
+  });
+
   it('runs beforeEach and afterEach in the order Vitest does', async () => {
     const order = [];
     const own = createHarness(() => {});

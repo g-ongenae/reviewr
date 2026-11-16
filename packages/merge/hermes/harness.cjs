@@ -145,14 +145,22 @@ const show = (value) => (typeof value === 'function' ? value.name : JSON.stringi
 const mockCalls = new WeakMap();
 
 /**
- * The asynchronous assertions (`resolves`) made since the running test started, in its hooks too; outside a run, a list
- * nobody reads. The runner owns their outcome: at the end of the test, one that failed fails the test unless the test
- * took its outcome (`await`, `then`, `catch`), and one still pending fails it. As Vitest, which keeps them per test and
- * waits for those of the test's body before the test passes; stricter for one that never settles and was made in a
- * hook or after the body, which Vitest does not wait for. A continuation that a test left behind and that asserts
- * during the next test is counted for that one.
+ * The asynchronous assertions (`resolves`) made while no test runs: when the specs are collected, or by code that uses
+ * `expect` without a run. Nobody waits for them, so each must be awaited where it is made: a run refuses to start after
+ * one whose outcome nobody took. In Vitest such an assertion is a plain promise, and its failure fails the run.
  */
-let asyncAssertions = [];
+const outsideAssertions = [];
+
+/**
+ * The list the asynchronous assertions go to: the one of the running test, from before its hooks to its end, else
+ * `outsideAssertions`. The runner owns the outcome of a test's assertions: at the end of the test, one that failed fails
+ * the test unless the test took its outcome (`await`, `then`, `catch`), and one still pending fails it. As Vitest, which
+ * keeps them per test and waits for those of the test's body before the test passes; stricter for one that never
+ * settles and was made in a hook or after the body, which Vitest does not wait for. A continuation that a test left
+ * behind and that asserts during the next test is counted for that one. A run started inside a test (harness.spec.mjs)
+ * gives the list back to that test when it ends.
+ */
+let asyncAssertions = outsideAssertions;
 
 /**
  * Registers an asynchronous assertion. The test gets a thenable, not the promise, so the runner knows whether the
@@ -551,8 +559,14 @@ const createHarness = (log) => {
       );
     }
 
+    // Settled by now, if they ever settle: the task above ran after every microtask.
+    if (outsideAssertions.splice(0).some((record) => !record.taken)) {
+      throw new Error('an asynchronous assertion made outside a test was not awaited: nothing checked its outcome');
+    }
+
     const unhandled = [];
     const stopWatching = watchUnhandledRejections((reason) => unhandled.push(reason));
+    const owner = asyncAssertions;
     let failed = 0;
     try {
       for (const test of tests) {
@@ -597,7 +611,7 @@ const createHarness = (log) => {
       }
     } finally {
       stopWatching();
-      asyncAssertions = [];
+      asyncAssertions = owner;
     }
     log(`CASES ${JSON.stringify(tests.map((test) => test.name))}`);
     log(`${engine}: ${tests.length - failed} passed, ${failed} failed, ${tests.length} cases`);
