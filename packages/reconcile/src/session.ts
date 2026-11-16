@@ -1,5 +1,5 @@
 import type { CreateRevisionInput, Document, DocumentDraft, SaveDraftInput } from '@reviewr/shared';
-import type { Autosave, AutosaveState, Draft } from '../autosave/autosave';
+import type { Autosave, AutosaveState, Draft } from '@reviewr/autosave';
 
 const day = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
 

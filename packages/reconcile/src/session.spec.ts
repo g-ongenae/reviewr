@@ -1,7 +1,7 @@
 import type { CreateRevisionInput, Document, DocumentDraft, SaveDraftInput } from '@reviewr/shared';
 import { describe, expect, it } from 'vitest';
-import { createAutosave, type Autosave, type Timers } from '../autosave/autosave';
-import { hiddenTexts, sessionFor, versionName, type ReconcileSession, type SessionOptions } from './session';
+import { createAutosave, type Autosave, type Timers } from '@reviewr/autosave';
+import { hiddenTexts, sessionFor, versionName, type ReconcileSession, type SessionOptions } from './session.js';
 
 describe('versionName', () => {
   it('names the side and the day, day first with an English month', () => {
