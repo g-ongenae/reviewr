@@ -1,5 +1,4 @@
 import {
-  ApiError,
   describeError,
   isServerUnreachable,
   ReachabilityTracker,
@@ -34,8 +33,6 @@ export const queryKeys = {
   revisions: (id: string) => ['documents', id, 'revisions'] as const,
   revision: (id: string, revision: number) => ['documents', id, 'revisions', revision] as const,
 };
-
-export const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
 
 /**
  * Message to show next to what failed, or undefined when there is nothing to show there: no error, or the server

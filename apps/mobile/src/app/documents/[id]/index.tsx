@@ -1,11 +1,16 @@
+import type { AutosaveState } from '@reviewr/autosave';
+import type { Stop } from '@reviewr/reconcile';
 import type { Document } from '@reviewr/shared';
-import { contentMaxLength, displayTitle, titleMaxLength, titleToSend } from '@reviewr/shared';
+import { conflictOf, contentMaxLength, describeError, displayTitle, titleMaxLength } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { api, inlineError, isConflict, queryKeys } from '@/lib/api';
+import { api, inlineError, queryKeys } from '@/lib/api';
+import { draftsOf } from '@/lib/appDrafts';
+import { textMoved } from '@/lib/drafts';
 import { countWords } from '@/lib/format';
+import type { TitleState } from '@/lib/title';
 import { useTheme } from '@/lib/theme';
 
 export default function DocumentScreen() {
@@ -13,86 +18,99 @@ export default function DocumentScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => api.getDocument(id) });
 
+  // A read that fails once the document is shown (deleted elsewhere, server down) keeps the text on screen.
+  if (document.data !== undefined) {
+    return <Editor document={document.data} />;
+  }
   if (document.isPending) {
     return <ActivityIndicator style={styles.message} color={theme.accent} />;
   }
-  if (document.isError) {
-    const message = inlineError(document.error);
-    return message === undefined ? (
-      <Text style={[styles.message, { color: theme.muted }]}>
-        This document will open as soon as the server is back.
-      </Text>
-    ) : (
-      <Text style={[styles.message, { color: theme.danger }]}>{message}</Text>
-    );
+  const message = inlineError(document.error);
+  return message === undefined ? (
+    <Text style={[styles.message, { color: theme.muted }]}>This document will open as soon as the server is back.</Text>
+  ) : (
+    <Text style={[styles.message, { color: theme.danger }]}>{message}</Text>
+  );
+}
+
+/** What the status line says about the text: whether it is on the server, and whether it differs from the last version. */
+const textStatus = (state: AutosaveState, revision: number, changedSinceVersion: boolean): string => {
+  switch (state.status) {
+    case 'unsaved':
+      return 'Unsaved changes';
+    case 'saving':
+      return 'Saving…';
+    case 'retrying':
+      return 'Not saved · retrying';
+    case 'conflict':
+      return 'Not saved · changed elsewhere';
+    case 'rejected':
+      return 'Not saved';
+    case 'saved':
+      if (revision === 0) return 'Draft saved · no version yet';
+      return changedSinceVersion ? `Draft saved · changed since revision ${revision}` : `Saved · revision ${revision}`;
   }
+};
 
-  return <Editor document={document.data} />;
-}
+const titleStatus = (state: TitleState): string => {
+  switch (state.status) {
+    case 'refused':
+      return 'Title not saved';
+    case 'retrying':
+      return 'Title not saved · retrying';
+    case 'saving':
+      return 'Saving title…';
+    default:
+      return 'Unsaved changes';
+  }
+};
 
-interface Draft {
-  /** As typed: empty when the document is untitled. */
-  title: string;
-  content: string;
-}
+/** Why "Save version" created no version, when the draft itself was saved. */
+const versionError = (error: unknown): string => {
+  if (error === textMoved || conflictOf(error)?.code === 'draft_conflict') {
+    return 'The version was not saved: the text changed while it was being saved. Your text is saved as a draft.';
+  }
+  const detail = inlineError(error);
+  return `The version could not be saved${detail ? ` (${detail})` : ''}. Your text is saved as a draft: try again.`;
+};
+
+/** Why "Keep mine" did not save the text. */
+const stopText = (stop: Stop): string => {
+  switch (stop.reason) {
+    case 'moved':
+      return 'The other device changed the text again, so yours was not saved.';
+    case 'failed': {
+      const error = inlineError(stop.error);
+      return `Your text could not be saved${error ? ` (${error})` : ''}.`;
+    }
+    case 'changed':
+      return 'Your text changed meanwhile, so it was not saved.';
+  }
+};
 
 const Editor = ({ document }: { document: Document }) => {
   const theme = useTheme();
   const queryClient = useQueryClient();
-  // `base` is the server version the draft started from.
-  const [base, setBase] = useState<Document>(document);
-  const [draft, setDraft] = useState<Draft>({ title: document.title ?? '', content: document.content });
-  const dirty = titleToSend(draft.title) !== titleToSend(base.title ?? '') || draft.content !== base.content;
+  const drafts = draftsOf(queryClient);
+  // The entry outlives the screen: what was typed just before leaving is still saved.
+  const [{ autosave, session, title }] = useState(() => drafts.open(document));
+  const state = useSyncExternalStore(autosave.subscribe, autosave.getSnapshot);
+  const titleState = useSyncExternalStore(title.subscribe, title.getSnapshot);
+  const sessionState = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  useEffect(() => drafts.hold(document.id), [drafts, document.id]);
+  // A newer draft read from the server goes to the machine, which never replaces unsaved text with it.
+  useEffect(() => drafts.read(document), [drafts, document]);
 
-  // The document changed on the server (e.g. a revision was restored from the history screen):
-  // follow it, unless the user has local edits that would be lost.
-  if (document.revision !== base.revision && !dirty) {
-    setBase(document);
-    setDraft({ title: document.title ?? '', content: document.content });
-  }
+  const { content } = state;
+  const changedSinceVersion = content !== document.content;
+  const busy = sessionState.running;
 
-  const onSaved = async (saved: Document) => {
-    setBase(saved);
-    queryClient.setQueryData(queryKeys.document(saved.id), saved);
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) }),
-    ]);
-  };
-
-  const save = useMutation({
-    mutationFn: (baseRevision: number) =>
-      api.updateDocument(document.id, { title: titleToSend(draft.title), content: draft.content, baseRevision }),
-    onSuccess: onSaved,
-    onError: (error) => {
-      if (!isConflict(error)) {
-        // An unreachable server is reported by the notification; the draft stays here, ready to save again.
-        const message = inlineError(error);
-        if (message !== undefined) Alert.alert('Could not save', message);
-        return;
-      }
-      Alert.alert('Changed elsewhere', 'This document was saved from another device since you opened it.', [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Discard mine',
-          style: 'destructive',
-          onPress: () =>
-            void api.getDocument(document.id).then(async (latest) => {
-              setDraft({ title: latest.title ?? '', content: latest.content });
-              await onSaved(latest);
-            }),
-        },
-        {
-          text: 'Keep mine',
-          onPress: () => void api.getDocument(document.id).then((latest) => save.mutate(latest.revision)),
-        },
-      ]);
-    },
-  });
+  const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
     onSuccess: async () => {
+      drafts.discard(document.id);
       queryClient.removeQueries({ queryKey: queryKeys.document(document.id) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       router.back();
@@ -109,7 +127,41 @@ const Editor = ({ document }: { document: Document }) => {
       { text: 'Delete', style: 'destructive', onPress: () => remove.mutate() },
     ]);
 
-  const status = save.isPending ? 'Saving…' : dirty ? 'Unsaved changes' : `Saved · revision ${base.revision}`;
+  const canSave =
+    changedSinceVersion &&
+    !saveVersion.isPending &&
+    !busy &&
+    state.status !== 'conflict' &&
+    state.status !== 'rejected';
+  const saved = state.status === 'saved' && titleState.status === 'saved' && !saveVersion.isPending;
+  const status = saveVersion.isPending
+    ? 'Saving version…'
+    : state.status !== 'saved' || titleState.status === 'saved'
+      ? textStatus(state, document.revision, changedSinceVersion)
+      : titleStatus(titleState);
+
+  /** What the notice above the text says, and whether it offers "Keep mine". */
+  let notice: { text: string; error?: boolean; keepMine?: boolean } | undefined;
+  if (state.status === 'rejected') {
+    notice = state.permanent
+      ? {
+          text: 'This document was deleted elsewhere: your text is no longer saved. Copy it before leaving.',
+          error: true,
+        }
+      : { text: `The server refused this text (${describeError(state.error)}). Change it to save again.`, error: true };
+  } else if (state.status === 'conflict') {
+    const { stop } = sessionState;
+    notice = busy
+      ? { text: 'Keeping the other device’s text as a version, then saving yours…' }
+      : stop !== undefined
+        ? { text: `${stopText(stop)} Your text is still here.`, error: stop.reason === 'failed', keepMine: true }
+        : {
+            text: 'This text was also changed on another device. “Keep mine” keeps the other text as a version in the history, then saves yours.',
+            keepMine: true,
+          };
+  } else if (saveVersion.isError) {
+    notice = { text: versionError(saveVersion.error), error: true };
+  }
 
   return (
     <View style={styles.container}>
@@ -123,33 +175,49 @@ const Editor = ({ document }: { document: Document }) => {
               >
                 <Text style={[styles.headerButton, { color: theme.accent }]}>History</Text>
               </Pressable>
-              <Pressable hitSlop={8} onPress={() => save.mutate(base.revision)} disabled={!dirty || save.isPending}>
-                <Text style={[styles.headerButton, { color: dirty ? theme.accent : theme.muted }]}>Save</Text>
+              <Pressable hitSlop={8} onPress={() => saveVersion.mutate()} disabled={!canSave}>
+                <Text style={[styles.headerButton, { color: canSave ? theme.accent : theme.muted }]}>Save version</Text>
               </Pressable>
             </View>
           ),
         }}
       />
       <View style={[styles.statusBar, { borderColor: theme.border }]}>
-        <Text style={{ color: dirty ? theme.accent : theme.muted }}>{status}</Text>
-        <Text style={{ color: theme.muted }}>{countWords(draft.content)} words</Text>
+        <Text style={{ color: saved ? theme.muted : theme.accent }}>{status}</Text>
+        <Text style={{ color: theme.muted }}>{countWords(content)} words</Text>
       </View>
+      {notice !== undefined && (
+        <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: theme.warning }]}>
+          <Text style={{ color: notice.error === true ? theme.danger : theme.text }}>{notice.text}</Text>
+          {notice.keepMine === true && (
+            <Pressable
+              style={[styles.noticeButton, { backgroundColor: theme.accent }]}
+              onPress={() => void drafts.keepMine(document.id)}
+            >
+              <Text style={styles.noticeButtonLabel}>Keep mine</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <TextInput
           style={[styles.titleInput, { color: theme.text }]}
           placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
           placeholderTextColor={theme.muted}
-          value={draft.title}
+          value={titleState.value}
           maxLength={titleMaxLength}
-          onChangeText={(title) => setDraft({ ...draft, title })}
+          onChangeText={title.edit}
+          onBlur={title.blur}
         />
         <TextInput
           style={[styles.contentInput, { color: theme.text }]}
           placeholder="Start writing…"
           placeholderTextColor={theme.muted}
-          value={draft.content}
+          value={content}
           maxLength={contentMaxLength}
-          onChangeText={(content) => setDraft({ ...draft, content })}
+          // Read-only while "Keep mine" runs: it saves the text it was given.
+          editable={!busy}
+          onChangeText={autosave.edit}
           multiline
           scrollEnabled={false}
           textAlignVertical="top"
@@ -174,6 +242,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  notice: { paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
+  noticeButton: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6 },
+  noticeButtonLabel: { color: '#fff', fontWeight: '600' },
   scroll: { padding: 16, flexGrow: 1 },
   titleInput: { fontSize: 26, fontWeight: '700', paddingVertical: 8 },
   contentInput: { flexGrow: 1, minHeight: 300, fontSize: 18, lineHeight: 28, fontFamily: 'serif' },
