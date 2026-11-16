@@ -64,7 +64,7 @@ Small changes on the existing schema, not the commit model:
 
 Web client — an autosave state machine, not just a debounce:
 
-- one write in flight at a time; edits typed during a request are kept and sent next (done: the framework-free core in `apps/web/src/autosave`, with debounce, retry with backoff, `flush()` and a conflict state, tested with delayed and failed requests);
+- one write in flight at a time; edits typed during a request are kept and sent next (done: the framework-free core in `apps/web/src/autosave`, with debounce, retry with backoff, `flush()` and a conflict state, tested with delayed and failed requests); the core is now the workspace package `@reviewr/autosave`, re-exported by the web app, so that the mobile app can use the same machine (done);
 - wire the core into the editor and the Composer through `PUT /documents/:id/draft`, with a saved / saving / retrying status; tell permanent failures (a deleted document) apart from temporary ones:
   - the editor of an existing document (done): it opens on the draft and saves it as the writer types; a document left before its text was saved keeps being saved in the background; a deleted document stops the saves for good and a refused text (too large) waits for a change, both with the text left on screen; a newer draft read from the server while the writer has unsaved text is a conflict, never a silent replacement; "Save version" flushes the draft, then saves it as a version through `POST /documents/:id/revisions`, with an optional name; a draft moved elsewhere becomes a conflict, and a head moved elsewhere is retried on the new head;
   - a draft conflict shows a short banner in the editor, whose one action opens the reconciliation view in place of the text (done);
