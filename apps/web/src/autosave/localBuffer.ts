@@ -24,8 +24,8 @@
  *   browser supports it (flushed to disk, not only to the OS cache).
  * - **Versioned schema.** The database is upgraded step by step through `localBufferSchema` (one migration per
  *   version). Later versions (the outbox) append a migration; buffered text is kept across upgrades. A field added to
- *   the records needs no migration as long as it is optional (`page` was added so): records are read defensively, and
- *   a record written before it reads as it did.
+ *   the records needs no migration as long as it is optional (`page` and `movedTo` were added so): records are read
+ *   defensively, and a record written before it reads as it did.
  * - **A stalled transaction stops the buffer, loudly.** A transaction that fires neither `complete` nor `abort` within
  *   `transactionTimeoutMs` is aborted if it can be, and its call answers `stalled`. Whether it will still commit is
  *   then unknown, so no later write may run after it (it could commit over newer text): from then on, this buffer
@@ -70,6 +70,11 @@ export interface BufferEntry {
   base: BufferBase | null;
   /** Only with `base: null`: what the creation of the document needs. Absent from records written before it. */
   page?: BufferPage;
+  /**
+   * Only without a base nor a page: the record holds no text, it says that the page whose id its key names continues
+   * as the document `movedTo` (the writer asked for a new id). Absent from records written before it.
+   */
+  movedTo?: string;
   /** When the entry was written, in milliseconds since the epoch. */
   updatedAt: number;
 }
@@ -106,7 +111,10 @@ export interface LocalBuffer {
   /** Reads the entry for `key`. */
   get(key: string): Promise<GetResult>;
   /** Stores the latest text for `key` and the base it started from (or its page), replacing what was there. */
-  put(key: string, value: { content: string; base: BufferBase | null; page?: BufferPage }): Promise<PutResult>;
+  put(
+    key: string,
+    value: { content: string; base: BufferBase | null; page?: BufferPage; movedTo?: string },
+  ): Promise<PutResult>;
   /** Removes the entry for `key`, unconditionally or only if it still holds `condition.ifContent`. */
   delete(key: string, condition?: DeleteCondition): Promise<DeleteResult>;
   /** Every entry, the most recently written first. */
@@ -172,12 +180,12 @@ const toPage = (value: unknown): BufferPage | undefined => {
 };
 
 /**
- * Reads a stored record defensively: whatever holds text is returned, a malformed base becomes `null`, and a page is
- * read only without a base (a malformed one is left out).
+ * Reads a stored record defensively: whatever holds text is returned, a malformed base becomes `null`, a page is read
+ * only without a base (a malformed one is left out), and a move only without a base nor a page.
  */
 const toEntry = (record: unknown): BufferEntry | undefined => {
   if (typeof record !== 'object' || record === null) return undefined;
-  const { key, content, base, page, updatedAt } = record as Record<string, unknown>;
+  const { key, content, base, page, movedTo, updatedAt } = record as Record<string, unknown>;
   if (typeof key !== 'string' || typeof content !== 'string') return undefined;
   const entry: BufferEntry = {
     key,
@@ -186,7 +194,8 @@ const toEntry = (record: unknown): BufferEntry | undefined => {
     updatedAt: typeof updatedAt === 'number' ? updatedAt : 0,
   };
   const pageOf = entry.base === null ? toPage(page) : undefined;
-  return pageOf === undefined ? entry : { ...entry, page: pageOf };
+  if (pageOf !== undefined) return { ...entry, page: pageOf };
+  return entry.base === null && typeof movedTo === 'string' ? { ...entry, movedTo } : entry;
 };
 
 /**
@@ -363,7 +372,7 @@ export const openLocalBuffer = (options: LocalBufferOptions = {}): LocalBuffer =
       // Snapshot the value now: the caller may change its object before the write runs.
       let record: BufferEntry;
       try {
-        const { content, base, page } = value;
+        const { content, base, page, movedTo } = value;
         record = {
           key,
           content,
@@ -373,6 +382,8 @@ export const openLocalBuffer = (options: LocalBufferOptions = {}): LocalBuffer =
         if (base === null && page !== undefined) {
           record.page =
             page.title === undefined ? { creation: page.creation } : { creation: page.creation, title: page.title };
+        } else if (base === null && movedTo !== undefined) {
+          record.movedTo = movedTo;
         }
       } catch (error) {
         return Promise.resolve(failure(error));

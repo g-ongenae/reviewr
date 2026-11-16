@@ -28,7 +28,9 @@ import {
  * 1. A text leaves the buffer only when the server confirmed that text, the writer discarded it, or a write of that
  *    same text elsewhere in the buffer was answered ok. Never because a write was queued, nor because a text in memory
  *    matches it. (`dropLeftText` is the only delete of another tab's entry; the registry calls it on exactly these
- *    three events, see `letGo` in `useAutosave`.)
+ *    three events, see `letGo` in `useAutosave`.) The write elsewhere is this tab's own entry, so it stands for the
+ *    text only while no other tab can adopt it: while this tab holds its lock (`onKept` and `keptText` say nothing
+ *    otherwise). Without that, two living tabs could each drop the other's copy for its own, and keep none.
  * 2. Every decision about another tab's entries is taken on records read while holding that tab's lock. A first list
  *    only says which tabs left something; their entries are read again once their locks are held (`adoptLeftTexts`),
  *    since a tab can write or delete until it is gone.
@@ -43,12 +45,18 @@ import {
  * registry sends a creation only once a write holding its text was answered (`mirrored`), or the entry already holds
  * that very text (`holds`), so a restore always sends the very same creation again under the same id. A page whose text
  * was erased is the writer's discard: its entry goes (if its creation was sent, the server keeps what it took).
+ *
+ * **A page moved to a new id** ("Try again", see "The identity of a page" in `useAutosave`) leaves a record under
+ * `"moved <old id>"` that holds no text and names the new id (`recordMove`). It is written before anything is sent
+ * under the new id, and kept: adoption reads every record of the old id, of any tab, as a text of the new one.
  */
 
 /** A text a gone tab left for a document, read under that tab's lock. */
 export interface LeftText {
   /** Its key in the buffer: deleted only as the invariant of adoption says. */
   key: string;
+  /** The id its record was written for: another one than the document it is restored for, if that page moved since. */
+  documentId: string;
   content: string;
   /** `null` for a page whose document did not exist yet: then `page` says what its creation needs. */
   base: Draft | null;
@@ -104,6 +112,8 @@ interface DeviceBuffer extends DeviceBufferOptions {
   adoption: Promise<unknown>;
   /** Settles once this tab holds its own lock: nothing is adopted before, or a tab could adopt its own entries. */
   ready: Promise<void>;
+  /** Whether this tab holds its own lock, so that no other tab adopts its entries while it lives (see rule 1). */
+  locked: boolean;
   /** The first failure the buffer answered, which the writer is told about once. */
   failure?: BufferFailureReason;
   listeners: Set<() => void>;
@@ -143,6 +153,7 @@ export const configureDeviceBuffer = (queryClient: QueryClient, options: DeviceB
     handed: new Set(),
     adoption: Promise.resolve(),
     ready: Promise.resolve(),
+    locked: false,
     listeners: new Set(),
   };
   if (buffer === null) {
@@ -151,6 +162,7 @@ export const configureDeviceBuffer = (queryClient: QueryClient, options: DeviceB
     device.ready = new Promise<void>((granted) => {
       locks
         .request(lockName(tabId), () => {
+          device.locked = true;
           granted();
           return forever;
         })
@@ -200,8 +212,8 @@ const drain = async (device: DeviceBuffer, mirror: Mirror) => {
       const result = await buffer.put(mirror.key, { content: op.content, base: op.base, page: op.page });
       mirror.stale = !result.ok;
       mirror.kept = result.ok ? op.content : undefined;
-      if (result.ok) mirror.onKept?.(op.content);
-      else report(device, result.reason);
+      if (!result.ok) report(device, result.reason);
+      else if (device.locked) mirror.onKept?.(op.content);
     } else {
       const condition = op.ifContent !== undefined && !mirror.stale;
       const result = await buffer.delete(mirror.key, condition ? { ifContent: op.ifContent ?? '' } : undefined);
@@ -310,9 +322,14 @@ export const keepRestored = (
   enqueue(device, documentId, { kind: 'put', content, base, page, pinned: true });
 };
 
-/** The text this tab's entry for the document holds, as last answered ok; `undefined` if unknown or none. */
-export const keptText = (queryClient: QueryClient, documentId: string): string | undefined =>
-  deviceOf(queryClient).mirrors.get(documentId)?.kept;
+/**
+ * The text this tab's entry for the document holds, as last answered ok; `undefined` if unknown or none, and while
+ * this tab does not hold its lock (see rule 1: its entry then stands for nothing).
+ */
+export const keptText = (queryClient: QueryClient, documentId: string): string | undefined => {
+  const device = deviceOf(queryClient);
+  return device.locked ? device.mirrors.get(documentId)?.kept : undefined;
+};
 
 /**
  * Deletes another tab's entry `key` if it still holds `content`. The only delete of another tab's entry: call it only
@@ -358,15 +375,53 @@ const claim = (device: DeviceBuffer, tabId: string): Promise<boolean> => {
   });
 };
 
-/** Whether a record is a text another tab left that this adoption may look at (a page only with what it needs). */
-const leftBy = (device: DeviceBuffer, entry: BufferEntry, documentId: string | undefined) => {
+const movedPrefix = 'moved ';
+
+/**
+ * Records that a page continues as the document `to` (see "A page moved to a new id" above); answers whether the
+ * buffer kept it. Never deleted: the records of the old id can outlive any tab.
+ */
+export const recordMove = async (queryClient: QueryClient, from: string, to: string): Promise<boolean> => {
+  const device = deviceOf(queryClient);
+  if (device.buffer === null) return false;
+  const result = await device.buffer.put(`${movedPrefix}${from}`, { content: '', base: null, movedTo: to });
+  if (!result.ok) report(device, result.reason);
+  return result.ok;
+};
+
+/** The ids each moved page continues as, from a list of the buffer. */
+const movesIn = (entries: readonly BufferEntry[]): Map<string, string> =>
+  new Map(
+    entries.flatMap((entry) =>
+      entry.movedTo !== undefined && entry.key.startsWith(movedPrefix)
+        ? [[entry.key.slice(movedPrefix.length), entry.movedTo] as const]
+        : [],
+    ),
+  );
+
+/** The id a page continues as now, following its moves (a cycle, which no tab writes, stops after every move once). */
+const currentId = (moves: ReadonlyMap<string, string>, id: string): string => {
+  let current = id;
+  for (let hops = 0; hops < moves.size; hops++) current = moves.get(current) ?? current;
+  return current;
+};
+
+/**
+ * Whether a record is a text another tab left that this adoption may look at (a page only with what it needs), and
+ * for which document: the one it was written for, or the one that page moved to.
+ */
+const leftBy = (
+  device: DeviceBuffer,
+  entry: BufferEntry,
+  documentId: string | undefined,
+  moves: ReadonlyMap<string, string>,
+) => {
   const owner = parseKey(entry.key);
-  return owner !== undefined &&
-    owner.tabId !== device.tabId &&
-    (documentId === undefined || owner.documentId === documentId) &&
-    (entry.base !== null || entry.page !== undefined)
-    ? owner
-    : undefined;
+  if (owner === undefined || owner.tabId === device.tabId || (entry.base === null && entry.page === undefined)) {
+    return undefined;
+  }
+  const current = currentId(moves, owner.documentId);
+  return documentId === undefined || current === documentId ? { ...owner, current } : undefined;
 };
 
 /**
@@ -390,7 +445,10 @@ export const adoptLeftTexts = (
       report(device, first.reason);
       return undefined;
     }
-    const owners = new Set(first.entries.flatMap((entry) => leftBy(device, entry, documentId)?.tabId ?? []));
+    const firstMoves = movesIn(first.entries);
+    const owners = new Set(
+      first.entries.flatMap((entry) => leftBy(device, entry, documentId, firstMoves)?.tabId ?? []),
+    );
     for (const owner of owners) await claim(device, owner);
     // Read again, now that the locks are held: these records can no longer change but through this tab.
     const fresh = await buffer.list();
@@ -398,14 +456,16 @@ export const adoptLeftTexts = (
       report(device, fresh.reason);
       return undefined;
     }
+    const moves = movesIn(fresh.entries);
     for (const entry of fresh.entries) {
-      const owner = leftBy(device, entry, documentId);
+      const owner = leftBy(device, entry, documentId, moves);
       if (owner === undefined || !device.claimed.has(owner.tabId)) continue;
       if (device.handed.has(entry.key)) continue;
-      const texts = left.get(owner.documentId) ?? [];
+      const texts = left.get(owner.current) ?? [];
       const { key, content, base, page } = entry;
-      texts.push(page === undefined ? { key, content, base } : { key, content, base, page });
-      left.set(owner.documentId, texts);
+      const text: LeftText = { key, documentId: owner.documentId, content, base };
+      texts.push(page === undefined ? text : { ...text, page });
+      left.set(owner.current, texts);
     }
     return left;
   };

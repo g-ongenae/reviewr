@@ -15,6 +15,8 @@ interface Props {
   onCreated?: () => void;
   /** The blank page's creation was refused: its text is now on the blank page `id`, to be created again. */
   onCreateAgain?: (id: string) => void;
+  /** Shows another page not created yet, `id`, on the blank page. */
+  onOpenPage?: (id: string) => void;
   onDeleted: () => void;
   onGoBack: () => void;
   /** Opens another document: one created from a text of this one, after it was deleted. */
@@ -29,6 +31,7 @@ export const DocumentView = ({
   blank = false,
   onCreated,
   onCreateAgain,
+  onOpenPage,
   onDeleted,
   onGoBack,
   onOpen,
@@ -61,6 +64,7 @@ export const DocumentView = ({
         document={blankPage}
         isNew
         onCreateAgain={onCreateAgain}
+        onOpenPage={onOpenPage}
         onDeleted={onDeleted}
         toolbarStart={toolbarStart}
       />

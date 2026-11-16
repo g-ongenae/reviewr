@@ -53,6 +53,7 @@ export const App = () => {
             if (selectedId === undefined) select(id, true);
           }}
           onCreateAgain={setBlankId}
+          onOpenPage={setBlankId}
           onDeleted={() => select(undefined)}
           onGoBack={() => navigate(undefined)}
           onOpen={(document) => select(document.id)}
