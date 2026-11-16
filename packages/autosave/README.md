@@ -39,3 +39,12 @@ autosave.dispose(); // cancels timers, ignores the answer in flight, settles pen
 
 The package declares no DOM or Node types (`lib: ES2023`): the only host functions it uses are `setTimeout` and
 `clearTimeout`, declared for its own compilation in `src/timers.d.ts`.
+
+## Developing
+
+The apps use the built package (`dist`), not its sources. `pnpm install` and `pnpm build` build it; `pnpm dev:web` only
+starts Vite. While changing the machine with an app running, keep the package rebuilding beside it:
+
+```sh
+pnpm --filter @reviewr/autosave dev
+```
