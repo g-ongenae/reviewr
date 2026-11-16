@@ -478,6 +478,16 @@ const createHarness = (log) => {
     if (!drained) {
       throw new Error(`${engine} runs a task before the microtasks queued earlier: the Hermes harness cannot run here`);
     }
+    // What the specs rely on, as any code: each iteration of a loop has its own `let` (see -Xes6-block-scoping, run.mjs).
+    const iterations = [];
+    for (let i = 0; i < 2; i++) {
+      iterations.push(() => i);
+    }
+    if (iterations[0]() !== 0) {
+      throw new Error(
+        `${engine} shares one \`let\` between the iterations of a loop: compile with -Xes6-block-scoping`,
+      );
+    }
 
     const unhandled = [];
     const stopWatching = watchUnhandledRejections((reason) => unhandled.push(reason));

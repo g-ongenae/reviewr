@@ -123,13 +123,19 @@ const bytecode = join(out, `${name}.hbc`);
 writeFileSync(script, bundle);
 console.log(`Bundled ${specs.join(', ')} into ${relative(process.cwd(), script)}`);
 console.log(`Vitest collects ${expectedNames.length} cases in them; Hermes ${pin.HERMES_VERSION} from ${bin}`);
-execFileSync(join(bin, 'hermesc'), ['-O', '-emit-binary', '-out', bytecode, script], { stdio: 'inherit' });
+// Without this hidden flag (off at the pinned tag), Hermes gives `let` and `const` the scope of their function: a closure
+// made in a loop sees the last iteration's binding. The phone never runs such code: Metro's Babel preset lowers block
+// scoping first. With it, the bundle gets the standard scoping the app's code has; the harness checks it before running.
+const blockScoping = '-Xes6-block-scoping';
+execFileSync(join(bin, 'hermesc'), ['-O', blockScoping, '-emit-binary', '-out', bytecode, script], {
+  stdio: 'inherit',
+});
 
 // A run passes if it exits with 0, every case passed, and its cases are exactly Vitest's.
 let failed = false;
 for (const [title, command, args] of [
   ['On Node (V8), to check the harness:', process.execPath, [script]],
-  ['On Hermes, from source:', join(bin, 'hermes'), [script]],
+  ['On Hermes, from source:', join(bin, 'hermes'), [blockScoping, script]],
   ['On Hermes, from bytecode compiled by hermesc -O:', join(bin, 'hermes'), ['-b', bytecode]],
 ]) {
   console.log(`\n${title}`);
