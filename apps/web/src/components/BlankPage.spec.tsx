@@ -51,17 +51,19 @@ const fakeApi = ({ method, path, body }: Call): Response => {
   }
   if (method === 'POST' && path === '/documents') {
     const input = body as CreateDraftDocumentInput;
+    // A creation without an id ("Save as a new document") gets one from the server.
+    const id = (input.id as string | undefined) ?? `made-${db.size + 1}`;
     const key = JSON.stringify([input.title ?? null, input.content, input.draftOnly]);
-    const recorded = creations.get(input.id);
+    const recorded = creations.get(id);
     if (recorded !== undefined) {
-      if (recorded !== key) return error(422, `Document ${input.id} was already created with another body`);
-      const existing = db.get(input.id);
-      return existing === undefined ? error(410, `Document ${input.id} was deleted`) : reply(201, existing);
+      if (recorded !== key) return error(422, `Document ${id} was already created with another body`);
+      const existing = db.get(id);
+      return existing === undefined ? error(410, `Document ${id} was deleted`) : reply(201, existing);
     }
-    creations.set(input.id, key);
+    creations.set(id, key);
     const now = new Date().toISOString();
     const created: Document = {
-      id: input.id,
+      id,
       title: input.title ?? null,
       revision: 0,
       content: '',
@@ -69,7 +71,7 @@ const fakeApi = ({ method, path, body }: Call): Response => {
       updatedAt: now,
       draft: { content: input.content, draftVersion: 1, baseRevision: null },
     };
-    db.set(input.id, created);
+    db.set(id, created);
     return reply(201, created);
   }
 
@@ -484,46 +486,29 @@ describe('The blank page', () => {
     [410, 'Document was deleted'],
     [422, 'Document was already created with another body'],
   ])(
-    'keeps the text and title after a %i on creation, without looping, and creates them again under a new id',
-    async (code) => {
+    'shows the text and title of a page refused with %i as a document deleted elsewhere, and creates nothing',
+    async (code, message) => {
       start();
       await elapse();
-      intercept = (call) =>
-        call.path === '/documents' && call.method === 'POST' && creates().length === 1
-          ? error(code, 'Refused')
-          : undefined;
+      // The document cannot be read either: for a 422, that says it was deleted since.
+      intercept = (call) => (call.path === '/documents' && call.method === 'POST' ? error(code, message) : undefined);
       fireEvent.change(titleField(), { target: { value: 'Le phare' } });
       type('Le phare est éteint.');
       await elapse(60_000);
       expect(creates()).toHaveLength(1);
-      expect(screen.getByRole('alert').textContent).toBe(
-        'This text could not be saved as a new document. It is kept here: try again to save it.Try again',
-      );
-      expect(textarea().value).toBe('Le phare est éteint.');
-      expect(status()).toBe('Not saved');
+      expect(screen.getByRole('heading', { name: 'This document was deleted elsewhere' }));
+      expect(screen.getByRole('textbox', { name: 'Your text' })).toHaveProperty('value', 'Le phare est éteint.');
+      expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
       expect(unload().defaultPrevented).toBe(true);
       expect(window.location.hash).toBe('');
 
-      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      // A new document made from the text is the writer's own act, and takes the title typed on the page.
+      intercept = () => undefined;
+      fireEvent.click(screen.getByRole('button', { name: 'Save as a new document' }));
       await elapse();
-      const [refused, again] = creates();
-      expect(creates()).toHaveLength(2);
-      const id = (again?.body as CreateDraftDocumentInput).id;
-      expect(id).not.toBe((refused?.body as CreateDraftDocumentInput).id);
-      expect(again?.body).toEqual({ id, content: 'Le phare est éteint.', draftOnly: true });
-      expect(window.location.hash).toBe(`#/documents/${id}`);
-      expect(textarea().value).toBe('Le phare est éteint.');
-      // The title typed before the refusal is still there, and saved once the document exists.
-      expect(titleField().value).toBe('Le phare');
-      expect(status()).toBe('Saving title…');
-      expect(unload().defaultPrevented).toBe(true);
-
-      await elapse(1000);
-      const rename = only(calls.filter((call) => call.method === 'PATCH'));
-      expect(rename).toEqual({ method: 'PATCH', path: `/documents/${id}`, body: { title: 'Le phare' } });
-      expect(db.get(id)?.title).toBe('Le phare');
-      expect(status()).toBe('No version yet · draft saved');
-      expect(unload().defaultPrevented).toBe(false);
+      const made = [...db.values()].find((document) => document.draft?.content === 'Le phare est éteint.');
+      expect(made?.title).toBe('Le phare');
+      expect(window.location.hash).toBe(`#/documents/${made?.id}`);
     },
   );
 });

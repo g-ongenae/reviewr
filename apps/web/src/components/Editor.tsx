@@ -16,7 +16,6 @@ import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
 import {
   cacheDocument,
-  createAgain,
   discardAutosave,
   discardCopy,
   draftOf,
@@ -38,8 +37,6 @@ interface Props {
   document: Document;
   /** The document does not exist on the server yet (the blank page): the autosave creates it. */
   isNew?: boolean;
-  /** The creation was refused: the text was moved to the blank page `id`, to be created again. */
-  onCreateAgain?: (id: string) => void;
   /** Shows another page not created yet, `id`, on the blank page. */
   onOpenPage?: (id: string) => void;
   onDeleted: () => void;
@@ -107,7 +104,7 @@ const stopText = (stop: Stop): string => {
   }
 };
 
-export const Editor = ({ document, isNew = false, onCreateAgain, onOpenPage, onDeleted, toolbarStart }: Props) => {
+export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
   const { autosave, state, discard, pendingTitle, keepTitle } = useAutosave(document, isNew);
   /**
@@ -460,15 +457,7 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onOpenPage, onD
           </div>
         )}
 
-        {state.status === 'rejected' && isNew ? (
-          // The server's message names the document's id, which says nothing to the writer: it is in the tooltip.
-          <div className="banner error" role="alert" title={describeError(state.error)}>
-            <span>This text could not be saved as a new document. It is kept here: try again to save it.</span>
-            <button className="primary" onClick={() => onCreateAgain?.(createAgain(queryClient, document.id))}>
-              Try again
-            </button>
-          </div>
-        ) : state.status === 'rejected' ? (
+        {state.status === 'rejected' ? (
           <div className="banner error" role="alert">
             <span>
               {state.permanent

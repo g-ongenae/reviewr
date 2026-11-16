@@ -44,8 +44,10 @@ const notFound = () => reply(404, { statusCode: 404, message: 'Not found' });
 const original = 'Il veillait.';
 
 let db: Map<string, Document>;
-/** Every text the server ever saved as a draft. */
+/** Every text the server ever saved as a draft or a document's first text. */
 let everSaved: Set<string>;
+/** Every creation the server ever accepted, kept after a deletion. */
+let accepted: CreateDraftDocumentInput[];
 /** The body of each creation the server took, by id: kept after a deletion, as the server keeps the id. */
 let creations: Map<string, string>;
 
@@ -69,17 +71,20 @@ const fakeApi = ({ method, path, body }: Call): Response => {
   }
   if (method === 'POST' && path === '/documents') {
     const input = body as CreateDraftDocumentInput;
+    // A creation without an id ("Save as a new document") gets one from the server.
+    const id = (input.id as string | undefined) ?? `made-${db.size + 1}`;
     const key = JSON.stringify([input.title ?? null, input.content, input.draftOnly]);
-    const recorded = creations.get(input.id);
+    const recorded = creations.get(id);
     if (recorded !== undefined) {
-      if (recorded !== key) return error(422, `Document ${input.id} was already created with another body`);
-      const existing = db.get(input.id);
-      return existing === undefined ? error(410, `Document ${input.id} was deleted`) : reply(201, existing);
+      if (recorded !== key) return error(422, `Document ${id} was already created with another body`);
+      const existing = db.get(id);
+      return existing === undefined ? error(410, `Document ${id} was deleted`) : reply(201, existing);
     }
-    creations.set(input.id, key);
+    creations.set(id, key);
     everSaved.add(input.content);
+    accepted.push(input);
     const created: Document = {
-      id: input.id,
+      id,
       title: input.title ?? null,
       revision: 0,
       content: '',
@@ -87,7 +92,7 @@ const fakeApi = ({ method, path, body }: Call): Response => {
       updatedAt: '2026-11-01T10:00:00.000Z',
       draft: { content: input.content, draftVersion: 1, baseRevision: null },
     };
-    db.set(input.id, created);
+    db.set(id, created);
     return reply(201, created);
   }
   const [, , id, sub] = path.split('/');
@@ -186,8 +191,7 @@ const stored = async (): Promise<[string, string][]> => {
   let entries: [string, string][] = [];
   await raw(async (buffer) => {
     const result = await buffer.list();
-    // A move holds no text (see `recordMove`): it is checked on its own where it matters.
-    entries = result.entries.flatMap(({ key, content, movedTo }) => (movedTo === undefined ? [[key, content]] : []));
+    entries = result.entries.map(({ key, content }) => [key, content]);
   });
   return entries.sort(([a], [b]) => a.localeCompare(b));
 };
@@ -268,7 +272,7 @@ const crashable = (real: LocalBuffer = openLocalBuffer(bufferOptions())): Crasha
     get: (key) => call(() => real.get(key)),
     list: () => call(() => real.list()),
     put: (key, value) => {
-      const record = { content: value.content, base: value.base, page: value.page, movedTo: value.movedTo };
+      const record = { content: value.content, base: value.base, page: value.page };
       return call(() => (buffer.faults.put ? Promise.resolve(failure(buffer.faults.put)) : real.put(key, record)));
     },
     delete: (key, condition) =>
@@ -379,6 +383,7 @@ beforeEach(() => {
   );
   everSaved = new Set();
   creations = new Map();
+  accepted = [];
   calls = [];
   lose = () => false;
   loseAnswer = () => false;
@@ -910,6 +915,33 @@ describe('adoption, through crashes and races', () => {
     expect(await stored()).toEqual([]);
   });
 
+  it('keeps a text that two living tabs without Web Locks each adopted from the other', async () => {
+    lose = isDraftSave;
+    const one = await load('#/documents/doc-1', { locks: false });
+    type(one, 'Il veillait, seul.');
+    await elapse(1000);
+    // Without Web Locks, the second tab takes the first one's text over, though that tab is still open.
+    const two = await load('#/documents/doc-1', { locks: false });
+    await elapse(1000);
+    expect(textarea(two).value).toBe('Il veillait, seul.');
+    // The first tab looks for texts left again, and finds the second tab's copy of its own text.
+    act(() => {
+      reachability.reportError(new TypeError('Failed to fetch'));
+      reachability.reportSuccess();
+    });
+    await elapse(1000);
+    // Neither copy went for the other's sake: a tab's own write stands for another's copy only under its lock.
+    expect((await stored()).map(([, text]) => text)).toEqual(['Il veillait, seul.', 'Il veillait, seul.']);
+    await one.crash();
+    await two.crash();
+
+    lose = () => false;
+    const three = await load();
+    await elapse(1000);
+    expect(textarea(three).value).toBe('Il veillait, seul.');
+    expect(serverDraft()).toBe('Il veillait, seul.');
+  });
+
   it('restores without Web Locks', async () => {
     lose = isDraftSave;
     const first = await load('#/documents/doc-1', { locks: false });
@@ -1308,7 +1340,11 @@ describe('a page whose document does not exist yet', () => {
     return entries.map(({ key, content, base, page }) => ({ key, content, base, page }));
   };
   const titleField = (page: Page) => page.view.container.querySelector<HTMLInputElement>('.title-input');
-  const tryAgain = (page: Page) => within(page.view.container).queryByRole('button', { name: 'Try again' });
+  /** Whether the page shows the recovery of a document deleted elsewhere. */
+  const recovering = (page: Page) =>
+    within(page.view.container).queryByRole('heading', { name: 'This document was deleted elsewhere' }) !== null;
+  /** No page is ever offered another id. */
+  const noNewId = (page: Page) => within(page.view.container).queryByRole('button', { name: 'Try again' }) === null;
 
   it('keeps a page typed before anything was sent, and creates it once after a crash', async () => {
     const first = await load('');
@@ -1419,29 +1455,50 @@ describe('a page whose document does not exist yet', () => {
     expect(textarea(second).value).toBe('Une page.');
   });
 
-  it('comes back refused when its document was deleted before the reload, and “Try again” creates it once', async () => {
+  it('shows the recovery of a page whose document was deleted elsewhere (410), again after a reload', async () => {
     loseAnswer = isCreation;
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     const first = await load('');
+    fireEvent.change(titleField(first) as HTMLInputElement, { target: { value: 'Le phare' } });
     type(first, 'Une page.');
     await elapse(1000);
     const id = created()[0]?.id ?? '';
     db.delete(id);
     loseAnswer = () => false;
     await elapse(2000);
-    expect(tryAgain(first)).not.toBeNull();
+    expect(recovering(first)).toBe(true);
+    expect(listed(first)).toEqual([['Your text', 'Une page.']]);
     await first.crash();
 
     const second = await load('');
     await elapse(1000);
-    expect(textarea(second).value).toBe('Une page.');
-    expect(tryAgain(second)).not.toBeNull();
+    expect(recovering(second)).toBe(true);
+    expect(listed(second)).toEqual([['Your text', 'Une page.']]);
+    expect(noNewId(second)).toBe(true);
+    expect(accepted.map((input) => input.id)).toEqual([id]);
     expect(creationsSent().every((body) => body.id === id && body.content === 'Une page.')).toBe(true);
+    expect(await stored()).toEqual([[`tab-2 ${id}`, 'Une page.']]);
 
-    fireEvent.click(tryAgain(second) as HTMLElement);
-    await elapse(1000);
-    expect(pages()).toEqual(['Une page.']);
-    expect(oneBodyPerId()).toBe(true);
+    // A new document made from it is the writer's own act, with the title typed on the page.
+    fireEvent.click(within(second.view.container).getByRole('button', { name: 'Save as a new document' }));
+    await elapse();
+    const made = created().find((document) => document.id !== id);
+    expect(made?.draft?.content ?? made?.content).toBe('Une page.');
+    expect(made?.title).toBe('Le phare');
+
+    // Discarding the page removes it from the buffer: nothing brings it back.
+    fireEvent.click(within(second.view.container).getByRole('button', { name: /Lettres/ }));
+    await elapse();
+    fireEvent.click(within(second.view.container).getByRole('button', { name: '+ New document' }));
+    await elapse();
+    fireEvent.click(within(second.view.container).getByRole('button', { name: 'Discard these copies' }));
+    await settle();
     expect(await stored()).toEqual([]);
+    await second.crash();
+    const third = await load('');
+    await elapse(1000);
+    expect(textarea(third).value).toBe('');
+    expect(listed(third)).toEqual([]);
   });
 
   it('joins the document its id holds when its creation is refused for another text, and offers no new id', async () => {
@@ -1460,7 +1517,7 @@ describe('a page whose document does not exist yet', () => {
     const first = await load('');
     type(first, 'Une page.');
     await elapse(1000);
-    expect(tryAgain(first)).toBeNull();
+    expect(noNewId(first)).toBe(true);
     const state = entryOf(first.queryClient, taken)?.autosave.getSnapshot();
     expect(state?.status).toBe('conflict');
     expect(state?.content).toBe('Une page.');
@@ -1468,7 +1525,7 @@ describe('a page whose document does not exist yet', () => {
     expect(pages()).toEqual(['Un autre texte.']);
   });
 
-  it('offers a new id when its creation is refused for another text and its document cannot be found', async () => {
+  it('shows the recovery when its creation is refused for another text and its document cannot be found', async () => {
     intercept = (call) =>
       isCreation(call)
         ? error(422, 'Already created with another body')
@@ -1478,11 +1535,32 @@ describe('a page whose document does not exist yet', () => {
     const first = await load('');
     type(first, 'Une page.');
     await elapse(1000);
-    expect(tryAgain(first)).not.toBeNull();
+    expect(recovering(first)).toBe(true);
+    expect(listed(first)).toEqual([['Your text', 'Une page.']]);
+    expect(noNewId(first)).toBe(true);
     intercept = () => undefined;
-    fireEvent.click(tryAgain(first) as HTMLElement);
+    await elapse(60_000);
+    expect(accepted).toEqual([]);
+  });
+
+  it.each([400, 413])('keeps the id after a %i on creation, and creates the changed text under it', async (status) => {
+    intercept = (call) => (isCreation(call) ? error(status, 'Refused') : undefined);
+    const first = await load('');
+    type(first, 'Une page refusée.');
     await elapse(1000);
-    expect(pages()).toEqual(['Une page.']);
+    const [refused] = creationsSent();
+    expect(within(first.view.container).getByRole('alert').textContent).toContain('The server refused this text');
+    expect(await records()).toMatchObject([{ content: 'Une page refusée.', page: { creation: null } }]);
+    // The refused text is never sent again.
+    await elapse(60_000);
+    expect(creationsSent()).toHaveLength(1);
+
+    intercept = () => undefined;
+    type(first, 'Une page acceptée.');
+    await elapse(1000);
+    expect(accepted).toEqual([{ id: refused?.id, content: 'Une page acceptée.', draftOnly: true }]);
+    expect(pages()).toEqual(['Une page acceptée.']);
+    expect(await stored()).toEqual([]);
   });
 
   it('restores the pages of two tabs as two documents, one of them on the blank page', async () => {
@@ -1692,7 +1770,7 @@ describe('a page whose document does not exist yet', () => {
       loseAnswer = () => false;
       const second = await load('');
       await elapse(1000);
-      expect(tryAgain(second)).toBeNull();
+      expect(noNewId(second)).toBe(true);
       expect(created()).toHaveLength(1);
       const state = conflictOf(second, created()[0]?.id ?? '');
       expect(state?.status).toBe('conflict');
@@ -1715,63 +1793,29 @@ describe('a page whose document does not exist yet', () => {
 
       lose = () => false;
       await elapse(5000);
-      expect(tryAgain(adopter)).toBeNull();
-      expect(tryAgain(owner)).toBeNull();
+      expect(noNewId(adopter) && noNewId(owner)).toBe(true);
       expect(created()).toHaveLength(1);
       expect(conflictOf(adopter, id)?.status).toBe('conflict');
       expect(db.get(id)?.draft?.content).toBe('A, puis B.');
     });
 
-    it('keeps a page on its new id after “Try again”, through a crash before its old entry is deleted', async () => {
+    it('shows the recovery in both tabs that restored the same page deleted elsewhere, and creates nothing', async () => {
       const id = await refusedPage();
-      const buffer = crashable();
-      const first = await load('', { buffer });
+      const one = await load('', { locks: false });
+      const two = await load('', { locks: false });
       await elapse(1000);
-      expect(tryAgain(first)).not.toBeNull();
-      // No delete commits from here on: the crash comes before the old entry, or a copy, is deleted.
-      buffer.faults.delete = 'failed';
-      fireEvent.click(tryAgain(first) as HTMLElement);
-      await elapse(1000);
-      expect(created()).toHaveLength(1);
-      expect((await stored()).map(([key]) => key)).toContain(`tab-1 ${id}`);
-      await first.crash();
-
-      const second = await load('');
-      await elapse(1000);
-      await elapse(1000);
-      expect(tryAgain(second)).toBeNull();
-      expect(entryOf(second.queryClient, id)).toBeUndefined();
-      expect(created()).toHaveLength(1);
-      expect(found(second)).toEqual(expect.arrayContaining(['Un.', 'Un, deux.']));
+      expect(recovering(one)).toBe(true);
+      expect(recovering(two)).toBe(true);
+      expect(found(one)).toEqual(expect.arrayContaining(['Un.', 'Un, deux.']));
+      expect(found(two)).toEqual(expect.arrayContaining(['Un.', 'Un, deux.']));
+      expect(noNewId(one) && noNewId(two)).toBe(true);
+      expect(accepted).toEqual([]);
+      expect(creationsSent().every((body) => body.id === id)).toBe(true);
     });
 
-    it('keeps a page on its new id after “Try again”, through a crash after its old entry is deleted', async () => {
-      const id = await refusedPage();
-      const first = await load('');
-      await elapse(1000);
-      lose = isCreation;
-      fireEvent.click(tryAgain(first) as HTMLElement);
-      await elapse(1000);
-      // This tab's entry for the old id went once the new one was written; a copy of another text stays under it.
-      const keys = (await stored()).map(([key]) => key);
-      expect(keys).not.toContain(`tab-1 ${id}`);
-      expect(keys.filter((key) => key.endsWith(id))).toHaveLength(1);
-      await first.crash();
-
-      lose = () => false;
-      const second = await load('');
-      await elapse(1000);
-      await elapse(1000);
-      expect(tryAgain(second)).toBeNull();
-      expect(entryOf(second.queryClient, id)).toBeUndefined();
-      expect(created()).toHaveLength(1);
-      expect(found(second)).toEqual(expect.arrayContaining(['Un.', 'Un, deux.']));
-      expect(oneBodyPerId()).toBe(true);
-    });
-
-    it('lists a page refused in the background on the blank page, to open and create again', async () => {
+    it('lists a page found deleted in the background on the blank page, and opens its recovery', async () => {
       // The second page, left by a tab still open meanwhile: its creation got there, then its document was deleted
-      // elsewhere, so its id is refused.
+      // elsewhere.
       const second = '44444444-4444-4444-8444-444444444444';
       creations.set(second, JSON.stringify([null, 'Seconde page.', true]));
       await raw((buffer) =>
@@ -1794,16 +1838,46 @@ describe('a page whose document does not exist yet', () => {
 
       fireEvent.click(within(three.view.container).getByRole('button', { name: 'Open this page' }));
       await elapse();
-      expect(textarea(three).value).toBe('Seconde page.');
-      expect(listed(three)).toEqual([['A page not saved yet', 'Première page.']]);
-      fireEvent.click(tryAgain(three) as HTMLElement);
-      await elapse(1000);
-      expect(pages()).toEqual(['Seconde page.']);
+      expect(recovering(three)).toBe(true);
+      expect(listed(three)).toEqual([['Your text', 'Seconde page.']]);
+      expect(accepted).toEqual([]);
 
       fireEvent.click(within(three.view.container).getByRole('button', { name: '+ New document' }));
       await elapse();
-      expect(textarea(three).value).toBe('Première page.');
-      expect(listed(three)).toEqual([]);
+      expect(recovering(three)).toBe(true);
+    });
+
+    it('removes every record of a discarded page, this tab’s own included, so that no reload brings it back', async () => {
+      // A page two gone tabs left, with two texts: the newer one is restored, the older one held as a copy.
+      const id = '55555555-5555-4555-8555-555555555555';
+      await raw(async (buffer) => {
+        await buffer.put(`tab-A ${id}`, { content: 'Une page.', base: null, page: { creation: null } });
+        await buffer.put(`tab-B ${id}`, { content: 'Une page, plus longue.', base: null, page: { creation: null } });
+      });
+      lose = isCreation;
+      claimsWait = true;
+      const page = await load('');
+      type(page, 'Une page neuve.');
+      await grantClaims();
+      await elapse(1000);
+      // Written in the same millisecond, either text can be the newer one, and the other the copy.
+      expect(listed(page)).toHaveLength(1);
+      expect(['Une page.', 'Une page, plus longue.']).toContain(listed(page)[0]?.[1]);
+      // This tab wrote the page under its own key; the copy of another text stays under its gone tab's key.
+      const keys = (await stored()).filter(([key]) => key.endsWith(id)).map(([key]) => key.split(' ')[0]);
+      expect(keys).toHaveLength(2);
+      expect(keys).toContain('tab-1');
+
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      fireEvent.click(within(page.view.container).getByRole('button', { name: 'Discard this page' }));
+      await settle();
+      expect((await stored()).map(([, text]) => text)).toEqual(['Une page neuve.']);
+      await page.crash();
+
+      const again = await load('');
+      await elapse(1000);
+      expect(textarea(again).value).toBe('Une page neuve.');
+      expect(listed(again)).toEqual([]);
     });
 
     it('lists a page restored after the writer typed on the blank page, and discards it only when asked', async () => {
@@ -1884,7 +1958,7 @@ describe('a page whose document does not exist yet', () => {
     };
 
     it.each(Array.from({ length: 16 }, (_, i) => i + 1))(
-      'makes at most one document per page, loses no text and keeps every page reachable, run %i',
+      'accepts one creation per page at most, under its own id, loses no text and keeps every page reachable, run %i',
       async (seed) => {
         const next = random(seed);
         const pick = <T,>(items: readonly T[]): T => items[Math.floor(next() * items.length)] as T;
@@ -1892,11 +1966,20 @@ describe('a page whose document does not exist yet', () => {
         interface Tab {
           page: Page;
           buffer: CrashableBuffer;
+          /** The last text of each page this tab's buffer kept, by marker. */
+          kept: Map<string, string>;
         }
         const open: Tab[] = [];
-        /** Each page, by the marker its texts start with: its latest text, and whether a buffer kept a text of it. */
-        const pagesTyped = new Map<string, { latest: string; latestKept: boolean; kept: boolean }>();
-        /** Pages whose document another device deleted: their saved texts may be gone with it. */
+        /**
+         * The texts a buffer kept and nothing deliberately superseded yet: each must end confirmed by the server, on
+         * screen or in the buffer. A tab supersedes its own previous text of a page by keeping a newer one, and a text
+         * it edits by keeping the edit; a write that fails supersedes nothing. Edits only append here, so a text whose
+         * later edit the server confirmed is superseded too.
+         */
+        const owed = new Set<string>();
+        /** The pages any of whose texts a buffer kept. */
+        const keptPages = new Set<string>();
+        /** Pages whose document another device deleted: their confirmed texts may be gone with it. */
         const deleted = new Set<string>();
         let started = 0;
         let words = 0;
@@ -1909,8 +1992,8 @@ describe('a page whose document does not exist yet', () => {
             const page = await load('', { buffer, locks });
             await grantClaims();
             await elapse(100);
-            open.push({ page, buffer });
-          } else if (roll < 0.47) {
+            open.push({ page, buffer, kept: new Map() });
+          } else if (roll < 0.5) {
             const tab = pick(open);
             const before = textOf(tab.page)?.value;
             if (before === undefined) continue;
@@ -1918,35 +2001,34 @@ describe('a page whose document does not exist yet', () => {
             if (marker === undefined) continue;
             const text = before === '' ? `${marker} mot${++words}` : `${before} mot${++words}`;
             type(tab.page, text);
-            const keeps = tab.buffer.faults.put === undefined;
-            const known = pagesTyped.get(marker);
-            pagesTyped.set(marker, { latest: text, latestKept: keeps, kept: keeps || known?.kept === true });
+            if (tab.buffer.faults.put === undefined) {
+              owed.delete(before);
+              const previous = tab.kept.get(marker);
+              if (previous !== undefined) owed.delete(previous);
+              owed.add(text);
+              tab.kept.set(marker, text);
+              keptPages.add(marker);
+            }
             await settle();
             await elapse(pick([0, 300, 1200]));
-          } else if (roll < 0.62) {
-            const network = pick(['up', 'down', 'lost answers', 'drafts lost'] as const);
+          } else if (roll < 0.66) {
+            const network = pick(['up', 'down', 'lost answers', 'drafts lost', 'creations refused'] as const);
             lose = network === 'down' ? () => true : network === 'drafts lost' ? isDraftSave : () => false;
             loseAnswer = network === 'lost answers' ? isCreation : () => false;
+            intercept =
+              network === 'creations refused'
+                ? (call) => (isCreation(call) ? error(413, 'Too large') : undefined)
+                : () => undefined;
             await elapse(pick([0, 1000]));
-          } else if (roll < 0.69) {
+          } else if (roll < 0.73) {
             // The tab's buffer stops keeping anything, after it kept earlier texts.
             pick(open).buffer.faults.put = 'quota';
           } else if (roll < 0.79) {
             const tab = pick(open);
-            const button =
-              tryAgain(tab.page) ??
-              within(tab.page.view.container).queryAllByRole('button', { name: 'Open this page' })[0];
-            if (button === undefined || button === null) continue;
-            const again = button.textContent === 'Try again';
-            // Sometimes the tab crashes once the new id is sent, before the old entry's delete commits.
-            const crashAfter = again && next() < 0.5;
-            if (crashAfter) tab.buffer.faults.delete = 'failed';
+            const [button] = within(tab.page.view.container).queryAllByRole('button', { name: 'Open this page' });
+            if (button === undefined) continue;
             fireEvent.click(button);
-            await elapse(crashAfter ? 1000 : 100);
-            if (crashAfter) {
-              open.splice(open.indexOf(tab), 1);
-              await tab.page.crash();
-            }
+            await elapse(100);
           } else if (roll < 0.86) {
             // Another device deletes a document made from a page.
             const document = pick([undefined, ...created()]);
@@ -1964,23 +2046,10 @@ describe('a page whose document does not exist yet', () => {
 
         lose = () => false;
         loseAnswer = () => false;
+        intercept = () => undefined;
         claimsWait = false;
         const last = await load('', { locks });
-        for (let round = 0; round < 3; round++) await elapse(10_000);
-        // The writer goes through every page left on the blank page, and asks for a new id wherever one is offered.
-        for (let visit = 0; visit < 8; visit++) {
-          const again = tryAgain(last);
-          const pagesListed = within(last.view.container).queryAllByRole('button', { name: 'Open this page' });
-          const button = again ?? pagesListed[visit % Math.max(pagesListed.length, 1)];
-          if (button === undefined) break;
-          fireEvent.click(button);
-          await elapse(2000);
-          if (textOf(last) === null) {
-            fireEvent.click(within(last.view.container).getByRole('button', { name: '+ New document' }));
-            await elapse();
-          }
-        }
-        await elapse(10_000);
+        for (let round = 0; round < 4; round++) await elapse(10_000);
 
         const onScreen = [
           textOf(last)?.value,
@@ -1996,19 +2065,25 @@ describe('a page whose document does not exist yet', () => {
           }),
         ].filter((text): text is string => text !== undefined);
         const inBuffer = (await stored()).map(([, text]) => text);
-        for (const [marker, { latest, latestKept, kept }] of pagesTyped) {
-          const documents = created().filter((document) => document.draft?.content.startsWith(`${marker} `));
-          expect(documents.length, `${marker} has one document at most`).toBeLessThanOrEqual(1);
-          if (latestKept) {
-            const saved = everSaved.has(latest) || onScreen.includes(latest) || inBuffer.includes(latest);
-            expect(saved, `${marker}: ${latest}`).toBe(true);
-          }
-          if (kept && documents.length === 0 && !deleted.has(marker)) {
+        expect(noNewId(last)).toBe(true);
+        for (let page = 1; page <= started; page++) {
+          const marker = `P${page}:`;
+          const ids = new Set(
+            accepted.filter((input) => input.content.startsWith(`${marker} `)).map((input) => input.id),
+          );
+          expect(ids.size, `${marker} was created once at most, under one id`).toBeLessThanOrEqual(1);
+          const live = created().some((document) => document.draft?.content.startsWith(`${marker} `));
+          if (keptPages.has(marker) && !live && !deleted.has(marker)) {
             expect(
               onScreen.some((text) => text.startsWith(`${marker} `)),
               `${marker} is reachable`,
             ).toBe(true);
           }
+        }
+        const confirmed = (text: string) =>
+          [...everSaved].some((saved) => saved === text || saved.startsWith(`${text} `));
+        for (const text of owed) {
+          expect(confirmed(text) || onScreen.includes(text) || inBuffer.includes(text), text).toBe(true);
         }
       },
     );

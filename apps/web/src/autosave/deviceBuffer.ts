@@ -45,18 +45,12 @@ import {
  * registry sends a creation only once a write holding its text was answered (`mirrored`), or the entry already holds
  * that very text (`holds`), so a restore always sends the very same creation again under the same id. A page whose text
  * was erased is the writer's discard: its entry goes (if its creation was sent, the server keeps what it took).
- *
- * **A page moved to a new id** ("Try again", see "The identity of a page" in `useAutosave`) leaves a record under
- * `"moved <old id>"` that holds no text and names the new id (`recordMove`). It is written before anything is sent
- * under the new id, and kept: adoption reads every record of the old id, of any tab, as a text of the new one.
  */
 
 /** A text a gone tab left for a document, read under that tab's lock. */
 export interface LeftText {
   /** Its key in the buffer: deleted only as the invariant of adoption says. */
   key: string;
-  /** The id its record was written for: another one than the document it is restored for, if that page moved since. */
-  documentId: string;
   content: string;
   /** `null` for a page whose document did not exist yet: then `page` says what its creation needs. */
   base: Draft | null;
@@ -375,53 +369,15 @@ const claim = (device: DeviceBuffer, tabId: string): Promise<boolean> => {
   });
 };
 
-const movedPrefix = 'moved ';
-
-/**
- * Records that a page continues as the document `to` (see "A page moved to a new id" above); answers whether the
- * buffer kept it. Never deleted: the records of the old id can outlive any tab.
- */
-export const recordMove = async (queryClient: QueryClient, from: string, to: string): Promise<boolean> => {
-  const device = deviceOf(queryClient);
-  if (device.buffer === null) return false;
-  const result = await device.buffer.put(`${movedPrefix}${from}`, { content: '', base: null, movedTo: to });
-  if (!result.ok) report(device, result.reason);
-  return result.ok;
-};
-
-/** The ids each moved page continues as, from a list of the buffer. */
-const movesIn = (entries: readonly BufferEntry[]): Map<string, string> =>
-  new Map(
-    entries.flatMap((entry) =>
-      entry.movedTo !== undefined && entry.key.startsWith(movedPrefix)
-        ? [[entry.key.slice(movedPrefix.length), entry.movedTo] as const]
-        : [],
-    ),
-  );
-
-/** The id a page continues as now, following its moves (a cycle, which no tab writes, stops after every move once). */
-const currentId = (moves: ReadonlyMap<string, string>, id: string): string => {
-  let current = id;
-  for (let hops = 0; hops < moves.size; hops++) current = moves.get(current) ?? current;
-  return current;
-};
-
-/**
- * Whether a record is a text another tab left that this adoption may look at (a page only with what it needs), and
- * for which document: the one it was written for, or the one that page moved to.
- */
-const leftBy = (
-  device: DeviceBuffer,
-  entry: BufferEntry,
-  documentId: string | undefined,
-  moves: ReadonlyMap<string, string>,
-) => {
+/** Whether a record is a text another tab left that this adoption may look at (a page only with what it needs). */
+const leftBy = (device: DeviceBuffer, entry: BufferEntry, documentId: string | undefined) => {
   const owner = parseKey(entry.key);
-  if (owner === undefined || owner.tabId === device.tabId || (entry.base === null && entry.page === undefined)) {
-    return undefined;
-  }
-  const current = currentId(moves, owner.documentId);
-  return documentId === undefined || current === documentId ? { ...owner, current } : undefined;
+  return owner !== undefined &&
+    owner.tabId !== device.tabId &&
+    (documentId === undefined || owner.documentId === documentId) &&
+    (entry.base !== null || entry.page !== undefined)
+    ? owner
+    : undefined;
 };
 
 /**
@@ -445,10 +401,7 @@ export const adoptLeftTexts = (
       report(device, first.reason);
       return undefined;
     }
-    const firstMoves = movesIn(first.entries);
-    const owners = new Set(
-      first.entries.flatMap((entry) => leftBy(device, entry, documentId, firstMoves)?.tabId ?? []),
-    );
+    const owners = new Set(first.entries.flatMap((entry) => leftBy(device, entry, documentId)?.tabId ?? []));
     for (const owner of owners) await claim(device, owner);
     // Read again, now that the locks are held: these records can no longer change but through this tab.
     const fresh = await buffer.list();
@@ -456,16 +409,14 @@ export const adoptLeftTexts = (
       report(device, fresh.reason);
       return undefined;
     }
-    const moves = movesIn(fresh.entries);
     for (const entry of fresh.entries) {
-      const owner = leftBy(device, entry, documentId, moves);
+      const owner = leftBy(device, entry, documentId);
       if (owner === undefined || !device.claimed.has(owner.tabId)) continue;
       if (device.handed.has(entry.key)) continue;
-      const texts = left.get(owner.current) ?? [];
+      const texts = left.get(owner.documentId) ?? [];
       const { key, content, base, page } = entry;
-      const text: LeftText = { key, documentId: owner.documentId, content, base };
-      texts.push(page === undefined ? text : { ...text, page });
-      left.set(owner.current, texts);
+      texts.push(page === undefined ? { key, content, base } : { key, content, base, page });
+      left.set(owner.documentId, texts);
     }
     return left;
   };

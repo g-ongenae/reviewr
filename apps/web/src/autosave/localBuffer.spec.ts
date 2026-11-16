@@ -272,21 +272,6 @@ describe('openLocalBuffer', () => {
       ]);
     });
 
-    it('stores a move only on a record without a base nor a page', async () => {
-      const buffer = open();
-      await buffer.put('moved old', { content: '', base: null, movedTo: 'new' });
-      await buffer.put('tab page', { content: 'Un', base: null, page: { creation: null }, movedTo: 'new' });
-
-      expect((await buffer.get('moved old')).entry).toEqual({
-        key: 'moved old',
-        content: '',
-        base: null,
-        movedTo: 'new',
-        updatedAt: 1001,
-      });
-      expect((await buffer.get('tab page')).entry).not.toHaveProperty('movedTo');
-    });
-
     it('leaves a malformed page out, and keeps the text', async () => {
       await rawPut(
         { key: 'a', content: 'Un', base: null, page: { creation: 3 } },
