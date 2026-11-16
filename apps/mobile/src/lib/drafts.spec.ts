@@ -211,6 +211,35 @@ describe('createDrafts', () => {
       expect(hidden()).toEqual([]);
     });
 
+    it('shows the other device’s text of a conflict, before "Keep mine" and when the other device writes again', async () => {
+      const context = setup();
+      const { server, drafts, entry, state } = context;
+      await conflict(context, 'theirs', 'mine');
+      // The editor shows "mine" only: the other text is listed, with nothing to discard, as the session does not hold it.
+      expect(heldTexts(entry)).toEqual([{ text: 'theirs', side: 'theirs', discardable: false }]);
+
+      server.paused = true;
+      const keeping = drafts.keepMine('doc');
+      expect(heldTexts(entry)).toEqual([]);
+      server.otherDevice('theirs, again');
+      server.paused = false;
+      server.release();
+      await keeping;
+      expect(entry.session.getSnapshot().stop).toEqual({ reason: 'moved' });
+      // The document the session published reaches the machine through the cache and the screen.
+      drafts.read(context.documents.at(-1)!);
+      expect(state()).toMatchObject({ status: 'conflict', content: 'mine', server: { content: 'theirs, again' } });
+      const hidden = heldTexts(entry).map(({ text }) => text);
+      expect(hidden).toContain('theirs, again');
+      expect(hidden).not.toContain('mine');
+      expect(new Set(hidden).size).toBe(hidden.length);
+
+      await drafts.keepMine('doc');
+      await wait();
+      expect(state()).toMatchObject({ status: 'saved', content: 'mine' });
+      expect(heldTexts(entry)).toEqual([]);
+    });
+
     it('holds the other device’s text when "Keep mine" stopped and the document is then deleted', async () => {
       const context = setup();
       const { server, drafts, entry, state } = context;
@@ -223,7 +252,7 @@ describe('createDrafts', () => {
       // "theirs" is in no version and the document is gone: it is listed, as the editor only shows "mine".
       expect(server.revisions.map((revision) => revision.content)).not.toContain('theirs');
       expect(state().content).toBe('mine');
-      expect(heldTexts(entry)).toEqual([{ text: 'theirs', side: 'theirs', kept: false }]);
+      expect(heldTexts(entry)).toEqual([{ text: 'theirs', side: 'theirs', discardable: true }]);
     });
 
     it('lets the writer discard an earlier text a stopped "Keep mine" holds', async () => {

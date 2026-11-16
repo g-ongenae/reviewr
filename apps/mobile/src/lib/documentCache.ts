@@ -75,7 +75,7 @@ export const createAppDrafts = (
       write(saved.id, (cached) =>
         part === 'title'
           ? cached && { ...cached, title: saved.title }
-          : { ...saved, title: cached?.title ?? saved.title },
+          : { ...saved, title: cached === undefined ? saved.title : cached.title },
       );
       void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       if (part === 'text') void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });

@@ -106,7 +106,7 @@ const Editor = ({ document }: { document: Document }) => {
   const { content } = state;
   const changedSinceVersion = content !== document.content;
   const busy = sessionState.running;
-  /** Earlier texts "Keep mine" holds, in no version, that the editor no longer shows. */
+  /** The other device's text of a conflict and the texts "Keep mine" holds: none is in the text field. */
   const hidden = heldTexts({ session, autosave });
 
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
@@ -204,18 +204,22 @@ const Editor = ({ document }: { document: Document }) => {
         </View>
       )}
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        {hidden.map(({ text, side }) => (
+        {hidden.map(({ text, side, discardable }) => (
           <View key={text} style={[styles.held, { borderColor: theme.border }]}>
             <Text style={{ color: theme.muted }}>
-              {side === 'mine' ? 'An earlier text of yours' : 'The other device’s text'}, in no version yet. “Keep mine”
-              keeps it as a version; copy what you need if you discard it.
+              {side === 'mine'
+                ? 'An earlier text of yours, in no version yet. “Keep mine” keeps it as a version.'
+                : 'The other device’s text. “Keep mine” keeps it as a version, then saves yours.'}
+              {discardable && ' Copy what you need if you discard it.'}
             </Text>
             <Text selectable style={{ color: theme.text }}>
               {text}
             </Text>
-            <Pressable hitSlop={8} onPress={() => session.discardText(text)}>
-              <Text style={{ color: theme.danger }}>Discard</Text>
-            </Pressable>
+            {discardable && (
+              <Pressable hitSlop={8} onPress={() => session.discardText(text)}>
+                <Text style={{ color: theme.danger }}>Discard</Text>
+              </Pressable>
+            )}
           </View>
         ))}
         <TextInput

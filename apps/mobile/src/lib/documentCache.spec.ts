@@ -2,17 +2,19 @@ import type { Document } from '@reviewr/shared';
 import { QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAppDrafts } from './documentCache';
+import type { DraftsApi } from './drafts';
 import { FakeApi } from './fakeApi';
 import { queryKeys } from './queryKeys';
 
 const debounceMs = 1000;
 const key = queryKeys.document('doc');
 
-const setup = async () => {
+/** `through` stands between the app and the server, to hold an answer back. */
+const setup = async (through: (server: FakeApi) => DraftsApi = (server) => server) => {
   const server = new FakeApi('A');
   const queryClient = new QueryClient();
   const report = { reportSuccess: () => undefined, reportError: () => undefined };
-  const { drafts, fetchDocument } = createAppDrafts(queryClient, { api: server, report, debounceMs });
+  const { drafts, fetchDocument } = createAppDrafts(queryClient, { api: through(server), report, debounceMs });
   const fetch = () => queryClient.fetchQuery({ queryKey: key, queryFn: () => fetchDocument('doc'), staleTime: 0 });
   const entry = drafts.open(await fetch());
   const leave = drafts.hold('doc');
@@ -110,5 +112,40 @@ describe('createAppDrafts: the cache never goes back', () => {
     expect((await fetch()).title).toBe('Renamed elsewhere');
     drafts.read(cached()!);
     expect(entry.title.getSnapshot()).toMatchObject({ status: 'saved', value: 'Renamed elsewhere' });
+  });
+
+  it('a late version answer does not undo a rename to no title', async () => {
+    let release = () => {};
+    const { drafts, entry, cached } = await setup((server) => ({
+      getDocument: () => server.getDocument(),
+      saveDraft: (id, input) => server.saveDraft(id, input),
+      renameDocument: (id, title) => server.renameDocument(id, title),
+      // The version is made at once, its answer arrives at `release`.
+      createRevision: async (id, input) => {
+        const answer = await server.createRevision(id, input);
+        await new Promise<void>((resume) => {
+          release = resume;
+        });
+        return answer;
+      },
+    }));
+    entry.title.edit('Title');
+    entry.title.blur();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cached()?.title).toBe('Title');
+
+    entry.autosave.edit('B');
+    const saving = drafts.saveVersion('doc', 1);
+    await vi.advanceTimersByTimeAsync(0);
+    entry.title.edit('');
+    entry.title.blur();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cached()?.title).toBeNull();
+
+    release();
+    await saving;
+    expect(cached()).toMatchObject({ revision: 2, content: 'B', title: null });
+    drafts.read(cached()!);
+    expect(entry.title.getSnapshot()).toMatchObject({ status: 'saved', value: '' });
   });
 });

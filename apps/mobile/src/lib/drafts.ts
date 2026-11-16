@@ -1,5 +1,5 @@
 import { createAutosave, type Autosave, type Draft, type SaveResult } from '@reviewr/autosave';
-import { createReconcileSession, type HeldText, type ReconcileSession, type SessionApi } from '@reviewr/reconcile';
+import { createReconcileSession, type ReconcileSession, type SessionApi, type Side } from '@reviewr/reconcile';
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
 import { createTitleSaver, type TitleSaver } from './title';
@@ -105,15 +105,34 @@ export interface Drafts {
 
 const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
 
+/** A text the app holds for a document and that the text field does not show. */
+export interface HiddenText {
+  text: string;
+  side: Side;
+  /** Whether the session holds it, in no version: then the writer may discard it. */
+  discardable: boolean;
+}
+
 /**
- * The texts the session of an entry holds, in no version, that the editor does not show: every text it was given and
- * has not kept, but the one in the text field. The mobile editor has no merge view, so the other device's text of the
- * conflict and the result of a stopped "Keep mine" are not on screen either. None while "Keep mine" runs.
+ * The texts of an entry that the editor does not show otherwise: the other device's text of a conflict, and every text
+ * the session was given and has not kept, but the one in the text field. The mobile editor has no merge view, so none
+ * of them is on screen, nor is the result of a stopped "Keep mine". None while "Keep mine" runs.
  */
-export const heldTexts = ({ session, autosave }: Pick<Entry, 'session' | 'autosave'>): HeldText[] => {
-  const state = session.getSnapshot();
-  const { content } = autosave.getSnapshot();
-  return state.running ? [] : state.texts.filter((held) => !held.kept && held.text !== content);
+export const heldTexts = ({ session, autosave }: Pick<Entry, 'session' | 'autosave'>): HiddenText[] => {
+  const { running, texts } = session.getSnapshot();
+  if (running) return [];
+  const machine = autosave.getSnapshot();
+  const hidden: HiddenText[] = texts
+    .filter((held) => !held.kept && held.text !== machine.content)
+    .map(({ text, side }) => ({ text, side, discardable: true }));
+  if (machine.status === 'conflict') {
+    const text = machine.server.content;
+    // The session may have kept it as a version already, or hold it: then it is not listed, or not twice.
+    if (text !== machine.content && !texts.some((held) => held.text === text)) {
+      hidden.unshift({ text, side: 'theirs', discardable: false });
+    }
+  }
+  return hidden;
 };
 
 /**
