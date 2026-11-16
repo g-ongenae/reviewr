@@ -379,6 +379,29 @@ describe('createDrafts', () => {
       expect(state()).toMatchObject({ status: 'conflict', content: 'today' });
     });
 
+    it('works from the history opened without an editor, which then shows the restored text', async () => {
+      const { server, drafts, leave } = setup();
+      leave();
+      await wait();
+      expect(drafts.get('doc')).toBeUndefined();
+      // The history opens an entry from the document it loaded, restores, then shows the editor.
+      const entry = drafts.open(server.read());
+      expect(await drafts.restore('doc', old, server.read())).toEqual({ kind: 'restored' });
+      await wait();
+      expect(drafts.open(server.read())).toBe(entry);
+      drafts.hold('doc');
+      await wait(debounceMs);
+      expect(entry.autosave.getSnapshot()).toMatchObject({ status: 'saved', content: 'an old text' });
+    });
+
+    it('opened from the history over an editor, leaves the entry to be dropped once the editor leaves', async () => {
+      const { server, drafts, leave } = setup();
+      drafts.open(server.read());
+      leave();
+      await wait();
+      expect(drafts.get('doc')).toBeUndefined();
+    });
+
     it('is refused while a conflict holds the text, which stays', async () => {
       const context = setup();
       await conflict(context);

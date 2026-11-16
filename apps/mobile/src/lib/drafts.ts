@@ -266,7 +266,7 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
       } else {
         read(document);
       }
-      entry.opening = true;
+      if (entry.users === 0) entry.opening = true;
       return entry;
     },
 

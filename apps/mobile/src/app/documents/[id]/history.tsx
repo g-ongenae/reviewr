@@ -30,11 +30,16 @@ export default function HistoryScreen() {
   const [restoring, setRestoring] = useState(false);
   const restore = async () => {
     if (preview.data === undefined || document.data === undefined) return;
+    const drafts = draftsOf(queryClient);
+    // Opened without an editor (a link): the restore goes to an entry opened here, then to its editor.
+    const editorShown = (drafts.get(id)?.users ?? 0) > 0;
+    drafts.open(document.data);
     setRestoring(true);
-    const outcome = await draftsOf(queryClient).restore(id, preview.data, document.data);
+    const outcome = await drafts.restore(id, preview.data, document.data);
     setRestoring(false);
     if (outcome.kind === 'restored') {
-      router.back();
+      if (editorShown) router.back();
+      else router.replace({ pathname: '/documents/[id]', params: { id } });
     } else if (outcome.kind === 'refused') {
       Alert.alert(
         'Not restored',
