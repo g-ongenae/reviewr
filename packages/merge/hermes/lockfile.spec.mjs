@@ -27,7 +27,7 @@ describe('the mobile app Hermes check', () => {
 
   it('fails without the mobile app importer', () => {
     expect(() => checkMobileHermes(edit('\n  apps/mobile:\n', '\n  apps/elsewhere:\n'), pinned)).toThrow(
-      "Cannot find the mobile app's Hermes: pnpm-lock.yaml has no importer apps/mobile. Update packages/merge/hermes/hermes.env",
+      "Cannot find the mobile app's Hermes: pnpm-lock.yaml has no importer apps/mobile. The Hermes pin is not the problem",
     );
   });
 
@@ -62,6 +62,17 @@ describe('the mobile app Hermes check', () => {
       '\npackages:\n\n  hermes-compiler@1.0.0:\n    resolution: {integrity: sha512-x}\n',
     );
     expect(checkMobileHermes(other, pinned)).toBe(pinned);
+  });
+
+  it.each([
+    ['another lockfile version', "lockfileVersion: '9.0'", "lockfileVersion: '10.0'", 'lockfileVersion 10.0'],
+    ['no lockfile version', "lockfileVersion: '9.0'\n", '', 'lockfileVersion undefined'],
+  ])('fails on a lockfile format it was not written for: %s', (_name, search, replacement, found) => {
+    const check = () => checkMobileHermes(edit(search, replacement), pinned);
+    expect(check).toThrow(`pnpm-lock.yaml has ${found}, and this reader supports 9.0 only`);
+    // The remedy is the reader, not the Hermes pin.
+    expect(check).toThrow('update the reader in packages/merge/hermes/lockfile.mjs');
+    expect(check).not.toThrow('hermes.env');
   });
 
   it.each([

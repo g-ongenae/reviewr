@@ -103,6 +103,7 @@ describe('the Hermes harness', () => {
       [plain, extra],
     ]) {
       expect(passes(() => expect(actual).toEqual(expected))).toBe(false);
+      expect(passes(() => expect([actual]).toContainEqual(expected))).toBe(false);
       expect(passesOrRefuses(() => harness.expect(actual).toEqual(expected))).toBe(false);
       expect(passesOrRefuses(() => harness.expect([actual]).toContainEqual(expected))).toBe(false);
     }

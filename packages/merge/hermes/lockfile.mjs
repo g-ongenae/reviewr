@@ -88,9 +88,23 @@ export const readLockfile = (text) =>
       return result;
     });
 
+/** The lockfile format this reader was written for and is checked against. */
+const supportedLockfileVersion = '9.0';
+
 /** The `hermes-compiler` version that the mobile app's React Native resolves to, or an error naming the broken link. */
 export const mobileHermesVersion = (text) => {
-  const documents = readLockfile(text).filter((document) => document?.importers?.['apps/mobile'] !== undefined);
+  const all = readLockfile(text);
+  // Another format may place the same names elsewhere: do not follow the chain in a lockfile this reader was not
+  // written for.
+  for (const document of all) {
+    if (document?.lockfileVersion !== supportedLockfileVersion) {
+      throw new Error(
+        `pnpm-lock.yaml has lockfileVersion ${String(document?.lockfileVersion)}, and this reader supports ` +
+          `${supportedLockfileVersion} only`,
+      );
+    }
+  }
+  const documents = all.filter((document) => document.importers?.['apps/mobile'] !== undefined);
   if (documents.length !== 1) {
     throw new Error('pnpm-lock.yaml has no importer apps/mobile');
   }
@@ -110,19 +124,27 @@ export const mobileHermesVersion = (text) => {
   return compiler;
 };
 
-/** Fails, with how to update the pin, unless the mobile app's Hermes is `pinned`. */
+/**
+ * Fails unless the mobile app's Hermes is `pinned`. Each failure says what to do about it: update the pin when the app
+ * ships another Hermes; look at this reader, or at the app's dependencies, when the lockfile could not be followed.
+ */
 export const checkMobileHermes = (text, pinned) => {
-  const instructions =
-    'Update packages/merge/hermes/hermes.env to the tag hermes-v<version> of facebook/hermes (its commit and the ' +
-    'SHA-256 of its source tarball), then rebuild with get-hermes.sh.';
   let resolved;
   try {
     resolved = mobileHermesVersion(text);
   } catch (error) {
-    throw new Error(`Cannot find the mobile app's Hermes: ${error.message}. ${instructions}`);
+    throw new Error(
+      `Cannot find the mobile app's Hermes: ${error.message}. The Hermes pin is not the problem: if pnpm-lock.yaml ` +
+        'changed its format, update the reader in packages/merge/hermes/lockfile.mjs (or read it with a YAML parser); ' +
+        'if the mobile app changed its dependencies, check that apps/mobile still depends on react-native.',
+    );
   }
   if (resolved !== pinned) {
-    throw new Error(`The mobile app ships Hermes ${resolved}, but the tests run on Hermes ${pinned}. ${instructions}`);
+    throw new Error(
+      `The mobile app ships Hermes ${resolved}, but the tests run on Hermes ${pinned}. Update ` +
+        'packages/merge/hermes/hermes.env to the tag hermes-v<version> of facebook/hermes (its commit and the SHA-256 ' +
+        'of its source tarball), then rebuild with get-hermes.sh.',
+    );
   }
 
   return resolved;
