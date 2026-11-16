@@ -57,8 +57,8 @@ jobs:
       - id: cache
         uses: actions/cache@v4
         with:
-          path: packages/merge/.hermes/260318099.0.4/bin
-          key: hermes-${{ steps.image.outputs.os }}-${{ hashFiles('packages/merge/hermes/get-hermes.sh') }}
+          path: packages/merge/.hermes/*/bin
+          key: hermes-${{ steps.image.outputs.os }}-${{ hashFiles('packages/merge/hermes/hermes.env', 'packages/merge/hermes/get-hermes.sh') }}
       - if: steps.cache.outputs.cache-hit != 'true'
         run: sudo apt-get install -y --no-install-recommends ninja-build libicu-dev
       # A no-op when the cache has the binaries.
