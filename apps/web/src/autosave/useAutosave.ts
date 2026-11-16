@@ -11,12 +11,15 @@ import {
   dropLeftText,
   forgetDocument,
   hasDeviceBuffer,
+  holds,
   keepRestored,
   keptText,
   markHanded,
+  mirrored,
   mirrorState,
   type LeftText,
 } from './deviceBuffer';
+import type { BufferPage } from './localBuffer';
 
 /**
  * The draft an editor opens on. The API always sends it; documents without one (fixtures written before drafts
@@ -53,15 +56,6 @@ export const toSaveResult = (error: unknown): SaveResult => {
     return { kind: 'rejected', error, permanent: goneStatuses.has(error.status) };
   }
   return { kind: 'failed', error };
-};
-
-/**
- * What a failed creation means for the autosave. The creation is sent again as it was first sent, so a refusal (4xx)
- * is for good: the text stays, and the writer can try again under a new id. Anything else is retried.
- */
-const toCreateResult = (error: unknown): SaveResult => {
-  const result = toSaveResult(error);
-  return result.kind === 'rejected' ? { ...result, permanent: true } : { kind: 'failed', error };
 };
 
 /** A new document's id, chosen here so that its creation can be sent again safely. */
@@ -145,8 +139,9 @@ interface Entry {
   /** Whether the writer edited the text in this tab. */
   edited: boolean;
   /**
-   * Whether the document query's last accepted answer, success or 404, was a 404. Written only by the registry's
-   * subscription to the query cache; kept when the query is dropped from the cache.
+   * Whether the document query's last accepted answer, success or 404, was a 404. Written by the registry's
+   * subscription to the query cache, and kept when the query is dropped from the cache; for a page not created yet,
+   * whose document is never read, by the refusal that says it was deleted (rule 2 of the identity of a page).
    */
   deleted: boolean;
   /**
@@ -158,13 +153,26 @@ interface Entry {
   heldListeners: Set<() => void>;
   /**
    * A title typed on a page whose document does not exist yet: it can be saved only once the document is created, by
-   * the editor shown then. Kept here so that an editor mounted again on the page (after "Try again") still has it.
+   * the editor shown then. Kept here (and with the page in the local buffer) so that an editor mounted again on the
+   * page (after a reload, for instance) still has it; the recovery of a page deleted elsewhere gives it to the new
+   * documents it saves.
    */
   title?: string;
+  /** Whether the document does not exist on the server yet: its next save is its creation. */
+  uncreated: () => boolean;
+  /** Writes the machine's state to the local buffer again (the pending title changed). */
+  mirror: () => void;
+  /** Whether it is a page not created yet that holds text (see `usePagesNotCreated`). */
+  listed: boolean;
+}
+
+/** A text another tab left for a document that exists, or held on a page as a copy. */
+interface KeptText extends Omit<LeftText, 'base' | 'page' | 'documentId'> {
+  base: Draft;
 }
 
 /** A text another tab left, taken over by this tab's registry. */
-interface HeldText extends LeftText {
+interface HeldText extends KeptText {
   origin: boolean;
 }
 
@@ -203,42 +211,110 @@ const registryOf = (queryClient: QueryClient): Map<string, Entry> => {
 };
 
 /**
+ * **The identity of a page.** A page written before its document exists has one id for its whole life, chosen by the
+ * client, and is at most one document on the server, whatever happens to the tab, the buffer or the requests. The
+ * registry follows four rules, each in one place:
+ *
+ * 1. **No other id, ever.** Nothing in the app sends a page's text under another id. The one exception is the
+ *    writer's own act: "Save as a new document" on the recovery of a document deleted elsewhere (rule 2) makes a new
+ *    document in its own right, not a continuation of the page.
+ * 2. **A refused id is read before it is given up** (`createDocument`). With a client-chosen id, a creation is refused
+ *    for good in two cases only. The id holds a document with another first text (422): a creation of another text of
+ *    this page got there first (a write of the buffer failed after the creation's text was decided, or two tabs
+ *    adopted the page without Web Locks), so the document is read and, if it exists, the page is that document: its
+ *    text goes to it through the machine, as the local text on the server's draft (a conflict if the server holds
+ *    another text). Or the page's document was deleted elsewhere (410, or a 422 whose read finds nothing): the page is
+ *    then a document deleted elsewhere (`deleted`), shown through the same recovery as any other, its texts kept in the
+ *    buffer until the writer saves them as a new document or discards them.
+ * 3. **A refusal of the text, not of the id, keeps the id** (400, 413…: the server stored nothing under it). As for a
+ *    draft, the text stays and a changed text is sent, as a new creation under the same id: its body is decided again
+ *    from that text and written ahead like the first. Should the server hold something under the id after all, the
+ *    422 of rule 2 resolves it.
+ * 4. **Every page not created yet can be reached** (`usePagesNotCreated`): the blank page lists the other ones, to
+ *    open, copy or discard, so that a page refused in the background or restored behind another is never out of reach.
+ *
+ * With a buffer that fails, nothing is durable: a creation is still sent (the server is then the only other place for
+ * the text), and rule 2 keeps a stale record from making a second document.
+ */
+
+/**
  * The machine of a document, created on first use. For a document that does not exist on the server yet (`create`),
  * the first save creates it: a blank text creates nothing, and the first text sent is the creation's body for good,
  * sent again as it is until it is answered (the server refuses the same id with another body). The answer tells the
- * machine which text the server holds, and the machine sends the text typed since as a draft.
+ * machine which text the server holds, and the machine sends the text typed since as a draft. `sent` is the text of a
+ * creation that may have been sent already (a page restored from the local buffer): the body is then that one.
+ *
+ * Such a page is kept in the local buffer with its creation's text, written before the creation is first sent: a
+ * restore after a crash sends the very same creation again (see `restorePage`).
  */
-const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = false): Entry => {
+const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = false, sent?: string): Entry => {
   const registry = registryOf(queryClient);
   const existing = registry.get(id);
   if (existing !== undefined) return existing;
 
   let creating = create && !isCreated(queryClient, id);
-  let creation: CreateDraftDocumentInput | undefined;
+  let creation: CreateDraftDocumentInput | undefined =
+    creating && sent !== undefined ? { id, content: sent, draftOnly: true } : undefined;
   const createDocument = async (draft: Draft): Promise<SaveResult> => {
     if (creation === undefined) {
       // Nothing to keep yet: no request, and the blank text counts as saved.
       if (draft.content.trim() === '') return { kind: 'saved', draftVersion: 0 };
       creation = { id, content: draft.content, draftOnly: true };
+      // Written ahead: the creation is sent once the buffer answered a write holding its text (unless its entry holds
+      // that very text already), so a crash can never leave a record from which a restore would send another body. A
+      // buffer that fails does not hold the creation back (it has said so to the writer), and the server is then the
+      // only other place for the text.
+      if (!holds(queryClient, id, creation.content)) {
+        mirror();
+        await mirrored(queryClient, id);
+      }
     }
-    let created: Document;
+    let document: Document;
     try {
-      created = await api.createDocument(creation);
+      document = await api.createDocument(creation);
       reachability.reportSuccess();
     } catch (error) {
       reachability.reportError(error);
-      return toCreateResult(error);
+      const status = error instanceof ApiError ? error.status : undefined;
+      // Rule 2 of the identity of a page: the document was deleted elsewhere.
+      if (status !== undefined && goneStatuses.has(status)) return deletedElsewhere(error);
+      const refusal = toSaveResult(error);
+      if (refusal.kind === 'rejected' && status !== 422) {
+        // Rule 3: the server stored nothing under the id; a changed text is a new creation under it.
+        creation = undefined;
+        mirror();
+        return { ...refusal, permanent: false };
+      }
+      if (status !== 422) return { kind: 'failed', error };
+      // Rule 2: the id holds another first text; the page most likely is that document.
+      try {
+        document = await api.getDocument(id);
+        reachability.reportSuccess();
+      } catch (readError) {
+        if (isNotFound(readError)) return deletedElsewhere(error);
+        reachability.reportError(readError);
+        return { kind: 'failed', error: readError };
+      }
     }
     creating = false;
     createdIn(queryClient).add(id);
-    cacheDocument(queryClient, created);
+    // Not announced: the blank page must take its address before the app looks for another page (readers skip it).
+    entry.listed = false;
+    cacheDocument(queryClient, document);
     void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
-    // The document as it is now: it holds the creation's text, unless its draft moved since (then the machine
-    // reconciles it with its own texts, and never overwrites another one).
-    const confirmed = draftOf(created);
+    // The document as it is now: it holds the creation's text, unless its draft moved since or another text created
+    // it (then the machine reconciles it with its own texts, and never overwrites another one).
+    const confirmed = draftOf(document);
     return confirmed.content === creation.content
       ? { kind: 'saved', draftVersion: confirmed.draftVersion, content: confirmed.content }
       : { kind: 'conflict', server: confirmed };
+  };
+  /** Rule 2: the page's document was deleted elsewhere; nothing is sent any more, the recovery shows its texts. */
+  const deletedElsewhere = (error: unknown): SaveResult => {
+    entry.deleted = true;
+    deletedPagesOf(queryClient).add(id);
+    notifyPages(queryClient);
+    return { kind: 'rejected', error, permanent: true };
   };
   const machine = createAutosave({
     base: draft,
@@ -269,15 +345,31 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
     deleted: false,
     held: [],
     heldListeners: new Set(),
+    uncreated: () => creating,
+    mirror: () => mirror(),
+    listed: false,
   };
-  // The local buffer mirrors the machine, once the document exists on the server. A text kept by a put answered ok,
-  // or confirmed by the server (`saved`), no longer needs another tab's copy of it.
-  machine.subscribe(() => {
-    if (creating) return;
+  // The local buffer mirrors the machine; before the document exists, with what its creation needs. A text kept by a
+  // put answered ok, or confirmed by the server (`saved`, once the document exists), no longer needs another tab's copy
+  // of it.
+  const mirror = () => {
     const state = machine.getSnapshot();
-    mirrorState(queryClient, id, state, (kept) => letGo(queryClient, entry, kept));
+    const onKept = (kept: string) => letGo(queryClient, entry, kept);
+    const listed = creating && state.content.trim() !== '';
+    if (listed !== entry.listed) {
+      entry.listed = listed;
+      notifyPages(queryClient);
+    }
+    if (creating) {
+      const page: BufferPage = { creation: creation?.content ?? null };
+      if (entry.title !== undefined) page.title = entry.title;
+      mirrorState(queryClient, id, state, onKept, page);
+      return;
+    }
+    mirrorState(queryClient, id, state, onKept);
     if (state.status === 'saved') letGo(queryClient, entry, state.content);
-  });
+  };
+  machine.subscribe(mirror);
   registry.set(id, entry);
   return entry;
 };
@@ -306,7 +398,8 @@ const letGo = (queryClient: QueryClient, entry: Entry, content: string) => {
 const hold = (queryClient: QueryClient, id: string, entry: Entry, texts: readonly HeldText[]) => {
   setHeld(entry, [...entry.held, ...texts]);
   const state = entry.autosave.getSnapshot();
-  if (state.status === 'saved') letGo(queryClient, entry, state.content);
+  // A page not created yet is `saved` only when blank, which the server never confirmed.
+  if (state.status === 'saved' && !entry.uncreated()) letGo(queryClient, entry, state.content);
   const kept = keptText(queryClient, id);
   if (kept !== undefined) letGo(queryClient, entry, kept);
 };
@@ -316,7 +409,7 @@ const hold = (queryClient: QueryClient, id: string, entry: Entry, texts: readonl
  * at that base or later (a counter read from the disk is not the machine's authority), and the text is not its base's
  * (it would look saved without the server having confirmed it).
  */
-const resumable = (text: LeftText, server: Draft): boolean =>
+const resumable = (text: KeptText, server: Draft): boolean =>
   text.content !== text.base.content &&
   (server.draftVersion > text.base.draftVersion ||
     (server.draftVersion === text.base.draftVersion && server.content === text.base.content));
@@ -328,8 +421,19 @@ const resumable = (text: LeftText, server: Draft): boolean =>
  * path runs. Every other text is held as a copy for the writer, never merged, sent or dropped: one whose base is ahead
  * of the server or is its own base, for instance. Answers `false` when the server could not be read: nothing is
  * decided, and the texts stay in the buffer to be restored later.
+ *
+ * Pages whose document did not exist yet are restored by `restorePage`. Mixed with texts of the document (a tab
+ * adopted the page, created it, then crashed too), the document exists: each page text then counts as written on the
+ * creation's text, at version 0, which the server is past, so that sending it can only meet a conflict (resolved
+ * without the writer if the server still holds that text), never overwrite a draft.
  */
-const restore = async (queryClient: QueryClient, id: string, texts: readonly LeftText[]): Promise<boolean> => {
+const restore = async (queryClient: QueryClient, id: string, left: readonly LeftText[]): Promise<boolean> => {
+  if (left.every((text) => text.base === null)) return restorePage(queryClient, id, left);
+  const texts = left.map(({ key, content, base, page }) => ({
+    key,
+    content,
+    base: base ?? { content: page?.creation ?? content, draftVersion: 0 },
+  }));
   const registry = registryOf(queryClient);
   let server: Draft | undefined;
   if (registry.get(id) === undefined) {
@@ -353,15 +457,17 @@ const restore = async (queryClient: QueryClient, id: string, texts: readonly Lef
   for (const text of texts) {
     if (server !== undefined && text.content === server.content) dropLeftText(queryClient, text.key, text.content);
   }
-  const left = texts.filter((text) => server === undefined || text.content !== server.content);
-  if (left.length === 0) return true;
+  const unconfirmed = texts.filter((text) => server === undefined || text.content !== server.content);
+  if (unconfirmed.length === 0) return true;
 
   let entry = registry.get(id);
   // A document deleted meanwhile (404): the newest text goes to the machine, whose save meets the deletion and shows
   // the recovery page.
   const origin =
     entry === undefined
-      ? left.find((text) => (server === undefined ? text.content !== text.base.content : resumable(text, server)))
+      ? unconfirmed.find((text) =>
+          server === undefined ? text.content !== text.base.content : resumable(text, server),
+        )
       : undefined;
   if (entry === undefined) {
     // Without a text to send, the machine starts on the server's draft (or nothing): never on a base read from the
@@ -379,9 +485,166 @@ const restore = async (queryClient: QueryClient, id: string, texts: readonly Lef
     queryClient,
     id,
     entry,
-    left.map((text) => ({ ...text, origin: origin !== undefined && text.content === origin.content })),
+    unconfirmed.map((text) => ({ ...text, origin: origin !== undefined && text.content === origin.content })),
   );
   return true;
+};
+
+/**
+ * Rebuilds pages gone tabs left before their document existed (the same page can be left by two tabs, when one adopted
+ * it and crashed in turn). The most recent text becomes the page's text, the others are held as copies; the title
+ * comes back with it. The machine starts as a page not created yet, whose creation is the one the records say was
+ * sent, or the restored text if none was: decided now, so that a page restored by two tabs (no Web Locks) is created
+ * with one body. It is sent in the background, and shown on the blank page (see `useBlankPage`).
+ *
+ * Nothing is read before. Where an existing document's restore reads the server's draft, the creation itself is the
+ * read: the server answers the same id and body with the document as it is now, never changing it, and refuses the
+ * same id with another body (422) or a deleted one (410); so it cannot create a second document nor overwrite one. The
+ * text typed since goes as a draft only once the creation was answered, on the draft it answered. A creation that may
+ * have been sent is in the record (written ahead, see `entryFor`), so a record without one most likely was never sent
+ * and its text can be the body; when it was (a write of the buffer failed), the 422 that answers is read as rule 2 of
+ * the identity of a page says, and the page joins its document. A page whose document was deleted elsewhere comes back
+ * as one: its creation is refused again, and the recovery shows its texts. A blank page holds nothing to restore: the
+ * writer erased it.
+ */
+const restorePage = (queryClient: QueryClient, id: string, pages: readonly LeftText[]): boolean => {
+  if (abandoned.has(queryClient)) return false;
+  markHanded(
+    queryClient,
+    pages.map((page) => page.key),
+  );
+  const erased = (page: LeftText) => page.content.trim() === '';
+  for (const page of pages) if (erased(page)) dropLeftText(queryClient, page.key, page.content);
+  const left = pages.filter((page) => !erased(page));
+  const [newest] = left;
+  if (newest === undefined) return true;
+  const sent = left.find((page) => (page.page?.creation ?? null) !== null)?.page?.creation ?? newest.content;
+  const blank: Draft = { content: '', draftVersion: 0 };
+  let entry = registryOf(queryClient).get(id);
+  const origin = entry === undefined ? newest : undefined;
+  if (entry === undefined) {
+    entry = entryFor(queryClient, id, blank, true, sent);
+    const restored = entry;
+    const page: BufferPage = { creation: sent };
+    if (newest.page?.title !== undefined) {
+      restored.title = newest.page.title;
+      page.title = newest.page.title;
+    }
+    restored.autosave.edit(newest.content);
+    keepRestored(queryClient, id, newest.content, null, (kept) => letGo(queryClient, restored, kept), page);
+    queueMicrotask(() => saveInBackground(queryClient, id, restored));
+  }
+  hold(
+    queryClient,
+    id,
+    entry,
+    left.map(({ key, content }) => ({ key, content, base: blank, origin: content === origin?.content })),
+  );
+  return true;
+};
+
+const pageListeners = new Set<() => void>();
+const pageLists = new WeakMap<QueryClient, readonly string[]>();
+
+/** The pages not created yet that hold text changed: one appeared, was created, emptied or dropped. */
+const notifyPages = (queryClient: QueryClient) => {
+  pageLists.delete(queryClient);
+  for (const listener of [...pageListeners]) listener();
+};
+
+/**
+ * The pages not created yet that hold text, in the order their machines were made (rule 4 of their identity). A page
+ * created since the last change may still be in it: readers check `isPageNotCreated`.
+ */
+const pagesNotCreated = (queryClient: QueryClient): readonly string[] => {
+  let pages = pageLists.get(queryClient);
+  if (pages === undefined) {
+    pages = [...registryOf(queryClient)].flatMap(([id, entry]) => (entry.listed ? [id] : []));
+    pageLists.set(queryClient, pages);
+  }
+  return pages;
+};
+
+/** The pages this tab found deleted elsewhere (rule 2 of their identity): once discarded, the blank page moves on. */
+const deletedPages = new WeakMap<QueryClient, Set<string>>();
+
+const deletedPagesOf = (queryClient: QueryClient): Set<string> => {
+  let ids = deletedPages.get(queryClient);
+  if (ids === undefined) {
+    ids = new Set();
+    deletedPages.set(queryClient, ids);
+  }
+  return ids;
+};
+
+/**
+ * Whether the page `id`, not created yet, was found deleted elsewhere: it shows the recovery of its texts, and never
+ * the editor again, even once they are discarded.
+ */
+export const usePageDeleted = (id: string): boolean => {
+  const queryClient = useQueryClient();
+  return useSyncExternalStore(subscribePages, () => deletedPagesOf(queryClient).has(id));
+};
+
+const isPageNotCreated = (queryClient: QueryClient, id: string): boolean =>
+  registryOf(queryClient).get(id)?.uncreated() === true;
+
+const subscribePages = (listener: () => void) => {
+  pageListeners.add(listener);
+  return () => {
+    pageListeners.delete(listener);
+  };
+};
+
+/** A page not created yet, as the blank page lists it. */
+export interface PageNotCreated {
+  id: string;
+  content: string;
+  title: string | undefined;
+}
+
+/**
+ * The pages not created yet that hold text, besides the page `shownId`: restored from the buffer, refused, or left by
+ * the writer for another one. The blank page lists them, so that each can be opened, copied or discarded.
+ */
+export const usePagesNotCreated = (shownId: string): readonly PageNotCreated[] => {
+  const queryClient = useQueryClient();
+  const ids = useSyncExternalStore(subscribePages, () => pagesNotCreated(queryClient));
+  return ids.flatMap((id) => {
+    const entry = registryOf(queryClient).get(id);
+    return id === shownId || entry === undefined || !entry.uncreated()
+      ? []
+      : [{ id, content: entry.autosave.getSnapshot().content, title: entry.title }];
+  });
+};
+
+/** Whether the writer has put nothing on the page `id` that is not created yet: another page can take its place. */
+const untouched = (queryClient: QueryClient, id: string): boolean => {
+  if (isCreated(queryClient, id)) return false;
+  const entry = registryOf(queryClient).get(id);
+  return entry === undefined || (entry.autosave.getSnapshot().content === '' && (entry.title ?? '') === '');
+};
+
+/**
+ * The blank page "+ New document" shows, and its setter. A page not created yet that holds text (restored from the
+ * local buffer, most often) takes the place of a blank page the writer has not touched: it is in no list until it is
+ * created, and the blank page is where it was written (it had no address) and where a page whose creation failed
+ * already waits. The others are listed on the blank page (see `usePagesNotCreated`). Once the blank page's document is
+ * created, or its texts discarded after it was deleted elsewhere, the next page not created yet, or a new one, takes
+ * its place.
+ */
+export const useBlankPage = (selectedId: string | undefined): [string, (id: string) => void] => {
+  const queryClient = useQueryClient();
+  const [blankId, setBlankId] = useState(newDocumentId);
+  const pages = useSyncExternalStore(subscribePages, () => pagesNotCreated(queryClient));
+  const waiting = pages.find((id) => isPageNotCreated(queryClient, id));
+  // A page deleted elsewhere whose texts the writer discarded is done with, as a created one is.
+  const done =
+    isCreated(queryClient, blankId) ||
+    (deletedPagesOf(queryClient).has(blankId) && registryOf(queryClient).get(blankId) === undefined);
+  if (waiting !== undefined && waiting !== blankId && untouched(queryClient, blankId)) setBlankId(waiting);
+  else if (selectedId === undefined && done) setBlankId(waiting ?? newDocumentId());
+  return [blankId, setBlankId];
 };
 
 /** Query clients of pages that crashed, in tests: nothing is restored for them any more (see `abandonAutosave`). */
@@ -494,6 +757,7 @@ export const abandonAutosave = (queryClient: QueryClient) => {
   const registry = registryOf(queryClient);
   for (const entry of registry.values()) entry.autosave.dispose();
   registry.clear();
+  notifyPages(queryClient);
 };
 
 /**
@@ -503,26 +767,12 @@ export const abandonAutosave = (queryClient: QueryClient) => {
 export const entryOf = (queryClient: QueryClient, id: string): Readonly<Entry> | undefined =>
   registryOf(queryClient).get(id);
 
-/**
- * Gives the text and the title of a page whose creation was refused a new id, to create it again; the refused machine
- * is dropped. Answers the new id.
- */
-export const createAgain = (queryClient: QueryClient, id: string): string => {
-  const refused = registryOf(queryClient).get(id);
-  const text = refused?.autosave.getSnapshot().content ?? '';
-  const next = newDocumentId();
-  const entry = entryFor(queryClient, next, draftOf(blankDocument(next)), true);
-  entry.title = refused?.title;
-  entry.autosave.edit(text);
-  void entry.autosave.flush();
-  discardAutosave(queryClient, id);
-  return next;
-};
-
 /** Keeps the title typed on a page whose document is not created yet, with its machine (see `Entry.title`). */
 const keepPendingTitle = (queryClient: QueryClient, id: string, title: string) => {
   const entry = registryOf(queryClient).get(id);
-  if (entry !== undefined) entry.title = title;
+  if (entry === undefined) return;
+  entry.title = title;
+  entry.mirror();
 };
 
 /** Drops a document's machine without saving, for a document that no longer exists; the writer discards its texts. */
@@ -531,6 +781,7 @@ export const discardAutosave = (queryClient: QueryClient, id: string) => {
   const entry = registry.get(id);
   entry?.autosave.dispose();
   registry.delete(id);
+  if (entry?.listed === true) notifyPages(queryClient);
   forgetDocument(queryClient, id);
   for (const text of entry?.held ?? []) dropLeftText(queryClient, text.key, text.content);
 };

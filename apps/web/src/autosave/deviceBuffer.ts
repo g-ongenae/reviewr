@@ -1,6 +1,12 @@
 import type { QueryClient } from '@tanstack/react-query';
 import type { AutosaveState, Draft } from './autosave';
-import { openLocalBuffer, type BufferEntry, type BufferFailureReason, type LocalBuffer } from './localBuffer';
+import {
+  openLocalBuffer,
+  type BufferEntry,
+  type BufferFailureReason,
+  type BufferPage,
+  type LocalBuffer,
+} from './localBuffer';
 
 /**
  * The copy of the text being written that this device keeps, in the local buffer, until the server confirmed it.
@@ -22,7 +28,9 @@ import { openLocalBuffer, type BufferEntry, type BufferFailureReason, type Local
  * 1. A text leaves the buffer only when the server confirmed that text, the writer discarded it, or a write of that
  *    same text elsewhere in the buffer was answered ok. Never because a write was queued, nor because a text in memory
  *    matches it. (`dropLeftText` is the only delete of another tab's entry; the registry calls it on exactly these
- *    three events, see `letGo` in `useAutosave`.)
+ *    three events, see `letGo` in `useAutosave`.) The write elsewhere is this tab's own entry, so it stands for the
+ *    text only while no other tab can adopt it: while this tab holds its lock (`onKept` and `keptText` say nothing
+ *    otherwise). Without that, two living tabs could each drop the other's copy for its own, and keep none.
  * 2. Every decision about another tab's entries is taken on records read while holding that tab's lock. A first list
  *    only says which tabs left something; their entries are read again once their locks are held (`adoptLeftTexts`),
  *    since a tab can write or delete until it is gone.
@@ -32,8 +40,11 @@ import { openLocalBuffer, type BufferEntry, type BufferFailureReason, type Local
  * not bounded by the autosave's debounce, only by how fast IndexedDB answers (and its timeouts). Puts not started yet
  * are coalesced, so after a crash the text that comes back is the last one whose put committed, never an older one.
  *
- * Pages not created on the server yet (`base: null`) are not written: restoring one must send its creation again
- * unchanged, which needs more than the buffer keeps today.
+ * **Pages not created on the server yet** are written like any text, with `base: null` and a `page`: the creation's
+ * text once it was decided (`creation`, never recomputed from later text) and the title typed on the page. The
+ * registry sends a creation only once a write holding its text was answered (`mirrored`), or the entry already holds
+ * that very text (`holds`), so a restore always sends the very same creation again under the same id. A page whose text
+ * was erased is the writer's discard: its entry goes (if its creation was sent, the server keeps what it took).
  */
 
 /** A text a gone tab left for a document, read under that tab's lock. */
@@ -41,7 +52,9 @@ export interface LeftText {
   /** Its key in the buffer: deleted only as the invariant of adoption says. */
   key: string;
   content: string;
-  base: Draft;
+  /** `null` for a page whose document did not exist yet: then `page` says what its creation needs. */
+  base: Draft | null;
+  page?: BufferPage;
 }
 
 /** The Web Locks API, as far as it is used here. */
@@ -56,7 +69,9 @@ export interface DeviceBufferOptions {
 }
 
 /** A write of this tab's entry; a `pinned` put is never coalesced away (a restored text must be written once). */
-type Op = { kind: 'put'; content: string; base: Draft; pinned?: boolean } | { kind: 'delete'; ifContent?: string };
+type Op =
+  | { kind: 'put'; content: string; base: Draft | null; page?: BufferPage; pinned?: boolean }
+  | { kind: 'delete'; ifContent?: string };
 
 /** What this tab writes for one document: one operation at a time, in order, consecutive puts coalesced. */
 interface Mirror {
@@ -77,6 +92,8 @@ interface Mirror {
   kept?: string;
   /** Told each time a put is answered ok, with its text. */
   onKept?: (content: string) => void;
+  /** Waiting for every operation queued to be answered (see `mirrored`). */
+  idle: (() => void)[];
 }
 
 interface DeviceBuffer extends DeviceBufferOptions {
@@ -89,6 +106,8 @@ interface DeviceBuffer extends DeviceBufferOptions {
   adoption: Promise<unknown>;
   /** Settles once this tab holds its own lock: nothing is adopted before, or a tab could adopt its own entries. */
   ready: Promise<void>;
+  /** Whether this tab holds its own lock, so that no other tab adopts its entries while it lives (see rule 1). */
+  locked: boolean;
   /** The first failure the buffer answered, which the writer is told about once. */
   failure?: BufferFailureReason;
   listeners: Set<() => void>;
@@ -128,6 +147,7 @@ export const configureDeviceBuffer = (queryClient: QueryClient, options: DeviceB
     handed: new Set(),
     adoption: Promise.resolve(),
     ready: Promise.resolve(),
+    locked: false,
     listeners: new Set(),
   };
   if (buffer === null) {
@@ -136,6 +156,7 @@ export const configureDeviceBuffer = (queryClient: QueryClient, options: DeviceB
     device.ready = new Promise<void>((granted) => {
       locks
         .request(lockName(tabId), () => {
+          device.locked = true;
           granted();
           return forever;
         })
@@ -165,9 +186,14 @@ const deviceOf = (queryClient: QueryClient): DeviceBuffer => {
 /** Whether this device keeps a buffer at all: if not, nothing is restored, and nothing waits for a restore. */
 export const hasDeviceBuffer = (queryClient: QueryClient): boolean => deviceOf(queryClient).buffer !== null;
 
+const samePage = (a: BufferPage | undefined, b: BufferPage | undefined): boolean =>
+  a === b || (a !== undefined && b !== undefined && a.creation === b.creation && a.title === b.title);
+
 const sameOp = (a: Op | undefined, b: Op): boolean => {
   if (a === undefined || a.kind !== b.kind) return false;
-  if (a.kind === 'put' && b.kind === 'put') return a.content === b.content && a.base === b.base;
+  if (a.kind === 'put' && b.kind === 'put') {
+    return a.content === b.content && a.base === b.base && samePage(a.page, b.page);
+  }
   return a.kind === 'delete' && b.kind === 'delete' && a.ifContent === b.ifContent;
 };
 
@@ -177,11 +203,11 @@ const drain = async (device: DeviceBuffer, mirror: Mirror) => {
   mirror.running = true;
   for (let op = mirror.queue.shift(); op !== undefined; op = mirror.queue.shift()) {
     if (op.kind === 'put') {
-      const result = await buffer.put(mirror.key, { content: op.content, base: op.base });
+      const result = await buffer.put(mirror.key, { content: op.content, base: op.base, page: op.page });
       mirror.stale = !result.ok;
       mirror.kept = result.ok ? op.content : undefined;
-      if (result.ok) mirror.onKept?.(op.content);
-      else report(device, result.reason);
+      if (!result.ok) report(device, result.reason);
+      else if (device.locked) mirror.onKept?.(op.content);
     } else {
       const condition = op.ifContent !== undefined && !mirror.stale;
       const result = await buffer.delete(mirror.key, condition ? { ifContent: op.ifContent ?? '' } : undefined);
@@ -190,12 +216,13 @@ const drain = async (device: DeviceBuffer, mirror: Mirror) => {
     }
   }
   mirror.running = false;
+  for (const resolve of mirror.idle.splice(0)) resolve();
 };
 
 const mirrorOf = (device: DeviceBuffer, documentId: string): Mirror => {
   let mirror = device.mirrors.get(documentId);
   if (mirror === undefined) {
-    mirror = { key: keyOf(device.tabId, documentId), queue: [], running: false, dirty: false, stale: false };
+    mirror = { key: keyOf(device.tabId, documentId), queue: [], running: false, dirty: false, stale: false, idle: [] };
     device.mirrors.set(documentId, mirror);
   }
   return mirror;
@@ -218,18 +245,56 @@ const enqueue = (device: DeviceBuffer, documentId: string, op: Op) => {
 /**
  * Writes a document's machine state: its text and base while the server has not confirmed it, a delete of that very
  * text once it is `saved` (a text written after it stays). `onKept` hears each put answered ok.
+ *
+ * With `page`, the document does not exist on the server yet: its text is written with the page, whatever the
+ * machine's status (nothing is confirmed before the creation is answered), except a blank text, which the writer
+ * erased: then the entry goes, if this tab wrote one.
  */
 export const mirrorState = (
   queryClient: QueryClient,
   documentId: string,
   state: AutosaveState,
   onKept: (content: string) => void,
+  page?: BufferPage,
 ) => {
   const device = deviceOf(queryClient);
   if (device.buffer === null) return;
-  mirrorOf(device, documentId).onKept = onKept;
-  if (state.status === 'saved') enqueue(device, documentId, { kind: 'delete', ifContent: state.content });
+  const mirror = mirrorOf(device, documentId);
+  mirror.onKept = onKept;
+  if (page !== undefined) {
+    if (state.content.trim() !== '') {
+      enqueue(device, documentId, { kind: 'put', content: state.content, base: null, page });
+    } else if (mirror.dirty) {
+      enqueue(device, documentId, { kind: 'delete' });
+    }
+  } else if (state.status === 'saved') enqueue(device, documentId, { kind: 'delete', ifContent: state.content });
   else enqueue(device, documentId, { kind: 'put', content: state.content, base: state.base });
+};
+
+/**
+ * Whether this tab's entry for the document holds `content`, as answered ok, with no write pending; or the device keeps
+ * no buffer. A creation of that very text then needs no write ahead: a restore would send that text anyway.
+ */
+export const holds = (queryClient: QueryClient, documentId: string, content: string): boolean => {
+  const device = deviceOf(queryClient);
+  const mirror = device.mirrors.get(documentId);
+  return (
+    device.buffer === null ||
+    (mirror !== undefined && !mirror.running && mirror.queue.length === 0 && mirror.kept === content)
+  );
+};
+
+/**
+ * Settles once every write queued so far for the document was answered, ok or not (at once without a buffer). The
+ * registry waits for it before it sends a creation: see "Pages not created on the server yet" above.
+ */
+export const mirrored = (queryClient: QueryClient, documentId: string): Promise<void> => {
+  const device = deviceOf(queryClient);
+  const mirror = device.mirrors.get(documentId);
+  if (device.buffer === null || mirror === undefined || (!mirror.running && mirror.queue.length === 0)) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => mirror.idle.push(resolve));
 };
 
 /**
@@ -241,18 +306,24 @@ export const keepRestored = (
   queryClient: QueryClient,
   documentId: string,
   content: string,
-  base: Draft,
+  base: Draft | null,
   onKept: (content: string) => void,
+  page?: BufferPage,
 ) => {
   const device = deviceOf(queryClient);
   if (device.buffer === null) return;
   mirrorOf(device, documentId).onKept = onKept;
-  enqueue(device, documentId, { kind: 'put', content, base, pinned: true });
+  enqueue(device, documentId, { kind: 'put', content, base, page, pinned: true });
 };
 
-/** The text this tab's entry for the document holds, as last answered ok; `undefined` if unknown or none. */
-export const keptText = (queryClient: QueryClient, documentId: string): string | undefined =>
-  deviceOf(queryClient).mirrors.get(documentId)?.kept;
+/**
+ * The text this tab's entry for the document holds, as last answered ok; `undefined` if unknown or none, and while
+ * this tab does not hold its lock (see rule 1: its entry then stands for nothing).
+ */
+export const keptText = (queryClient: QueryClient, documentId: string): string | undefined => {
+  const device = deviceOf(queryClient);
+  return device.locked ? device.mirrors.get(documentId)?.kept : undefined;
+};
 
 /**
  * Deletes another tab's entry `key` if it still holds `content`. The only delete of another tab's entry: call it only
@@ -298,13 +369,13 @@ const claim = (device: DeviceBuffer, tabId: string): Promise<boolean> => {
   });
 };
 
-/** Whether a record is a text another tab left that this adoption may look at. */
+/** Whether a record is a text another tab left that this adoption may look at (a page only with what it needs). */
 const leftBy = (device: DeviceBuffer, entry: BufferEntry, documentId: string | undefined) => {
   const owner = parseKey(entry.key);
   return owner !== undefined &&
     owner.tabId !== device.tabId &&
     (documentId === undefined || owner.documentId === documentId) &&
-    entry.base !== null
+    (entry.base !== null || entry.page !== undefined)
     ? owner
     : undefined;
 };
@@ -340,10 +411,11 @@ export const adoptLeftTexts = (
     }
     for (const entry of fresh.entries) {
       const owner = leftBy(device, entry, documentId);
-      if (owner === undefined || entry.base === null || !device.claimed.has(owner.tabId)) continue;
+      if (owner === undefined || !device.claimed.has(owner.tabId)) continue;
       if (device.handed.has(entry.key)) continue;
       const texts = left.get(owner.documentId) ?? [];
-      texts.push({ key: entry.key, content: entry.content, base: entry.base });
+      const { key, content, base, page } = entry;
+      texts.push(page === undefined ? { key, content, base } : { key, content, base, page });
       left.set(owner.documentId, texts);
     }
     return left;

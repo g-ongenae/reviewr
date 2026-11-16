@@ -3,7 +3,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useReducer, useState } from 'react';
 import { api, inlineError, isNotFound, queryKeys } from '../api';
-import { blankDocument, entryOf, isCreated, useRestored, useWaitingTexts } from '../autosave/useAutosave';
+import {
+  blankDocument,
+  entryOf,
+  isCreated,
+  usePageDeleted,
+  useRestored,
+  useWaitingTexts,
+} from '../autosave/useAutosave';
 import { Editor } from './Editor';
 import { DeletedDocument, HeldText, keptCopyLabel } from './TextRecovery';
 
@@ -13,8 +20,8 @@ interface Props {
   blank?: boolean;
   /** The blank page's document was just created. */
   onCreated?: () => void;
-  /** The blank page's creation was refused: its text is now on the blank page `id`, to be created again. */
-  onCreateAgain?: (id: string) => void;
+  /** Shows another page not created yet, `id`, on the blank page. */
+  onOpenPage?: (id: string) => void;
   onDeleted: () => void;
   onGoBack: () => void;
   /** Opens another document: one created from a text of this one, after it was deleted. */
@@ -28,7 +35,7 @@ export const DocumentView = ({
   id,
   blank = false,
   onCreated,
-  onCreateAgain,
+  onOpenPage,
   onDeleted,
   onGoBack,
   onOpen,
@@ -47,6 +54,8 @@ export const DocumentView = ({
   });
   // Its creation puts the document in the cache: reading `data` here renders the page again then.
   const uncreated = blankPage !== undefined && document.data === undefined && !isCreated(queryClient, id);
+  // A page whose document was deleted elsewhere before this tab created it: its texts go to the recovery below.
+  const pageDeleted = usePageDeleted(id);
   const created = useEffectEvent(() => onCreated?.());
   useEffect(() => {
     if (blankPage !== undefined && !uncreated) created();
@@ -55,15 +64,9 @@ export const DocumentView = ({
   const restored = useRestored(id, blankPage !== undefined);
   const waiting = useWaitingTexts(id);
 
-  if (uncreated) {
+  if (uncreated && !pageDeleted) {
     return (
-      <Editor
-        document={blankPage}
-        isNew
-        onCreateAgain={onCreateAgain}
-        onDeleted={onDeleted}
-        toolbarStart={toolbarStart}
-      />
+      <Editor document={blankPage} isNew onOpenPage={onOpenPage} onDeleted={onDeleted} toolbarStart={toolbarStart} />
     );
   }
 
@@ -121,7 +124,7 @@ export const DocumentView = ({
         id={id}
         autosave={entry.autosave}
         edited={entry.edited}
-        title={document.data?.title}
+        title={document.data?.title ?? entry.title}
         notFound={notFound}
         onOpen={onOpen}
         onDiscarded={discarded}

@@ -3,8 +3,8 @@
  *
  * It keeps, for each document, the writer's latest text and the **base** it started from (the server draft content and
  * `draftVersion` the edits were made on), so the text can be restored after a crash or a failed request, and compared
- * three-way with the server's draft later. The key is the document id, or a key made by the client for a document that
- * does not exist on the server yet (its `base` is then `null`).
+ * three-way with the server's draft later. The key names the document, which may not exist on the server yet: its
+ * `base` is then `null`, and its `page` holds what its creation needs.
  *
  * Like the autosave core, it is framework-free: no React, no HTTP.
  *
@@ -23,7 +23,9 @@
  * - **Durable writes.** A write resolves `ok` once its transaction completed, with `durability: 'strict'` where the
  *   browser supports it (flushed to disk, not only to the OS cache).
  * - **Versioned schema.** The database is upgraded step by step through `localBufferSchema` (one migration per
- *   version). Later versions (the outbox) append a migration; buffered text is kept across upgrades.
+ *   version). Later versions (the outbox) append a migration; buffered text is kept across upgrades. A field added to
+ *   the records needs no migration as long as it is optional (`page` was added so): records are read defensively, and
+ *   a record written before it reads as it did.
  * - **A stalled transaction stops the buffer, loudly.** A transaction that fires neither `complete` nor `abort` within
  *   `transactionTimeoutMs` is aborted if it can be, and its call answers `stalled`. Whether it will still commit is
  *   then unknown, so no later write may run after it (it could commit over newer text): from then on, this buffer
@@ -39,13 +41,23 @@
  *
  * - **Outbox.** Pending operations (create, save draft, save version, rename) and their replay on reconnect are a
  *   separate store, added by a later schema version.
- * - **Pages not created yet.** Their entries would need the creation's client id and body: nothing writes them yet.
  */
 
 /** The server draft the local edits started from. */
 export interface BufferBase {
   content: string;
   draftVersion: number;
+}
+
+/**
+ * What restoring a page whose document does not exist on the server yet needs: its id is in the key (chosen by the
+ * client), and its creation must be sent again exactly as it may already have been sent.
+ */
+export interface BufferPage {
+  /** The text of the creation already sent (its body's `content`), sent again unchanged; `null` if none was sent. */
+  creation: string | null;
+  /** A title typed on the page, not saved yet. */
+  title?: string;
 }
 
 /** What the buffer stores per key. */
@@ -56,6 +68,8 @@ export interface BufferEntry {
   content: string;
   /** The server draft the edits started from; `null` for a document not created on the server yet. */
   base: BufferBase | null;
+  /** Only with `base: null`: what the creation of the document needs. Absent from records written before it. */
+  page?: BufferPage;
   /** When the entry was written, in milliseconds since the epoch. */
   updatedAt: number;
 }
@@ -91,8 +105,8 @@ export interface DeleteCondition {
 export interface LocalBuffer {
   /** Reads the entry for `key`. */
   get(key: string): Promise<GetResult>;
-  /** Stores the latest text for `key` and the base it started from, replacing what was there. */
-  put(key: string, value: { content: string; base: BufferBase | null }): Promise<PutResult>;
+  /** Stores the latest text for `key` and the base it started from (or its page), replacing what was there. */
+  put(key: string, value: { content: string; base: BufferBase | null; page?: BufferPage }): Promise<PutResult>;
   /** Removes the entry for `key`, unconditionally or only if it still holds `condition.ifContent`. */
   delete(key: string, condition?: DeleteCondition): Promise<DeleteResult>;
   /** Every entry, the most recently written first. */
@@ -150,17 +164,29 @@ const isBase = (value: unknown): value is BufferBase =>
   typeof (value as BufferBase).content === 'string' &&
   typeof (value as BufferBase).draftVersion === 'number';
 
-/** Reads a stored record defensively: whatever holds text is returned, a malformed base becomes `null`. */
+const toPage = (value: unknown): BufferPage | undefined => {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { creation, title } = value as Record<string, unknown>;
+  if (creation !== null && typeof creation !== 'string') return undefined;
+  return typeof title === 'string' ? { creation, title } : { creation };
+};
+
+/**
+ * Reads a stored record defensively: whatever holds text is returned, a malformed base becomes `null`, and a page is
+ * read only without a base (a malformed one is left out).
+ */
 const toEntry = (record: unknown): BufferEntry | undefined => {
   if (typeof record !== 'object' || record === null) return undefined;
-  const { key, content, base, updatedAt } = record as Record<string, unknown>;
+  const { key, content, base, page, updatedAt } = record as Record<string, unknown>;
   if (typeof key !== 'string' || typeof content !== 'string') return undefined;
-  return {
+  const entry: BufferEntry = {
     key,
     content,
     base: isBase(base) ? { content: base.content, draftVersion: base.draftVersion } : null,
     updatedAt: typeof updatedAt === 'number' ? updatedAt : 0,
   };
+  const pageOf = entry.base === null ? toPage(page) : undefined;
+  return pageOf === undefined ? entry : { ...entry, page: pageOf };
 };
 
 /**
@@ -337,13 +363,17 @@ export const openLocalBuffer = (options: LocalBufferOptions = {}): LocalBuffer =
       // Snapshot the value now: the caller may change its object before the write runs.
       let record: BufferEntry;
       try {
-        const { content, base } = value;
+        const { content, base, page } = value;
         record = {
           key,
           content,
           base: base === null ? null : { content: base.content, draftVersion: base.draftVersion },
           updatedAt: now(),
         };
+        if (base === null && page !== undefined) {
+          record.page =
+            page.title === undefined ? { creation: page.creation } : { creation: page.creation, title: page.title };
+        }
       } catch (error) {
         return Promise.resolve(failure(error));
       }

@@ -16,12 +16,13 @@ import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
 import {
   cacheDocument,
-  createAgain,
+  discardAutosave,
   discardCopy,
   draftOf,
   isGone,
   useAutosave,
   useKeptCopies,
+  usePagesNotCreated,
 } from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
@@ -36,8 +37,8 @@ interface Props {
   document: Document;
   /** The document does not exist on the server yet (the blank page): the autosave creates it. */
   isNew?: boolean;
-  /** The creation was refused: the text was moved to the blank page `id`, to be created again. */
-  onCreateAgain?: (id: string) => void;
+  /** Shows another page not created yet, `id`, on the blank page. */
+  onOpenPage?: (id: string) => void;
   onDeleted: () => void;
   toolbarStart?: ReactNode;
 }
@@ -103,7 +104,7 @@ const stopText = (stop: Stop): string => {
   }
 };
 
-export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, toolbarStart }: Props) => {
+export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
   const { autosave, state, discard, pendingTitle, keepTitle } = useAutosave(document, isNew);
   /**
@@ -285,6 +286,9 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, tool
   const hidden = busy ? [] : hiddenTexts(sessionState, state);
   /** Other texts that tabs closed before saving left on this device for this document. */
   const copies = useKeptCopies(document.id).filter((text) => text !== content);
+  /** The other pages not created yet, which only the blank page leads to. */
+  const otherPages = usePagesNotCreated(document.id);
+  const pages = isNew ? otherPages : [];
 
   const remove = useMutation({
     mutationFn: () => api.deleteDocument(document.id),
@@ -453,15 +457,7 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, tool
           </div>
         )}
 
-        {state.status === 'rejected' && isNew ? (
-          // The server's message names the document's id, which says nothing to the writer: it is in the tooltip.
-          <div className="banner error" role="alert" title={describeError(state.error)}>
-            <span>This text could not be saved as a new document. It is kept here: try again to save it.</span>
-            <button className="primary" onClick={() => onCreateAgain?.(createAgain(queryClient, document.id))}>
-              Try again
-            </button>
-          </div>
-        ) : state.status === 'rejected' ? (
+        {state.status === 'rejected' ? (
           <div className="banner error" role="alert">
             <span>
               {state.permanent
@@ -538,6 +534,34 @@ export const Editor = ({ document, isNew = false, onCreateAgain, onDeleted, tool
               <HeldText key={text} label={keptCopyLabel} text={text}>
                 <button type="button" onClick={() => discardCopy(queryClient, document.id, text)}>
                   Discard this copy
+                </button>
+              </HeldText>
+            ))}
+          </div>
+        )}
+
+        {pages.length > 0 && (
+          <div className="held-texts">
+            <p>
+              {pages.length === 1
+                ? 'This device also keeps another page, not saved yet.'
+                : 'This device also keeps other pages, not saved yet.'}{' '}
+              Open one to go on writing it, or copy it; discarding removes it from this device.
+            </p>
+            {pages.map((page) => (
+              <HeldText key={page.id} label={page.title?.trim() || 'A page not saved yet'} text={page.content}>
+                <button type="button" onClick={() => onOpenPage?.(page.id)}>
+                  Open this page
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm('Discard this page? Its text is removed from this device.')) {
+                      discardAutosave(queryClient, page.id);
+                    }
+                  }}
+                >
+                  Discard this page
                 </button>
               </HeldText>
             ))}
