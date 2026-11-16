@@ -90,7 +90,7 @@ Web client — an autosave state machine, not just a debounce:
     - later: these texts are in memory only until the local buffer keeps them; an unsaved title is not offered;
     - to decide: a text that was saved and whose editor was left is no longer held by the tab, so if the document is then deleted elsewhere the tab shows "not found". The risk behind it is a delete made from a stale view, which destroys text saved since: make the delete carry what it saw (revision and `draftVersion`, 409 otherwise), or keep deleted documents recoverable for a while;
   - later: "keep all mine / all theirs" for texts with many conflicts;
-  - run the package's tests on a real Hermes runtime (only the Hermes compiler was checked);
+  - the package's tests run on a real Hermes runtime in the CI (done): the same cases as on Node, from source and from bytecode, on the Hermes version of the mobile app's React Native; later: the same for `@reviewr/autosave`, and a run on a real phone (on Linux, Hermes uses ICU where Android and iOS use the platform's libraries);
 - flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short: the local buffer then brings the text back at the next start on this device);
 - tests with delayed responses, failed requests, typing during creation, and offline edits reconciled against a moved server draft.
 
