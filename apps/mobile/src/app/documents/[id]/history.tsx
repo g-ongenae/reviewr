@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
+import { textMoved } from '@/lib/drafts';
 import { formatDate } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
 
@@ -44,6 +45,11 @@ export default function HistoryScreen() {
       Alert.alert(
         'Not restored',
         'This document was changed on another device, or deleted: your text in the editor is kept as it is. Resolve that first.',
+      );
+    } else if (outcome.error === textMoved) {
+      Alert.alert(
+        'Not restored',
+        'The text in the editor changed during the restore, so nothing was restored. Your text is kept as it is.',
       );
     } else {
       const detail = inlineError(outcome.error) ?? 'the server is unreachable';

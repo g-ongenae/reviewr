@@ -199,9 +199,9 @@ describe('createDrafts', () => {
       server.failing = new NetworkError(new TypeError('offline'));
       await drafts.keepMine('doc');
       entry.autosave.edit('M2');
-      // M1 is neither on screen nor in a version: the editor shows it, with "Discard".
+      // Neither the other device's text nor M1 is on screen or in a version: the editor lists them, with "Discard".
       const hidden = () => heldTexts(entry).map(({ text }) => text);
-      expect(hidden()).toEqual(['M1']);
+      expect(hidden()).toEqual(['theirs', 'M1']);
 
       server.failing = undefined;
       await drafts.keepMine('doc');
@@ -209,6 +209,21 @@ describe('createDrafts', () => {
       expect(server.revisions.map((revision) => revision.content)).toEqual(expect.arrayContaining(['theirs', 'M1']));
       expect(state()).toMatchObject({ status: 'saved', content: 'M2' });
       expect(hidden()).toEqual([]);
+    });
+
+    it('holds the other device’s text when "Keep mine" stopped and the document is then deleted', async () => {
+      const context = setup();
+      const { server, drafts, entry, state } = context;
+      await conflict(context, 'theirs', 'mine');
+      server.failing = new NetworkError(new TypeError('offline'));
+      await drafts.keepMine('doc');
+      server.failing = undefined;
+      server.gone = true;
+      await drafts.keepMine('doc');
+      // "theirs" is in no version and the document is gone: it is listed, as the editor only shows "mine".
+      expect(server.revisions.map((revision) => revision.content)).not.toContain('theirs');
+      expect(state().content).toBe('mine');
+      expect(heldTexts(entry)).toEqual([{ text: 'theirs', side: 'theirs', kept: false }]);
     });
 
     it('lets the writer discard an earlier text a stopped "Keep mine" holds', async () => {
@@ -219,7 +234,7 @@ describe('createDrafts', () => {
       await drafts.keepMine('doc');
       entry.autosave.edit('M2');
       entry.session.discardText('M1');
-      expect(heldTexts(entry)).toEqual([]);
+      expect(heldTexts(entry).map(({ text }) => text)).toEqual(['theirs']);
     });
 
     it('stops when the other device writes again during "Keep mine", without overwriting its text', async () => {

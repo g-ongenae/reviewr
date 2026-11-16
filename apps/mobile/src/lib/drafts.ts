@@ -1,11 +1,5 @@
 import { createAutosave, type Autosave, type Draft, type SaveResult } from '@reviewr/autosave';
-import {
-  createReconcileSession,
-  hiddenTexts,
-  type HeldText,
-  type ReconcileSession,
-  type SessionApi,
-} from '@reviewr/reconcile';
+import { createReconcileSession, type HeldText, type ReconcileSession, type SessionApi } from '@reviewr/reconcile';
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
 import { createTitleSaver, type TitleSaver } from './title';
@@ -112,12 +106,14 @@ export interface Drafts {
 const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
 
 /**
- * The earlier texts the session of an entry holds, in no version, that the editor does not show. The mobile editor has
- * no merge view: the result of a stopped "Keep mine" is not on screen either. None while "Keep mine" runs.
+ * The texts the session of an entry holds, in no version, that the editor does not show: every text it was given and
+ * has not kept, but the one in the text field. The mobile editor has no merge view, so the other device's text of the
+ * conflict and the result of a stopped "Keep mine" are not on screen either. None while "Keep mine" runs.
  */
 export const heldTexts = ({ session, autosave }: Pick<Entry, 'session' | 'autosave'>): HeldText[] => {
   const state = session.getSnapshot();
-  return state.running ? [] : hiddenTexts({ ...state, result: undefined }, autosave.getSnapshot());
+  const { content } = autosave.getSnapshot();
+  return state.running ? [] : state.texts.filter((held) => !held.kept && held.text !== content);
 };
 
 /**

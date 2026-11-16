@@ -204,11 +204,11 @@ const Editor = ({ document }: { document: Document }) => {
         </View>
       )}
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        {hidden.map(({ text }) => (
+        {hidden.map(({ text, side }) => (
           <View key={text} style={[styles.held, { borderColor: theme.border }]}>
             <Text style={{ color: theme.muted }}>
-              An earlier text of yours, in no version yet. “Keep mine” keeps it as a version; copy what you need if you
-              discard it.
+              {side === 'mine' ? 'An earlier text of yours' : 'The other device’s text'}, in no version yet. “Keep mine”
+              keeps it as a version; copy what you need if you discard it.
             </Text>
             <Text selectable style={{ color: theme.text }}>
               {text}

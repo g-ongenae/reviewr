@@ -92,4 +92,23 @@ describe('createAppDrafts: the cache never goes back', () => {
     server.otherDevice('C');
     expect((await fetch()).draft).toMatchObject({ content: 'C', draftVersion: 3 });
   });
+
+  it('a late read does not bring back the title a rename replaced since', async () => {
+    const { server, drafts, entry, fetch, cached, lateRead } = await setup();
+    const reading = lateRead();
+    entry.title.edit('Renamed');
+    entry.title.blur();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cached()?.title).toBe('Renamed');
+    server.releaseReads();
+    expect((await reading).title).toBe('Renamed');
+    drafts.read(cached()!);
+    expect(entry.title.getSnapshot()).toMatchObject({ status: 'saved', value: 'Renamed' });
+
+    // A read that started after the rename was confirmed holds the server's title: another device's rename.
+    await server.renameDocument('doc', 'Renamed elsewhere');
+    expect((await fetch()).title).toBe('Renamed elsewhere');
+    drafts.read(cached()!);
+    expect(entry.title.getSnapshot()).toMatchObject({ status: 'saved', value: 'Renamed elsewhere' });
+  });
 });
