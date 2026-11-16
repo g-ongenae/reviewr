@@ -99,7 +99,7 @@ Web client — an autosave state machine, not just a debounce:
 Mobile — the same behaviour as the web, on the same packages; the phone is where offline writing happens most:
 
 - the editor on the draft and revision endpoints (done): it opens on the draft and autosaves it through `@reviewr/autosave`, "Save version" saves the draft as a version, the title goes through `PATCH`, and a deleted document or a refused text stays on screen; the app no longer calls the old `PUT /documents/:id`. The logic is tested with Vitest and the bundle is built by Metro; not run on a phone or an emulator yet;
-- a draft conflict (done, minimal): "Keep mine" keeps the other device's text as a named version through `@reviewr/reconcile`, then saves the local text; the texts a stopped "Keep mine" holds are listed, to copy or discard; later: the merge screen, on the same merge package;
+- a draft conflict (done, minimal): "Keep mine" keeps the other device's text as a named version through `@reviewr/reconcile`, then saves the local text; the other device's text and the texts a stopped "Keep mine" holds are shown under the notice, to copy or discard; later: the merge screen, on the same merge package;
 - restore goes into the editor (done), and the text it replaces is first kept as a version named "Before restore" when it is in no version; later: the same on the web, whose restore still replaces a text that may be in no version;
 - a read answered late never puts an older draft, revision or title back as if it were saved (done);
 - later: naming a version and the version names in the history; creating a document as a draft-only document;
