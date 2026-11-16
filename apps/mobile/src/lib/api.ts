@@ -26,13 +26,8 @@ export const api = new ReviewrClient(apiUrl, withClientFeatures());
 /** Whether the API answered the last request; drives the "Server unreachable" notification. */
 export const reachability = new ReachabilityTracker();
 
-export const queryKeys = {
-  health: ['health'] as const,
-  documents: ['documents'] as const,
-  document: (id: string) => ['documents', id] as const,
-  revisions: (id: string) => ['documents', id, 'revisions'] as const,
-  revision: (id: string, revision: number) => ['documents', id, 'revisions', revision] as const,
-};
+// The query keys live apart, so that framework-free modules can use them.
+export { queryKeys } from './queryKeys';
 
 /**
  * Message to show next to what failed, or undefined when there is nothing to show there: no error, or the server

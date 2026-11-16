@@ -20,7 +20,10 @@ export class FakeApi implements DraftsApi {
   gone = false;
   /** Drafts the server refuses as too large. */
   tooLarge = (content: string) => content.length > 20;
+  /** How many of the next reads answer what the server held when they arrived, but only at `releaseReads`. */
+  lateReads = 0;
   private waiting: (() => void)[] = [];
+  private waitingReads: (() => void)[] = [];
 
   constructor(content: string) {
     const now = '2026-11-16T10:00:00.000Z';
@@ -63,7 +66,19 @@ export class FakeApi implements DraftsApi {
 
   async getDocument(): Promise<Document> {
     await this.gate('getDocument');
-    return this.read();
+    const answer = this.read();
+    // A late read: the server read the document now, its answer arrives at `releaseReads`.
+    if (this.lateReads > 0) {
+      this.lateReads--;
+      await new Promise<void>((resume) => this.waitingReads.push(resume));
+    }
+    return answer;
+  }
+
+  releaseReads() {
+    const waiting = this.waitingReads;
+    this.waitingReads = [];
+    for (const resume of waiting) resume();
   }
 
   async saveDraft(_id: string, { content, draftVersion }: SaveDraftInput): Promise<DocumentDraft> {

@@ -4,7 +4,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
-import { draftsOf } from '@/lib/appDrafts';
+import { draftsOf, fetchDocument } from '@/lib/appDrafts';
 import { formatDate } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
 
@@ -16,7 +16,7 @@ export default function HistoryScreen() {
 
   const revisions = useQuery({ queryKey: queryKeys.revisions(id), queryFn: () => api.listRevisions(id) });
   // Already cached by the document screen; an untitled revision is named after the document's creation day.
-  const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => api.getDocument(id) });
+  const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => fetchDocument(queryClient, id) });
   const preview = useQuery({
     queryKey: queryKeys.revision(id, selected ?? 0),
     queryFn: () => api.getRevision(id, selected ?? 0),
