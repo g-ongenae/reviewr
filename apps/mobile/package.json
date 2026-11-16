@@ -3,6 +3,8 @@
   "version": "0.0.0",
   "main": "expo-router/entry",
   "dependencies": {
+    "@reviewr/autosave": "workspace:*",
+    "@reviewr/reconcile": "workspace:*",
     "@reviewr/shared": "workspace:*",
     "@tanstack/react-query": "^5.105.0",
     "expo": "~58.0.21",
@@ -20,14 +22,16 @@
     "@types/react": "~19.3.0",
     "eslint": "^9.39.0",
     "eslint-config-expo": "~58.0.4",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.12"
   },
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
-    "doctor": "expo-doctor"
+    "doctor": "expo-doctor",
+    "test": "vitest run"
   },
   "private": true
 }
