@@ -1,7 +1,7 @@
 import type { Document } from '@reviewr/shared';
 import { NetworkError } from '@reviewr/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDrafts, shownDocument } from './drafts';
+import { createDrafts, heldTexts, shownDocument } from './drafts';
 import { FakeApi } from './fakeApi';
 
 const debounceMs = 1000;
@@ -190,6 +190,36 @@ describe('createDrafts', () => {
       await wait();
       expect(state()).toMatchObject({ status: 'saved', content: 'mine' });
       expect(server.overwritten).toEqual([{ text: 'theirs', kept: true }]);
+    });
+
+    it('holds an earlier local text a stopped "Keep mine" was given, until it is kept or discarded', async () => {
+      const context = setup();
+      const { server, drafts, entry, state } = context;
+      await conflict(context, 'theirs', 'M1');
+      server.failing = new NetworkError(new TypeError('offline'));
+      await drafts.keepMine('doc');
+      entry.autosave.edit('M2');
+      // M1 is neither on screen nor in a version: the editor shows it, with "Discard".
+      const hidden = () => heldTexts(entry).map(({ text }) => text);
+      expect(hidden()).toEqual(['M1']);
+
+      server.failing = undefined;
+      await drafts.keepMine('doc');
+      await wait();
+      expect(server.revisions.map((revision) => revision.content)).toEqual(expect.arrayContaining(['theirs', 'M1']));
+      expect(state()).toMatchObject({ status: 'saved', content: 'M2' });
+      expect(hidden()).toEqual([]);
+    });
+
+    it('lets the writer discard an earlier text a stopped "Keep mine" holds', async () => {
+      const context = setup();
+      const { server, drafts, entry } = context;
+      await conflict(context, 'theirs', 'M1');
+      server.failing = new NetworkError(new TypeError('offline'));
+      await drafts.keepMine('doc');
+      entry.autosave.edit('M2');
+      entry.session.discardText('M1');
+      expect(heldTexts(entry)).toEqual([]);
     });
 
     it('stops when the other device writes again during "Keep mine", without overwriting its text', async () => {

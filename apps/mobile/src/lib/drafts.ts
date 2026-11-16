@@ -1,5 +1,11 @@
 import { createAutosave, type Autosave, type Draft, type SaveResult } from '@reviewr/autosave';
-import { createReconcileSession, type ReconcileSession, type SessionApi } from '@reviewr/reconcile';
+import {
+  createReconcileSession,
+  hiddenTexts,
+  type HeldText,
+  type ReconcileSession,
+  type SessionApi,
+} from '@reviewr/reconcile';
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
 import { createTitleSaver, type TitleSaver } from './title';
@@ -104,6 +110,15 @@ export interface Drafts {
 }
 
 const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
+
+/**
+ * The earlier texts the session of an entry holds, in no version, that the editor does not show. The mobile editor has
+ * no merge view: the result of a stopped "Keep mine" is not on screen either. None while "Keep mine" runs.
+ */
+export const heldTexts = ({ session, autosave }: Pick<Entry, 'session' | 'autosave'>): HeldText[] => {
+  const state = session.getSnapshot();
+  return state.running ? [] : hiddenTexts({ ...state, result: undefined }, autosave.getSnapshot());
+};
 
 /**
  * The document a screen shows: the one read from the server, else the one the app still holds a text for (deleted

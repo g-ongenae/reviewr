@@ -8,7 +8,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
-import { shownDocument, textMoved } from '@/lib/drafts';
+import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
 import { countWords } from '@/lib/format';
 import type { TitleState } from '@/lib/title';
 import { useTheme } from '@/lib/theme';
@@ -106,6 +106,8 @@ const Editor = ({ document }: { document: Document }) => {
   const { content } = state;
   const changedSinceVersion = content !== document.content;
   const busy = sessionState.running;
+  /** Earlier texts "Keep mine" holds, in no version, that the editor no longer shows. */
+  const hidden = heldTexts({ session, autosave });
 
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
@@ -202,6 +204,20 @@ const Editor = ({ document }: { document: Document }) => {
         </View>
       )}
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+        {hidden.map(({ text }) => (
+          <View key={text} style={[styles.held, { borderColor: theme.border }]}>
+            <Text style={{ color: theme.muted }}>
+              An earlier text of yours, in no version yet. “Keep mine” keeps it as a version; copy what you need if you
+              discard it.
+            </Text>
+            <Text selectable style={{ color: theme.text }}>
+              {text}
+            </Text>
+            <Pressable hitSlop={8} onPress={() => session.discardText(text)}>
+              <Text style={{ color: theme.danger }}>Discard</Text>
+            </Pressable>
+          </View>
+        ))}
         <TextInput
           style={[styles.titleInput, { color: theme.text }]}
           placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
@@ -248,6 +264,7 @@ const styles = StyleSheet.create({
   noticeButton: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6 },
   noticeButtonLabel: { color: '#fff', fontWeight: '600' },
   scroll: { padding: 16, flexGrow: 1 },
+  held: { gap: 8, padding: 12, marginBottom: 12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 },
   titleInput: { fontSize: 26, fontWeight: '700', paddingVertical: 8 },
   contentInput: { flexGrow: 1, minHeight: 300, fontSize: 18, lineHeight: 28, fontFamily: 'serif' },
   deleteButton: { alignSelf: 'center', padding: 16, marginTop: 24 },
