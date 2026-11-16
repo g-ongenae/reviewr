@@ -287,14 +287,31 @@ const scenarios = [
         throw new Error('second');
       }, 20);
       setTimeout(() => log.push('still runs'), 30);
+      setTimeout(() => log.push('at 60'), 60);
       await vi.advanceTimersByTimeAsync(50).then(
         () => log.push('resolved'),
         (error) => log.push(`rejected: ${error.message}`),
       );
-      setTimeout(() => log.push('the clock moved to 50'), 0);
-      await vi.advanceTimersByTimeAsync(0);
+      // The clock is at 50, not at 30 where the last timer ran: 9 ms more do not reach 60, the next one does.
+      await vi.advanceTimersByTimeAsync(9);
+      log.push('advanced 9');
+      await vi.advanceTimersByTimeAsync(1);
+      log.push('advanced 1');
     },
-    ['throws first', 'throws second', 'still runs', 'rejected: first', 'the clock moved to 50'],
+    ['throws first', 'throws second', 'still runs', 'rejected: first', 'advanced 9', 'at 60', 'advanced 1'],
+  ],
+  [
+    'a handle kept from before vi.useRealTimers() does not clear a timer set after the next vi.useFakeTimers()',
+    async ({ vi }, log) => {
+      const stale = setTimeout(() => log.push('stale'), 500);
+      clearTimeout(stale);
+      vi.useRealTimers();
+      vi.useFakeTimers();
+      setTimeout(() => log.push('saved'), 500);
+      clearTimeout(stale);
+      await vi.advanceTimersByTimeAsync(500);
+    },
+    ['saved'],
   ],
   [
     'a timer or a microtask between two timers clears a timer due at the same time',
@@ -489,7 +506,7 @@ describe('the Hermes harness, asynchronous', () => {
     );
   });
 
-  it('runs async tests to the end, and fails one that rejects, throws after an await or never settles', async () => {
+  it('runs async tests to the end, and fails one that rejects, throws after an await, never settles or leaves a failing assertion', async () => {
     const lines = [];
     const own = createHarness((line) => lines.push(line));
     const log = [];
@@ -513,18 +530,31 @@ describe('the Hermes harness, asynchronous', () => {
     own.it('awaits a failing resolves', async () => {
       await own.expect(Promise.resolve('failed')).resolves.toBe('saved');
     });
+    // As Vitest, which waits for the asynchronous assertions of a test before it passes, awaited or not.
+    own.it('does not await a passing resolves', () => {
+      void own.expect(Promise.resolve('saved')).resolves.toBe('saved');
+      log.push('not awaited');
+    });
+    own.it('does not await a failing resolves', () => {
+      void own.expect(Promise.resolve('failed')).resolves.toBe('saved');
+    });
+    own.it('does not await a resolves that never settles', () => {
+      void own.expect(new Promise(() => {})).resolves.toBe('saved');
+    });
     own.it('runs after them', () => {
       log.push('ran');
     });
-    await expect(own.run('Node')).rejects.toThrow('5 of 7 cases failed on Node');
+    await expect(own.run('Node')).rejects.toThrow('7 of 10 cases failed on Node');
     expect(lines.filter((line) => line.startsWith('FAIL'))).toEqual([
       'FAIL fails after an await\n     expected 1 to be 2',
       'FAIL rejects\n     lost text',
       'FAIL throws before its first await\n     at once',
       'FAIL never settles\n     the test never settles',
       'FAIL awaits a failing resolves\n     expected the promise to resolve to "saved", got "failed"',
+      'FAIL does not await a failing resolves\n     expected the promise to resolve to "saved", got "failed"',
+      'FAIL does not await a resolves that never settles\n     the test never settles',
     ]);
-    expect(log).toEqual(['passed', 'ran']);
+    expect(log).toEqual(['passed', 'not awaited', 'ran']);
   });
 
   it('runs beforeEach and afterEach in the order Vitest does', async () => {

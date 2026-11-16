@@ -144,6 +144,12 @@ const show = (value) => (typeof value === 'function' ? value.name : JSON.stringi
 /** The calls of each function made by `vi.fn`, for `toHaveBeenCalledTimes` and `not.toHaveBeenCalled`. */
 const mockCalls = new WeakMap();
 
+/**
+ * The asynchronous assertions (`resolves`) made by the test that is running. As Vitest, the runner waits for each of
+ * them before the test passes, so one the test did not await still fails it, also when it never settles.
+ */
+const asyncAssertions = [];
+
 const expect = (actual) => {
   const check = (pass, message) => {
     if (!pass) {
@@ -227,26 +233,38 @@ const expect = (actual) => {
       },
     },
     resolves: {
-      toBe: async (expected) => {
-        if (!isThenable(actual)) {
-          throw new Error('the Hermes harness only supports resolves on a promise');
-        }
-        let value;
-        try {
-          value = await actual;
-        } catch (error) {
-          throw new Error(`expected the promise to resolve, it rejected with ${String(error)}`);
-        }
-        check(Object.is(value, expected), `expected the promise to resolve to ${show(expected)}, got ${show(value)}`);
+      toBe: (expected) => {
+        const assertion = (async () => {
+          if (!isThenable(actual)) {
+            throw new Error('the Hermes harness only supports resolves on a promise');
+          }
+          let value;
+          try {
+            value = await actual;
+          } catch (error) {
+            throw new Error(`expected the promise to resolve, it rejected with ${String(error)}`);
+          }
+          check(Object.is(value, expected), `expected the promise to resolve to ${show(expected)}, got ${show(value)}`);
+        })();
+        // The runner waits for it even when the test does not: its failure is the test's, not an unhandled rejection.
+        asyncAssertions.push(assertion);
+        assertion.catch(() => {});
+
+        return assertion;
       },
     },
   };
 };
 
+/**
+ * The next timer handle. As in @sinonjs/fake-timers, handles are never used twice, not even by two clocks: a handle
+ * kept from before `vi.useRealTimers()` must not clear a timer set after the next `vi.useFakeTimers()`.
+ */
+let nextTimerId = 1;
+
 /** A fake clock for `setTimeout` and `clearTimeout`, run as @sinonjs/fake-timers does for Vitest. */
 const createClock = () => {
   let now = 0;
-  let nextId = 1;
   let advancing = false;
   let busy = false;
   const timers = new Map();
@@ -258,7 +276,7 @@ const createClock = () => {
     if (rest.length > 0 || !Number.isInteger(delay) || delay < 0 || delay > 2 ** 31 - 1) {
       throw new Error('the Hermes harness only fakes setTimeout(callback, ms), ms a whole number from 0 to 2^31 - 1');
     }
-    const id = nextId++;
+    const id = nextTimerId++;
     // As fake-timers: a timer of 0 ms set while advancing is due 1 ms later, so that it cannot run forever.
     timers.set(id, { id, at: now + (delay === 0 && advancing ? 1 : delay), callback });
 
@@ -503,7 +521,9 @@ const createHarness = (log) => {
           for (const body of beforeEach) {
             callHook(body, 'beforeEach');
           }
+          asyncAssertions.length = 0;
           await settle(test.body());
+          await settle(Promise.all(asyncAssertions));
         } catch (error) {
           errors.push(error);
         }

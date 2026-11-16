@@ -64,7 +64,8 @@ Tests may be asynchronous. The fake timers follow Vitest's (@sinonjs/fake-timers
 for a task of the host, so that every pending microtask runs, before the first timer and after each one. The Hermes CLI
 has such tasks: its `setTimeout` ignores the delay and runs its tasks in order, each after all microtasks. A test that
 never settles, or that leaves a rejected promise unhandled (Node's `unhandledRejection`, Hermes' rejection tracker),
-fails, as it fails Vitest's run.
+fails, as it fails Vitest's run. So does a test whose `resolves` assertion fails or never settles, awaited or not: the
+runner waits for every asynchronous assertion, as Vitest does. Timer handles are never used twice, as in Vitest.
 
 Limits, each failing loudly rather than passing: hooks are synchronous and inside a `describe`, `describe` is
 synchronous, a test may only wait for promises and the fake timers (not real ones), only `setTimeout(callback, ms)` and
