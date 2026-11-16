@@ -59,6 +59,8 @@ export interface Entry {
   autosave: Autosave;
   session: ReconcileSession;
   title: TitleSaver;
+  /** The document as last opened or read: shown when the app holds a text but cannot read the document. */
+  document: Document;
   /** How many screens show it. */
   users: number;
   /** A screen opened it and does not hold it yet: it is not dropped meanwhile. */
@@ -88,6 +90,13 @@ export interface Drafts {
 }
 
 const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
+
+/**
+ * The document a screen shows: the one read from the server, else the one the app still holds a text for (deleted
+ * elsewhere, in conflict, unsaved), so that the text can always be read and copied. Undefined: neither.
+ */
+export const shownDocument = (drafts: Drafts, id: string, read: Document | undefined): Document | undefined =>
+  read ?? drafts.get(id)?.document;
 
 export const createDrafts = (options: DraftsOptions): Drafts => {
   const { report, onDraft, onDocument, debounceMs } = options;
@@ -137,7 +146,7 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
       debounceMs,
       rename: async (value) => onDocument(await api.renameDocument(id, value), 'title'),
     });
-    return { autosave, session, title, users: 0, opening: false };
+    return { autosave, session, title, document, users: 0, opening: false };
   };
 
   const entryOf = (id: string): Entry => {
@@ -184,6 +193,7 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
   const read = (document: Document) => {
     const entry = entries.get(document.id);
     if (entry === undefined) return;
+    entry.document = document;
     if (document.draft !== undefined) entry.autosave.refresh(draftOf(document));
     entry.title.refresh(document.title);
   };

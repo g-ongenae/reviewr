@@ -1,7 +1,7 @@
 import type { Document } from '@reviewr/shared';
 import { NetworkError } from '@reviewr/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDrafts } from './drafts';
+import { createDrafts, shownDocument } from './drafts';
 import { FakeApi } from './fakeApi';
 
 const debounceMs = 1000;
@@ -221,6 +221,30 @@ describe('createDrafts', () => {
       expect(server.log).toEqual([]);
       expect(drafts.get('doc')).toBe(entry);
       expect(drafts.canRestore('doc')).toBe(false);
+    });
+
+    it('shows the text of a document deleted elsewhere when the document cannot be read any more', async () => {
+      const { server, drafts, entry, leave } = setup();
+      server.gone = true;
+      entry.autosave.edit('only here');
+      await wait(debounceMs);
+      leave();
+      await wait();
+      // The query was collected, and reading the document again fails: the app still shows the text it holds.
+      const shown = shownDocument(drafts, 'doc', undefined);
+      expect(shown?.id).toBe('doc');
+      expect(drafts.open(shown!).autosave.getSnapshot()).toMatchObject({
+        status: 'rejected',
+        permanent: true,
+        content: 'only here',
+      });
+    });
+
+    it('shows nothing for a document the app holds no text for', async () => {
+      const { drafts, leave } = setup();
+      leave();
+      await wait();
+      expect(shownDocument(drafts, 'doc', undefined)).toBeUndefined();
     });
 
     it('keeps a refused text on screen, and saves it once changed', async () => {

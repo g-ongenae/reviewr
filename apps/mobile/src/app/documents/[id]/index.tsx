@@ -8,7 +8,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
-import { textMoved } from '@/lib/drafts';
+import { shownDocument, textMoved } from '@/lib/drafts';
 import { countWords } from '@/lib/format';
 import type { TitleState } from '@/lib/title';
 import { useTheme } from '@/lib/theme';
@@ -19,9 +19,10 @@ export default function DocumentScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => fetchDocument(queryClient, id) });
 
-  // A read that fails once the document is shown (deleted elsewhere, server down) keeps the text on screen.
-  if (document.data !== undefined) {
-    return <Editor document={document.data} />;
+  // A read that fails (deleted elsewhere, server down) keeps showing a text the app holds for the document.
+  const shown = shownDocument(draftsOf(queryClient), id, document.data);
+  if (shown !== undefined) {
+    return <Editor document={shown} />;
   }
   if (document.isPending) {
     return <ActivityIndicator style={styles.message} color={theme.accent} />;
