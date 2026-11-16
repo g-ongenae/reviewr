@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@reviewr/autosave": "workspace:*",
     "@reviewr/merge": "workspace:*",
     "@reviewr/shared": "workspace:*",
     "@tanstack/react-query": "^5.105.0",
