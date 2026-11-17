@@ -1,6 +1,6 @@
 import { resolveMerge, type MergeResult } from '@reviewr/merge';
 import { describe, expect, it } from 'vitest';
-import { base, closing, merged, middle, mine, opening, theirs } from './fixtures';
+import { base, closing, merged, middle, mine, opening, theirs } from './fixtures.js';
 import {
   createReconciliation,
   dismissOrphan,
@@ -12,7 +12,7 @@ import {
   resolvedText,
   toParagraphs,
   type Reconciliation,
-} from './reconcile';
+} from './reconcile.js';
 
 const resolveAll = (state: Reconciliation, ...choices: Parameters<typeof resolveConflict>[2][]): Reconciliation =>
   choices.reduce((next, choice, index) => resolveConflict(next, index, choice), state);

@@ -14,6 +14,7 @@
   "dependencies": {
     "@reviewr/autosave": "workspace:*",
     "@reviewr/merge": "workspace:*",
+    "@reviewr/reconcile": "workspace:*",
     "@reviewr/shared": "workspace:*",
     "@tanstack/react-query": "^5.105.0",
     "react": "^19.3.1",
