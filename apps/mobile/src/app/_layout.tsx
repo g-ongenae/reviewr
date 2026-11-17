@@ -1,14 +1,23 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { AppState } from 'react-native';
 import { ServerStatus } from '@/components/ServerStatus';
+import { draftsOf } from '@/lib/appDrafts';
+import { onAppStateChange } from '@/lib/appState';
 import { createQueryClient } from '@/lib/queryClient';
 import { useTheme } from '@/lib/theme';
 
 export default function RootLayout() {
   const theme = useTheme();
   const [queryClient] = useState(createQueryClient);
+
+  // Coming back reads the documents shown again; going to the background saves every open document.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', onAppStateChange(draftsOf(queryClient)));
+    return () => subscription.remove();
+  }, [queryClient]);
 
   return (
     <QueryClientProvider client={queryClient}>

@@ -54,7 +54,7 @@ Small changes on the existing schema, not the commit model:
   - a document without a revision yet (done): the base is `null` or 0, the first version is revision 1, and an empty draft is a no-op; later: decide whether a title changed alone can be saved as a version, since a draft identical to the head is a no-op.
 - `PATCH /documents/:id` (title) and `PATCH /documents/:id/revisions/:n` (version name). Add `PATCH` to CORS.
   - the two endpoints, `ReviewrClient.renameDocument` and `nameRevision`, and `PATCH` in CORS (done); a rename creates no revision, the last one wins, and the next version saved from the draft takes the new title; the web history panel shows the version names and lets the writer name, rename and clear them (done);
-  - the web editor renames through `PATCH`, soon after the writer stops typing and when the title field loses focus (done); later: the mobile app. The old `PUT /documents/:id` always carries a title and applies it, so it puts an old title back when an app loaded the document before a rename: the web app no longer calls it, and the limit stays for builds already installed.
+  - the web editor renames through `PATCH`, soon after the writer stops typing and when the title field loses focus (done), and so does the mobile editor (done). The old `PUT /documents/:id` always carries a title and applies it, so it puts an old title back when an app loaded the document before a rename: the web and mobile apps no longer call it, and the limit stays for builds already installed.
 - `POST /documents` accepts an empty draft and creates no revision: a document can exist with only a draft.
   - `draftOnly` creates the document at revision 0 with its text in the draft, and every endpoint handles such a document (done); `POST /documents { title, content }` still creates revision 1 for the builds already installed, and their old `PUT` keeps a draft they never saw as revision 1 before answering 409;
   - a creation can be sent again safely (done): the client chooses the document's id; the same creation answers the document as it is now, a different body is refused (422), and an id whose document was deleted is not created again (410);
@@ -96,7 +96,15 @@ Web client — an autosave state machine, not just a debounce:
 - flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short: the local buffer then brings the text back at the next start on this device);
 - tests with delayed responses, failed requests, typing during creation, and offline edits reconciled against a moved server draft.
 
-Mobile: switch to the draft and revision endpoints; restore goes into the editor as on the web. Same offline outbox (SQLite) and the same merge package; the phone is where offline writing happens most.
+Mobile — the same behaviour as the web, on the same packages; the phone is where offline writing happens most:
+
+- the editor on the draft and revision endpoints (done): it opens on the draft and autosaves it through `@reviewr/autosave`, "Save version" saves the draft as a version, the title goes through `PATCH`, and a deleted document or a refused text stays on screen; the app no longer calls the old `PUT /documents/:id`. The logic is tested with Vitest and the bundle is built by Metro; not run on a phone or an emulator yet;
+- a draft conflict (done, minimal): "Keep mine" keeps the other device's text as a named version through `@reviewr/reconcile`, then saves the local text; the other device's text and the texts a stopped "Keep mine" holds are shown under the notice, to copy or discard; later: the merge screen, on the same merge package;
+- restore goes into the editor (done), and the text it replaces is first kept as a version named "Before restore" when it is in no version; later: the same on the web, whose restore still replaces a text that may be in no version;
+- a read answered late never puts an older draft, revision or title back as if it were saved (done);
+- later: naming a version and the version names in the history; creating a document as a draft-only document;
+- later: a local buffer and the offline outbox (SQLite); until then a text typed while the server is unreachable is retried from memory only, and is lost if the app is killed;
+- later: share with the web what each app now has of its own (reading a failed save, the "Save version" loop, the rule against late reads).
 
 Done: e2e tests for draft conflicts, version creation and the migration on a populated old database; merge fixtures (French prose, overlapping and adjacent edits, deletions on one side); a day written offline on the phone reconciles with edits made on the web.
 

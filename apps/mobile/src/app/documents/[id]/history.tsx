@@ -1,9 +1,11 @@
 import { displayTitle } from '@reviewr/shared';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
+import { draftsOf, fetchDocument } from '@/lib/appDrafts';
+import { textMoved } from '@/lib/drafts';
 import { formatDate } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
 
@@ -15,7 +17,7 @@ export default function HistoryScreen() {
 
   const revisions = useQuery({ queryKey: queryKeys.revisions(id), queryFn: () => api.listRevisions(id) });
   // Already cached by the document screen; an untitled revision is named after the document's creation day.
-  const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => api.getDocument(id) });
+  const document = useQuery({ queryKey: queryKeys.document(id), queryFn: () => fetchDocument(queryClient, id) });
   const preview = useQuery({
     queryKey: queryKeys.revision(id, selected ?? 0),
     queryFn: () => api.getRevision(id, selected ?? 0),
@@ -24,31 +26,39 @@ export default function HistoryScreen() {
   });
   const currentRevision = revisions.data?.[0]?.revision;
 
-  // Restoring saves the old version as a new revision, so the history is never rewritten.
-  const restore = useMutation({
-    mutationFn: async () => {
-      if (preview.data === undefined || currentRevision === undefined) {
-        throw new Error('Nothing to restore');
-      }
-      return api.updateDocument(id, {
-        title: preview.data.title,
-        content: preview.data.content,
-        baseRevision: currentRevision,
-      });
-    },
-    onSuccess: async (saved) => {
-      queryClient.setQueryData(queryKeys.document(id), saved);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.revisions(id) }),
-      ]);
-      router.back();
-    },
-    onError: (error) => {
-      const message = inlineError(error);
-      if (message !== undefined) Alert.alert('Could not restore', message);
-    },
-  });
+  // Restoring puts the old version in the editor as an edit: the autosave sends it as the draft. The text it replaces
+  // is kept as a version first, unless it is the head's. Never while a conflict or a deletion holds the text.
+  const [restoring, setRestoring] = useState(false);
+  const restore = async () => {
+    if (preview.data === undefined || document.data === undefined) return;
+    const drafts = draftsOf(queryClient);
+    // Opened without an editor (a link): the restore goes to an entry opened here, then to its editor.
+    const editorShown = (drafts.get(id)?.users ?? 0) > 0;
+    drafts.open(document.data);
+    setRestoring(true);
+    const outcome = await drafts.restore(id, preview.data, document.data);
+    setRestoring(false);
+    if (outcome.kind === 'restored') {
+      if (editorShown) router.back();
+      else router.replace({ pathname: '/documents/[id]', params: { id } });
+    } else if (outcome.kind === 'refused') {
+      Alert.alert(
+        'Not restored',
+        'This document was changed on another device, or deleted: your text in the editor is kept as it is. Resolve that first.',
+      );
+    } else if (outcome.error === textMoved) {
+      Alert.alert(
+        'Not restored',
+        'The text in the editor changed during the restore, so nothing was restored. Your text is kept as it is.',
+      );
+    } else {
+      const detail = inlineError(outcome.error) ?? 'the server is unreachable';
+      Alert.alert(
+        'Not restored',
+        `Your current text could not be kept as a version first (${detail}), so nothing was restored. Your text is still in the editor.`,
+      );
+    }
+  };
 
   if (revisions.isPending) {
     return <ActivityIndicator style={styles.message} color={theme.accent} />;
@@ -96,10 +106,10 @@ export default function HistoryScreen() {
                     {item.revision !== currentRevision && (
                       <Pressable
                         style={[styles.restoreButton, { backgroundColor: theme.accent }]}
-                        disabled={restore.isPending}
-                        onPress={() => restore.mutate()}
+                        disabled={restoring}
+                        onPress={() => void restore()}
                       >
-                        <Text style={styles.restoreLabel}>Restore this version</Text>
+                        <Text style={styles.restoreLabel}>{restoring ? 'Restoring…' : 'Restore into editor'}</Text>
                       </Pressable>
                     )}
                   </>
