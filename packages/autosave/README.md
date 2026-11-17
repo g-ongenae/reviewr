@@ -40,6 +40,12 @@ autosave.dispose(); // cancels timers, ignores the answer in flight, settles pen
 The package declares no DOM or Node types (`lib: ES2023`): the only host functions it uses are `setTimeout` and
 `clearTimeout`, declared for its own compilation in `src/timers.d.ts`.
 
+## Tests on Hermes
+
+The phone runs the machine on Hermes. `pnpm --filter @reviewr/autosave test:hermes` runs the **same cases** as Vitest on
+the Hermes VM React Native ships, from source and from bytecode, after a run on Node; the CI's `hermes` job does it on
+every push. The tooling, its harness and its limits are described in [the merge package](../merge/README.md#tests-on-hermes).
+
 ## Developing
 
 The apps use the built package (`dist`), not its sources. `pnpm install` and `pnpm build` build it; `pnpm dev:web` only

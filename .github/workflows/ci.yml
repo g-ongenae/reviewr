@@ -41,7 +41,7 @@ jobs:
           REQUIRE_TEST_DATABASE: '1'
 
   hermes:
-    # The merge package's specs on the Hermes VM that React Native 0.88 ships (see packages/merge/README.md).
+    # The merge and autosave packages' specs on the Hermes VM that React Native 0.88 ships (see packages/merge/README.md).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - run: pnpm install --frozen-lockfile --filter @reviewr/merge
+      - run: pnpm install --frozen-lockfile --filter @reviewr/merge --filter @reviewr/autosave
       # The VM links the system ICU: a new Ubuntu release (ImageOS, e.g. ubuntu24) gets a new build.
       - id: image
         run: echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
@@ -65,3 +65,4 @@ jobs:
       - run: packages/merge/hermes/get-hermes.sh
       # Fails if a case fails on Hermes, or if the binaries are missing.
       - run: pnpm --filter @reviewr/merge test:hermes
+      - run: pnpm --filter @reviewr/autosave test:hermes
