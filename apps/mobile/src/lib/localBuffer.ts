@@ -13,10 +13,14 @@
  *
  * - Keep its latest text, and any confirmation not yet applied to the buffer, in memory whatever the buffer answers,
  *   and show when the text is not kept on the device yet (`stalled`) or not at all (other failures).
- * - After a failure or a stall, put the text again and re-run the conditional delete once the buffer answers. A
- *   statement that timed out has an unknown outcome until the next successful write for that key.
+ * - After a failure or a stall, once the buffer answers, put the **latest** text that still needs to be kept: never
+ *   an older snapshot whose put was dropped. A statement that timed out has an unknown outcome until the next
+ *   successful write or read for that key.
+ * - Delete a row on a confirmation only for the snapshot the server is known to hold now (its text, and what the text
+ *   cannot show: a creation still pending). A confirmation that waited through a stall is checked against the latest
+ *   text and the server's state before it is applied, never replayed as it was.
  * - A conditional delete that answers `ok` with nothing deleted means the row holds another text (or none): reconcile
- *   it with what the server holds, never ignore it.
+ *   it with the latest text and with what the server holds, never ignore it.
  * - On start, compare each restored row with the server's current draft and with the row's base before anything is
  *   autosaved. A row that diverges goes through the usual conflict, never straight over the server's draft: the row
  *   alone cannot tell a stale snapshot from unsaved edits.
@@ -379,12 +383,15 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
         await upgrade(db, schema);
       } catch (error) {
         // The call answers the upgrade's failure now; the handle's close is tracked apart.
-        cleanup = db.close().then(
-          () => undefined,
-          (closeError: unknown) => {
-            cleanupFailed = { error: closeError };
-          },
-        );
+        // Inside a continuation: a `close` that throws at once is a failed cleanup too, never a skipped one.
+        cleanup = Promise.resolve()
+          .then(() => db.close())
+          .then(
+            () => undefined,
+            (closeError: unknown) => {
+              cleanupFailed = { error: closeError };
+            },
+          );
         throw error;
       }
       return db;
