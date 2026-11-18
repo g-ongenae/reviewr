@@ -343,7 +343,6 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
 
   /** A delete is waiting for its answer: this editor writes nothing meanwhile. */
   const frozen = remove.isPending;
-  /** Asks, then deletes what the screen shows now: its head, its text, and whether another write of this editor runs. */
   /** Why the last delete was not asked: the screen was not in a state to delete from. */
   const [deleteRefused, setDeleteRefused] = useState<string | undefined>(undefined);
   /** Takes the pair this render shows, then asks: whatever arrives while the dialog is open, the delete carries it. */
