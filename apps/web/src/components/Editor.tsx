@@ -5,6 +5,7 @@ import {
   contentMaxLength,
   describeError,
   displayTitle,
+  isServerUnreachable,
   revisionNameMaxLength,
   titleMaxLength,
   titleToSend,
@@ -81,8 +82,22 @@ interface VersionRequest {
 /** The text was changed before it was confirmed: the version would hold another text than the one asked for. */
 const textMoved = new Error('The text changed while the version was being saved');
 
-/** Why "Save version" created no version, when the draft itself was saved. */
+/** "Save version" could not save the draft first: the server is unreachable, or the draft's save is being retried. */
+class DraftNotSaved extends Error {
+  constructor(readonly reason: unknown) {
+    super('The draft could not be saved before the version');
+  }
+}
+
+/** Why "Save version" created no version. */
 const versionError = (error: unknown): string => {
+  if (error instanceof DraftNotSaved) {
+    if (isServerUnreachable(error.reason)) {
+      return 'Version not saved: the server is unreachable. Your text is kept; save the version again once it is back.';
+    }
+    const detail = inlineError(error.reason);
+    return `Version not saved: your text could not be saved first${detail ? ` (${detail})` : ''}. It is kept and saved again on its own; save the version again once it is saved.`;
+  }
   if (error === textMoved || conflictOf(error)?.code === 'draft_conflict') {
     return 'The version was not saved: the text changed while it was being saved. Your text is saved as a draft: save the version again to keep it.';
   }
@@ -183,7 +198,13 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
    */
   const save = useMutation({
     mutationFn: async ({ name, text }: VersionRequest): Promise<Document | undefined> => {
-      if ((await autosave.flush()) !== 'saved') return undefined;
+      const flushed = await autosave.flush();
+      // Nothing is queued: the writer is told, and saves the version again. A conflict or a refused text has its own status.
+      if (flushed === 'failed') {
+        const state = autosave.getSnapshot();
+        throw new DraftNotSaved(state.status === 'retrying' ? state.error : undefined);
+      }
+      if (flushed !== 'saved') return undefined;
       // The flush may end on a later text, typed after the click and sent along with it: that one is not the version.
       const { draftVersion, content: confirmed } = autosave.getSnapshot().base;
       if (confirmed !== text) throw textMoved;
@@ -245,11 +266,12 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   /** Saves the text on screen now as a version; the writer goes back to the text. */
   const saveVersion = (name?: string) => {
     const trimmed = name?.trim().slice(0, revisionNameMaxLength);
-    save.mutate({ name: trimmed === '' ? undefined : trimmed, text: content });
-    if (versionName !== undefined) {
-      setVersionName(undefined);
-      textField.current?.focus();
-    }
+    // The name field stays open until the version is saved: a version not saved keeps the name typed for the next try.
+    save.mutate(
+      { name: trimmed === '' ? undefined : trimmed, text: content },
+      { onSuccess: (saved) => saved !== undefined && setVersionName(undefined) },
+    );
+    if (versionName !== undefined) textField.current?.focus();
   };
 
   /** The blank page, nothing typed yet: it welcomes the writer. */
