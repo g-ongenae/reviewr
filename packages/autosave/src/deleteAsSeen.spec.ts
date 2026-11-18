@@ -74,16 +74,16 @@ const send = async (capture: DeleteCapture): Promise<unknown> =>
     (error: unknown) => error,
   );
 
-beforeEach(() => {
-  server = fakeServer();
-  autosave = createAutosave({ base: { ...server.draft }, save: server.save, debounceMs: 1000 });
-});
-
-afterEach(() => {
-  autosave.dispose();
-});
-
 describe('deleting as the screen saw it', () => {
+  beforeEach(() => {
+    server = fakeServer();
+    autosave = createAutosave({ base: { ...server.draft }, save: server.save, debounceMs: 1000 });
+  });
+
+  afterEach(() => {
+    autosave.dispose();
+  });
+
   it('carries the head shown and the confirmed draft, without saving anything', async () => {
     expect(await send(captureDelete(autosave, 2, false))).toBeUndefined();
     expect(server.log).toEqual(['delete 2 3']);
@@ -95,7 +95,7 @@ describe('deleting as the screen saw it', () => {
     server.draft = { content: 'morning, two more pages', draftVersion: 4 };
     autosave.refresh(server.draft);
 
-    expect(await send(capture)).toEqual(new Error('document_changed'));
+    expect(((await send(capture)) as Error).message).toBe('document_changed');
     expect(server.deleted).toBe(false);
   });
 
@@ -131,7 +131,7 @@ describe('deleting as the screen saw it', () => {
     autosave.refresh(server.draft);
     server.release();
 
-    expect(await deleting).toEqual(new Error('document_changed'));
+    expect(((await deleting) as Error).message).toBe('document_changed');
     expect(server.log).toEqual(['save evening', 'delete 2 4']);
     expect(server.deleted).toBe(false);
   });
@@ -148,8 +148,7 @@ describe('deleting as the screen saw it', () => {
     server.log = [];
 
     const error = await send(captureDelete(autosave, 2, busy));
-    expect(error).toBeInstanceOf(DeleteRefused);
-    expect((error as DeleteRefused).reason).toBe(reason);
+    expect(error instanceof DeleteRefused && error.reason).toBe(reason);
     expect(server.log).toEqual([]);
   });
 
