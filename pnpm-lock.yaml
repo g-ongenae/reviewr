@@ -248,6 +248,9 @@ importers:
       '@reviewr/autosave':
         specifier: workspace:*
         version: link:../../packages/autosave
+      '@reviewr/merge':
+        specifier: workspace:*
+        version: link:../../packages/merge
       '@reviewr/reconcile':
         specifier: workspace:*
         version: link:../../packages/reconcile
