@@ -215,6 +215,8 @@ const Editor = ({ document }: { document: Document }) => {
           {notice.keepMine === true && (
             <Pressable
               style={[styles.noticeButton, { backgroundColor: theme.accent }]}
+              // Off while a delete is pending, as the text: a conflict a read brings then waits for the answer.
+              disabled={frozen}
               onPress={() => void drafts.keepMine(document.id)}
             >
               <Text style={styles.noticeButtonLabel}>Keep mine</Text>
