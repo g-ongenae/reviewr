@@ -26,6 +26,7 @@ import {
 } from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
+import { cacheKeptVersion, restore, useRestore } from '../restore';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
@@ -117,7 +118,10 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   const [titleEdit, setTitleEdit] = useState(isNew && pendingTitle !== undefined ? 1 : 0);
   const [titleSaved, setTitleSaved] = useState(0);
   const titleDirty = titleSaved < titleEdit;
+  /** Every edit of the title field, counted for a restore, which never replaces a title typed while it runs. */
+  const titleEdits = useRef(0);
   const editTitle = (value: string) => {
+    titleEdits.current++;
     setTitle(value);
     setTitleEdit((edit) => edit + 1);
     if (isNew) keepTitle(value);
@@ -130,6 +134,8 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   }
   const { content } = state;
   const [showHistory, setShowHistory] = useState(false);
+  /** The restore from the history, one at a time: it outlives the panel, not the editor. */
+  const restores = useRestore();
   const [showStats, toggleStats] = useWritingStatsPanel();
   const todayBaseline = useTodayBaseline(document);
   const previousRevision = useLastRevisionBaseline(document);
@@ -627,10 +633,27 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
         <RevisionHistory
           document={document}
           restoreDisabled={busy}
-          onRestore={(revision) => {
-            editTitle(revision.title ?? '');
-            autosave.edit(revision.content);
-          }}
+          restoring={restores.restoring}
+          notRestored={restores.notRestored}
+          // The text on screen is first kept as a version when it is in no version: see `restore`.
+          onRestore={(revision) =>
+            restores.start(revision.revision, (active) =>
+              restore({
+                autosave,
+                head: document,
+                busy: () => session.getSnapshot().running,
+                gone: () => isGone(queryClient, document.id),
+                createRevision: (input) => api.createRevision(document.id, input),
+                titleEdits: () => titleEdits.current,
+                active,
+                onKept: (saved) => cacheKeptVersion(queryClient, autosave, saved),
+                apply: () => {
+                  editTitle(revision.title ?? '');
+                  autosave.edit(revision.content);
+                },
+              }),
+            )
+          }
         />
       )}
     </div>
