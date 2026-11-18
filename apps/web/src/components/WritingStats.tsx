@@ -1,15 +1,10 @@
 import type { ReactNode } from 'react';
 import { useDeferredValue, useMemo } from 'react';
-import { countWords } from '../format';
+import { countCharacterChanges, countCharacters, countWords, formatChange, formatCount } from '@reviewr/merge';
+import type { Baseline } from '@reviewr/shared';
 import { useStoredBoolean } from '../useStoredBoolean';
-import type { Baseline } from '../useTodayBaseline';
-import { countCharacterChanges, countCharacters } from '../writingStats';
 
 const panelId = 'writing-stats';
-const numberFormat = new Intl.NumberFormat('en');
-const signedFormat = new Intl.NumberFormat('en', { signDisplay: 'exceptZero' });
-/** Typographic minus, so negative numbers line up with positive ones. */
-const signed = (value: number) => signedFormat.format(value).replace('-', '−');
 
 /** Whether the writing stats panel is shown. Remembered across reloads and shared by every document. */
 export const useWritingStatsPanel = () => useStoredBoolean('reviewr.writingStatsOpen', true);
@@ -123,8 +118,8 @@ export const WritingStatsPanel = ({ content, baseline, lastRevision }: PanelProp
 
   const characterChanges = (changes: Changes | undefined) => (
     <>
-      <span className="added">+{numberFormat.format(changes?.added ?? 0)}</span>
-      <span className="deleted">−{numberFormat.format(changes?.deleted ?? 0)}</span>
+      <span className="added">+{formatCount(changes?.added ?? 0)}</span>
+      <span className="deleted">−{formatCount(changes?.deleted ?? 0)}</span>
     </>
   );
 
@@ -134,12 +129,12 @@ export const WritingStatsPanel = ({ content, baseline, lastRevision }: PanelProp
         <h2>Words</h2>
         <dl>
           <dt>Total</dt>
-          <dd>{numberFormat.format(words)}</dd>
+          <dd>{formatCount(words)}</dd>
           {row(
             'Today',
             baseline,
             pendingTitle.today,
-            signed(today?.words ?? 0),
+            formatChange(today?.words ?? 0),
             'Net change since the start of the day: negative when words were removed.',
           )}
           {lastRevision &&
@@ -147,7 +142,7 @@ export const WritingStatsPanel = ({ content, baseline, lastRevision }: PanelProp
               'Last revision',
               lastRevision.previous,
               pendingTitle.lastRevision,
-              signed(last?.words ?? 0),
+              formatChange(last?.words ?? 0),
               'Net change made by the last save: negative when words were removed.',
             )}
         </dl>
@@ -156,7 +151,7 @@ export const WritingStatsPanel = ({ content, baseline, lastRevision }: PanelProp
         <h2>Characters</h2>
         <dl>
           <dt>Total</dt>
-          <dd title="Including spaces and line breaks">{numberFormat.format(characters)}</dd>
+          <dd title="Including spaces and line breaks">{formatCount(characters)}</dd>
           {row(
             'Today',
             baseline,

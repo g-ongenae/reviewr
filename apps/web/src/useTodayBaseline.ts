@@ -1,68 +1,56 @@
-import type { Document } from '@reviewr/shared';
+import type { Baseline, Document } from '@reviewr/shared';
+import {
+  lastRevisionBaseline,
+  lastRevisionBefore,
+  previousRevisionOf,
+  startOfDay,
+  startOfNextDay,
+  todayBaseline,
+  todayNeedsHistory,
+} from '@reviewr/shared';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, queryKeys } from './api';
 
-const startOfToday = (): number => new Date().setHours(0, 0, 0, 0);
-
 /** Local midnight that started today, in ms; moves on by itself when the next day begins. */
 export const useStartOfToday = (): number => {
-  const [start, setStart] = useState(startOfToday);
+  const [start, setStart] = useState(() => startOfDay(Date.now()));
   useEffect(() => {
-    const nextMidnight = new Date(start).setDate(new Date(start).getDate() + 1);
-    const timer = window.setTimeout(() => setStart(startOfToday()), Math.max(nextMidnight - Date.now(), 0) + 1000);
+    const delay = Math.max(startOfNextDay(start) - Date.now(), 0) + 1000;
+    const timer = window.setTimeout(() => setStart(startOfDay(Date.now())), delay);
     return () => window.clearTimeout(timer);
   }, [start]);
   return start;
 };
 
-/** A past version of the text, which may still be loading or out of reach while the server is. */
-export type Baseline = { status: 'ready'; content: string } | { status: 'loading' } | { status: 'unavailable' };
-
-/**
- * The document's content as it was when today began: the last revision saved before midnight, or nothing for a
- * document created today. What is written today is measured against it, so it adds up across devices and reloads.
- */
+/** The document's content as it was when today began (see `todayBaseline`). */
 export const useTodayBaseline = (document: Document): Baseline => {
   const today = useStartOfToday();
-  const createdToday = Date.parse(document.createdAt) >= today;
-  const untouchedToday = Date.parse(document.updatedAt) < today;
-  const needsHistory = !createdToday && !untouchedToday;
+  const needsHistory = todayNeedsHistory(document, today);
 
   const revisions = useQuery({
     queryKey: queryKeys.revisions(document.id),
     queryFn: () => api.listRevisions(document.id),
     enabled: needsHistory,
   });
-  const lastBeforeToday = revisions.data
-    ?.filter((revision) => Date.parse(revision.createdAt) < today)
-    .reduce<number | undefined>((latest, { revision }) => Math.max(latest ?? revision, revision), undefined);
+  const lastBeforeToday = lastRevisionBefore(revisions.data, today);
   const baseline = useQuery({
     queryKey: queryKeys.revision(document.id, lastBeforeToday ?? 0),
     queryFn: () => api.getRevision(document.id, lastBeforeToday ?? 0),
     enabled: needsHistory && lastBeforeToday !== undefined,
     staleTime: Infinity, // Revisions are immutable.
   });
-
-  if (createdToday) return { status: 'ready', content: '' };
-  if (untouchedToday) return { status: 'ready', content: document.content };
-  if (revisions.data === undefined) return revisions.isError ? { status: 'unavailable' } : { status: 'loading' };
-  if (lastBeforeToday === undefined) return { status: 'ready', content: '' };
-  if (baseline.data === undefined) return baseline.isError ? { status: 'unavailable' } : { status: 'loading' };
-  return { status: 'ready', content: baseline.data.content };
+  return todayBaseline(document, today, revisions, baseline);
 };
 
 /** The content of the revision before the saved one: what the last save changed. Nothing before the first revision. */
 export const useLastRevisionBaseline = (document: Document): Baseline => {
-  const previous = document.revision - 1;
+  const previous = previousRevisionOf(document);
   const query = useQuery({
     queryKey: queryKeys.revision(document.id, previous),
     queryFn: () => api.getRevision(document.id, previous),
     enabled: previous > 0,
     staleTime: Infinity, // Revisions are immutable.
   });
-
-  if (previous <= 0) return { status: 'ready', content: '' };
-  if (query.data === undefined) return query.isError ? { status: 'unavailable' } : { status: 'loading' };
-  return { status: 'ready', content: query.data.content };
+  return lastRevisionBaseline(document, query);
 };

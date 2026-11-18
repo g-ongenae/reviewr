@@ -15,9 +15,18 @@ type Props = {
   text?: string;
   kind?: ToolbarButtonKind;
   disabled?: boolean;
+  /**
+   * Makes the button a toggle that shows or hides a part of the screen, drawn as the web's borderless icon button:
+   * muted, in the accent colour while the part is shown. Screen readers hear whether it is expanded.
+   */
+  expanded?: boolean;
 };
 
-const colors = (theme: Theme, kind: ToolbarButtonKind, pressed: boolean) => {
+const colors = (theme: Theme, kind: ToolbarButtonKind, pressed: boolean, expanded: boolean | undefined) => {
+  if (expanded !== undefined) {
+    const background = pressed ? theme.border : 'transparent';
+    return { background, border: background, content: expanded ? theme.accent : pressed ? theme.text : theme.muted };
+  }
   if (kind === 'primary') {
     const fill = pressed ? theme.accentDark : theme.accent;
     return { background: fill, border: fill, content: '#fff' };
@@ -31,19 +40,27 @@ const colors = (theme: Theme, kind: ToolbarButtonKind, pressed: boolean) => {
 };
 
 /** A toolbar action: at least 44×44 pt to touch, drawn as the web's smaller button inside it. */
-export const ToolbarButton = ({ label, onPress, icon: IconOf, text, kind = 'neutral', disabled = false }: Props) => {
+export const ToolbarButton = ({
+  label,
+  onPress,
+  icon: IconOf,
+  text,
+  kind = 'neutral',
+  disabled = false,
+  expanded,
+}: Props) => {
   const theme = useTheme();
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
-      accessibilityState={{ disabled }}
+      accessibilityState={{ disabled, expanded }}
       disabled={disabled}
       onPress={onPress}
       style={styles.target}
     >
       {({ pressed }) => {
-        const { background, border, content } = colors(theme, kind, pressed && !disabled);
+        const { background, border, content } = colors(theme, kind, pressed && !disabled, expanded);
         return (
           <View
             style={[
@@ -66,9 +83,7 @@ export const ToolbarButton = ({ label, onPress, icon: IconOf, text, kind = 'neut
  * The actions at the right of a screen's header, in the web's order. The gap keeps a tap that misses one button from
  * landing on its neighbour (Delete is next to Save version). Four buttons take 4 × 44 + 3 × 6 = 194 pt.
  */
-export const ToolbarActions = ({ children }: { children: ReactNode }) => (
-  <View style={styles.actions}>{children}</View>
-);
+export const ToolbarActions = ({ children }: { children: ReactNode }) => <View style={styles.actions}>{children}</View>;
 
 const styles = StyleSheet.create({
   actions: { flexDirection: 'row', alignItems: 'center', gap: 6 },

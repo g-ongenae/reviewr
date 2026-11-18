@@ -6,6 +6,8 @@ const light = {
   accentDark: '#be185d',
   background: '#ffffff',
   surface: '#f4f4f5',
+  /** A card over the background, as the web's writing stats panel. */
+  card: '#ffffff',
   border: '#e4e4e7',
   text: '#18181b',
   muted: '#71717a',
@@ -19,6 +21,7 @@ const dark: Theme = {
   ...light,
   background: '#18181b',
   surface: '#27272a',
+  card: '#202024',
   border: '#3f3f46',
   text: '#f4f4f5',
   muted: '#a1a1aa',

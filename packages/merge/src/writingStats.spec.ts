@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { countCharacterChanges, countCharacters } from './writingStats';
+import { countCharacterChanges, countCharacters, countWords, formatChange, formatCount } from './writingStats.js';
 
 describe('countCharacters', () => {
   it('counts code points, so an emoji or an accented letter is one character', () => {
@@ -58,6 +58,7 @@ describe('countCharacterChanges', () => {
     let seed = 42;
     const random = (max: number) => {
       seed = (seed * 1103515245 + 12345) % 2 ** 31;
+
       return seed % max;
     };
     const text = (length: number) => Array.from({ length }, () => words[random(words.length)]).join(' ');
@@ -78,8 +79,31 @@ describe('countCharacterChanges', () => {
     const after = paragraphs
       .map((paragraph, i) => (i % 10 === 0 ? paragraph.replace('mot', 'phrase') : paragraph))
       .join('');
-    const start = performance.now();
+    const start = Date.now();
     expect(changes(before, after)).toEqual({ added: 200 * 6, deleted: 200 * 3 });
-    expect(performance.now() - start).toBeLessThan(500);
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+});
+
+describe('countWords', () => {
+  it('counts the runs of characters between spaces and line breaks', () => {
+    expect(countWords('')).toBe(0);
+    expect(countWords('  \n ')).toBe(0);
+    expect(countWords('Once upon a tide.\n\nThe end, 🌊')).toBe(7);
+  });
+});
+
+describe('formatCount and formatChange', () => {
+  it('group the digits by three, as the web did with Intl in English', () => {
+    expect(formatCount(0)).toBe('0');
+    expect(formatCount(999)).toBe('999');
+    expect(formatCount(1000)).toBe('1,000');
+    expect(formatCount(1234567)).toBe('1,234,567');
+  });
+
+  it('sign a change with a plus or a typographic minus, and leave zero unsigned', () => {
+    expect(formatChange(0)).toBe('0');
+    expect(formatChange(35)).toBe('+35');
+    expect(formatChange(-1200)).toBe('−1,200');
   });
 });

@@ -7,13 +7,15 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { ToolbarActions, ToolbarButton } from '@/components/ToolbarButton';
-import { HistoryIcon, SaveIcon, TrashIcon } from '@/components/ToolbarIcons';
+import { HistoryIcon, SaveIcon, StatsIcon, TrashIcon } from '@/components/ToolbarIcons';
+import { WritingStatsPanel } from '@/components/WritingStats';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
 import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
-import { countWords } from '@/lib/format';
 import type { TitleState } from '@/lib/title';
 import { useTheme } from '@/lib/theme';
+import { useWritingBaselines } from '@/lib/writingBaselines';
+import { useWritingStatsPanel } from '@/lib/writingStatsPanel';
 
 export default function DocumentScreen() {
   const theme = useTheme();
@@ -110,6 +112,8 @@ const Editor = ({ document }: { document: Document }) => {
   const busy = sessionState.running;
   /** The other device's text of a conflict and the texts "Keep mine" holds: none is in the text field. */
   const hidden = heldTexts({ session, autosave });
+  const [showStats, toggleStats] = useWritingStatsPanel();
+  const baselines = useWritingBaselines(document);
 
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
@@ -176,6 +180,12 @@ const Editor = ({ document }: { document: Document }) => {
           headerRight: () => (
             <ToolbarActions>
               <ToolbarButton
+                label={showStats ? 'Hide writing stats' : 'Show writing stats'}
+                icon={StatsIcon}
+                expanded={showStats}
+                onPress={toggleStats}
+              />
+              <ToolbarButton
                 label="History"
                 icon={HistoryIcon}
                 onPress={() => router.push({ pathname: '/documents/[id]/history', params: { id: document.id } })}
@@ -200,8 +210,17 @@ const Editor = ({ document }: { document: Document }) => {
       />
       <View style={[styles.statusBar, { borderColor: theme.border }]}>
         <Text style={{ color: saved ? theme.muted : theme.accent }}>{status}</Text>
-        <Text style={{ color: theme.muted }}>{countWords(content)} words</Text>
       </View>
+      {showStats && (
+        <WritingStatsPanel
+          content={content}
+          baseline={baselines.today}
+          // No version yet: nothing to compare with.
+          lastRevision={
+            document.revision === 0 ? undefined : { content: document.content, previous: baselines.lastRevision }
+          }
+        />
+      )}
       {notice !== undefined && (
         <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: theme.warning }]}>
           <Text style={{ color: notice.error === true ? theme.danger : theme.text }}>{notice.text}</Text>
