@@ -16,9 +16,14 @@
  * - **Call order.** Every call runs in the order it was made, one after the other: the last `put` for a key wins even
  *   when calls overlap, a `delete` made before a later `put` never removes that later text, and a read sees every
  *   write made before it.
+ * - **Texts stored exactly.** Every text (key, content, base, page) is stored as JSON with every character outside
+ *   printable ASCII escaped (`encodeText`), so the native layer only ever sees printable ASCII. `expo-sqlite` on iOS
+ *   binds strings up to their first NUL and cannot carry a lone surrogate; neither can alter the stored value. Equal
+ *   texts always encode the same, and different texts differently (composed and decomposed accents stay distinct).
  * - **Conditional delete.** `delete(key, { ifContent })` removes the entry only if it still holds exactly that text,
- *   checked in the same statement. Delete with the content the server confirmed: text typed while the save was in
- *   flight stays in the buffer.
+ *   compared in the same statement on the encoded form. Delete with the content the server confirmed: text typed
+ *   while the save was in flight stays in the buffer. A condition that is given but holds no string is refused, never
+ *   read as "no condition".
  * - **All or nothing.** Each write is one SQL statement, so an entry is the old one or the new one, never part of each,
  *   even if the app is killed during the write. Commits are synced to disk (`synchronous = FULL`): a write that
  *   answered `ok` survives the app being killed and the phone losing power.
@@ -26,16 +31,23 @@
  *   result is `{ ok: false, reason }`, which the app can show as one notice ("this text is not kept on this device");
  *   reads then answer "nothing stored" (`entry: undefined`, `entries: []`). The buffer holds no text of its own, so a
  *   failure discards nothing the editor holds. A failed open is tried again on the next call, and so is a connection
- *   dropped after an error it could not recover from.
+ *   dropped after a failed statement.
+ * - **A row it cannot read is reported, never hidden.** A row whose key, text, base or page does not decode (a BLOB in
+ *   a text column, a value not written by this code) makes `get` answer `unreadable` with its key, and is listed in
+ *   `list`'s `unreadable`. The row is left as it is.
  * - **Versioned schema.** `PRAGMA user_version` is the number of schema steps applied. Opening applies the missing
  *   steps of `localBufferSchema` in one transaction, so an upgrade happens entirely or not at all and buffered text is
  *   kept across it. Later versions (the outbox) append a step. A database whose version this code does not know (newer
  *   than its schema, or invalid) is never changed: every call answers `unsupported`, and the text stays on disk for
  *   the build that wrote it.
- * - **A stalled call stops the buffer, loudly.** A call the database does not answer within `operationTimeoutMs`
- *   answers `stalled`. Whether it will still commit is then unknown, so no later write may run after it (it could
- *   commit over newer text): from then on, this buffer answers `stalled` to every call, including the ones already
- *   queued, until the app opens a new one. `close()` still resolves.
+ * - **A stalled call stops the buffer, loudly, and never writes late.** A call the database does not answer within
+ *   `operationTimeoutMs` (opening included) answers `stalled`, and so does every call after it, queued or new: whether
+ *   the stalled work will still commit is unknown, and a later write must not land before it. A call whose time ran
+ *   out before its statement started never starts it. The work itself is tracked apart from the answers: `close()`
+ *   (one shared promise, whoever calls it) waits for it to settle, then closes the connection, and answers whether it
+ *   could (`drained`). A buffer opened with `previous` (the old buffer's `close()`) waits for that before opening the
+ *   database; if the old work could not be drained, every call answers `stalled` until the app restarts, since
+ *   `expo-sqlite` cannot cancel a statement it started.
  *
  * Left out, compared with the web: the phone runs one process, so there are no locks between tabs, no per-tab copies
  * of an entry, and no step aside for an upgrade made by another tab.
@@ -77,6 +89,13 @@ export interface BufferEntry {
   updatedAt: number;
 }
 
+/** A stored row this code cannot read. It stays in the database. */
+export interface UnreadableRow {
+  /** The decoded key, or the stored key as text when the key itself does not decode. */
+  key: string;
+  error: unknown;
+}
+
 /**
  * Why a call failed:
  *
@@ -84,10 +103,12 @@ export interface BufferEntry {
  * - `quota`: the storage is full;
  * - `unsupported`: the database was written by a newer build of the app (or its version is invalid); it is left as it
  *   is;
- * - `failed`: anything else (a statement or a schema step failed…);
- * - `stalled`: a call never settled; this buffer stopped and answers `stalled` to every later call.
+ * - `unreadable`: (`get` only) the row exists but does not decode; it is left as it is;
+ * - `failed`: anything else (a statement or a schema step failed, an invalid argument…);
+ * - `stalled`: a call never settled, or the buffer before this one could not be drained; this buffer answers `stalled`
+ *   to every later call. Only a restart of the app makes the database usable again in the second case.
  */
-export type BufferFailureReason = 'unavailable' | 'quota' | 'unsupported' | 'failed' | 'stalled';
+export type BufferFailureReason = 'unavailable' | 'quota' | 'unsupported' | 'unreadable' | 'failed' | 'stalled';
 
 export interface BufferFailure {
   ok: false;
@@ -96,10 +117,22 @@ export interface BufferFailure {
 }
 
 export type GetResult = { ok: true; entry: BufferEntry | undefined } | (BufferFailure & { entry: undefined });
-export type ListResult = { ok: true; entries: BufferEntry[] } | (BufferFailure & { entries: [] });
+/** `unreadable` lists the rows that exist but do not decode; `entries` holds every other one. */
+export type ListResult =
+  { ok: true; entries: BufferEntry[]; unreadable: UnreadableRow[] } | (BufferFailure & { entries: []; unreadable: [] });
 export type PutResult = { ok: true } | BufferFailure;
 /** `deleted` is `false` when there was nothing to delete or the stored text was not `ifContent`. */
 export type DeleteResult = { ok: true; deleted: boolean } | (BufferFailure & { deleted: false });
+
+/**
+ * How `close()` ended: `drained` is `false` when the work already started did not settle within `drainTimeoutMs`, or
+ * when this buffer itself replaced one that could not be drained. The connection is then closed whenever the work
+ * settles, and no other buffer may write to the database before the app restarts (a buffer opened with this as
+ * `previous` answers `stalled`, and so does the next one).
+ */
+export interface CloseResult {
+  drained: boolean;
+}
 
 export interface DeleteCondition {
   /** Delete only if the stored content is exactly this text (the content the server confirmed). */
@@ -113,10 +146,13 @@ export interface LocalBuffer {
   put(key: string, value: { content: string; base: BufferBase | null; page?: BufferPage }): Promise<PutResult>;
   /** Removes the entry for `key`, unconditionally or only if it still holds `condition.ifContent`. */
   delete(key: string, condition?: DeleteCondition): Promise<DeleteResult>;
-  /** Every entry, the most recently written first. */
+  /** Every entry, the most recently written first, and the rows that cannot be read. */
   list(): Promise<ListResult>;
-  /** Closes the database once the pending calls are done. Calls made after it fail as `unavailable`. */
-  close(): Promise<void>;
+  /**
+   * Refuses new calls (`unavailable`), waits for the work already started, then closes the database. Every call gets
+   * the same promise.
+   */
+  close(): Promise<CloseResult>;
 }
 
 /** A value bound to a statement's `?` placeholder. */
@@ -141,7 +177,8 @@ export type Migration = (db: SqlDatabase) => Promise<void>;
 
 /** The schema: the database version is its length. Append to it, never edit a step that shipped. */
 export const localBufferSchema: readonly Migration[] = [
-  // 1: the buffered drafts, keyed by document id or client-made key. `page` is JSON, only without a base.
+  // 1: the buffered drafts. Every TEXT column holds `encodeText` of its value (`page`: the encoded JSON of the page,
+  // only without a base), so that only printable ASCII crosses the native layer.
   (db) =>
     db.exec(
       `CREATE TABLE drafts (
@@ -155,13 +192,38 @@ export const localBufferSchema: readonly Migration[] = [
     ),
 ];
 
+/** Escapes every character outside printable ASCII in JSON text (code unit by code unit, lone surrogates included). */
+const toAscii = (json: string) =>
+  json.replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+/** A text as stored: its JSON string literal, in printable ASCII. One text, one encoding. */
+export const encodeText = (text: string): string => toAscii(JSON.stringify(text));
+
+/** The text `encodeText` stored, or `undefined` when `stored` is not one. */
+export const decodeText = (stored: unknown): string | undefined => {
+  if (typeof stored !== 'string' || !stored.startsWith('"')) return undefined;
+  try {
+    const text: unknown = JSON.parse(stored);
+    return typeof text === 'string' ? text : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 export interface LocalBufferOptions {
   /** Opens the connection. Called again on the next call after it failed, or after the connection was dropped. */
   open: () => Promise<SqlDatabase>;
+  /**
+   * The `close()` of the buffer this one replaces on the same database: the database is opened only once it drained.
+   * If it could not, every call answers `stalled`.
+   */
+  previous?: Promise<CloseResult>;
   /** Defaults to `localBufferSchema`; tests pass a longer one to simulate an upgrade. */
   schema?: readonly Migration[];
   /** How long a call (opening included) may stay unsettled before the buffer stops as `stalled`. Defaults to 10 s. */
   operationTimeoutMs?: number;
+  /** How long `close()` waits for the work already started. Defaults to 10 s. */
+  drainTimeoutMs?: number;
   /** Defaults to `Date.now`. */
   now?: () => number;
 }
@@ -192,50 +254,66 @@ const failure = (error: unknown): BufferFailure => {
   return { ok: false, reason: isFull(error) ? 'quota' : 'failed', error };
 };
 
-const toPage = (value: unknown): BufferPage | undefined => {
-  if (typeof value !== 'string') return undefined;
+const invalid = (message: string) => new BufferError('failed', new TypeError(message));
+
+const decodePage = (stored: unknown): BufferPage | undefined => {
+  const json = decodeText(stored);
+  if (json === undefined) return undefined;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(value);
+    parsed = JSON.parse(json);
   } catch {
     return undefined;
   }
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   const { creation, title } = parsed as Record<string, unknown>;
   if (creation !== null && typeof creation !== 'string') return undefined;
-  return typeof title === 'string' ? { creation, title } : { creation };
+  if (title !== undefined && typeof title !== 'string') return undefined;
+  return title === undefined ? { creation } : { creation, title };
 };
 
-/**
- * Reads a stored row defensively: whatever holds text is returned, a malformed base becomes `null`, and a page is read
- * only without a base (a malformed one is left out).
- */
-const toEntry = (row: unknown): BufferEntry | undefined => {
-  if (typeof row !== 'object' || row === null) return undefined;
-  const { key, content, base_content, base_draft_version, page, updated_at } = row as Record<string, unknown>;
-  if (typeof key !== 'string' || typeof content !== 'string') return undefined;
-  const entry: BufferEntry = {
-    key,
-    content,
-    base:
-      typeof base_content === 'string' && typeof base_draft_version === 'number'
-        ? { content: base_content, draftVersion: base_draft_version }
-        : null,
-    updatedAt: typeof updated_at === 'number' ? updated_at : 0,
-  };
-  const pageOf = entry.base === null ? toPage(page) : undefined;
-  return pageOf === undefined ? entry : { ...entry, page: pageOf };
+type Decoded = { entry: BufferEntry } | { unreadable: UnreadableRow };
+
+/** Decodes a stored row. Anything that does not decode makes the whole row unreadable, never silently partial. */
+const decodeRow = (row: unknown): Decoded => {
+  const record = (typeof row === 'object' && row !== null ? row : {}) as Record<string, unknown>;
+  const { key: storedKey, content, base_content, base_draft_version, page, updated_at } = record;
+  const key = decodeText(storedKey);
+  const unreadable = (what: string): Decoded => ({
+    unreadable: {
+      key: key ?? (typeof storedKey === 'string' ? storedKey : String(storedKey)),
+      error: new Error(`The buffered ${what} cannot be read`),
+    },
+  });
+  if (key === undefined) return unreadable('key');
+  const text = decodeText(content);
+  if (text === undefined) return unreadable('text');
+  let base: BufferBase | null = null;
+  if (base_content !== null || base_draft_version !== null) {
+    const baseText = decodeText(base_content);
+    if (baseText === undefined || typeof base_draft_version !== 'number' || !Number.isInteger(base_draft_version)) {
+      return unreadable('base');
+    }
+    base = { content: baseText, draftVersion: base_draft_version };
+  }
+  const entry: BufferEntry = { key, content: text, base, updatedAt: typeof updated_at === 'number' ? updated_at : 0 };
+  // A page is only kept without a base; one stored with a base (never written so) is ignored.
+  if (base === null && page !== null && page !== undefined) {
+    const decoded = decodePage(page);
+    if (decoded === undefined) return unreadable('page');
+    entry.page = decoded;
+  }
+  return { entry };
 };
 
 const COLUMNS = 'key, content, base_content, base_draft_version, page, updated_at';
 
-/** Ends a transaction that failed. Answers `false` if it could not, which leaves the connection in an unknown state. */
-const rollback = async (db: SqlDatabase): Promise<boolean> => {
+/** Ends a transaction that failed, ignoring errors. */
+const rollback = async (db: SqlDatabase) => {
   try {
     await db.exec('ROLLBACK');
-    return true;
   } catch {
-    return false;
+    // No transaction left, or the connection is gone: nothing more to undo.
   }
 };
 
@@ -264,15 +342,59 @@ const upgrade = async (db: SqlDatabase, schema: readonly Migration[]) => {
   }
 };
 
+const settle = (promise: Promise<unknown>): Promise<void> =>
+  promise.then(
+    () => undefined,
+    () => undefined,
+  );
+
 export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
-  const { open, schema = localBufferSchema, operationTimeoutMs = 10_000, now = () => Date.now() } = options;
+  const {
+    open,
+    previous,
+    schema = localBufferSchema,
+    operationTimeoutMs = 10_000,
+    drainTimeoutMs = 10_000,
+    now = () => Date.now(),
+  } = options;
 
   let connection: Promise<SqlDatabase> | undefined;
-  let closed = false;
-  /** Set once a call did not settle: every later call answers `stalled`. */
+  let closing: Promise<CloseResult> | undefined;
+  /** The buffer before this one could not drain: this one cannot vouch for the database either. */
+  let inheritedUndrained = false;
+  /** Set once a call did not settle in time (or the previous buffer did not drain): every later call answers it. */
   let stalled: BufferError | undefined;
-  /** The end of the queue: every call runs after the previous one settled. */
-  let tail: Promise<unknown> = Promise.resolve();
+  /** Rejects once `stalled` is set, so that calls queued behind stalled work answer at once. */
+  let signalStall: (error: BufferError) => void = () => undefined;
+  const stall = new Promise<never>((_, reject) => {
+    signalStall = reject;
+  });
+  stall.catch(() => undefined);
+  const stop = (error: BufferError) => {
+    if (stalled !== undefined) return;
+    stalled = error;
+    signalStall(error);
+  };
+  /**
+   * The work itself, apart from the answers: each call's work starts once the previous one settled, even if that one
+   * was already answered `stalled`. `close()` drains it.
+   */
+  let work: Promise<void> =
+    previous === undefined
+      ? Promise.resolve()
+      : settle(
+          previous.then((result) => {
+            if (!result.drained) {
+              inheritedUndrained = true;
+              stop(
+                new BufferError(
+                  'stalled',
+                  new Error('The previous local buffer could not finish its writes; restart the app'),
+                ),
+              );
+            }
+          }),
+        );
 
   /** Forgets the connection and closes it, ignoring errors: the next call opens a new one. */
   const drop = async (pending: Promise<SqlDatabase>) => {
@@ -307,47 +429,43 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
     return opening;
   };
 
-  const database = (): Promise<SqlDatabase> => (connection ??= connect());
-
   /** Why a new call is refused right away, if it is. */
   const refusal = (): BufferError | undefined =>
-    stalled ?? (closed ? new BufferError('unavailable', new Error('The local buffer is closed')) : undefined);
+    stalled ??
+    (closing !== undefined ? new BufferError('unavailable', new Error('The local buffer is closed')) : undefined);
 
-  /** Settles with `operation`, or rejects as `stalled` once `operationTimeoutMs` passed. */
-  const withTimeout = <T>(operation: Promise<T>): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new BufferError('stalled', new Error('The database did not answer in time'))),
-        operationTimeoutMs,
-      );
-    });
-    return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
-  };
-
-  /** Runs `operation` after every call made before it, and turns any failure into a result. */
+  /**
+   * Runs `operation` after the work of every call made before it, and turns any failure into a result. The call's
+   * time starts with its turn; once it runs out, the buffer stops, and the operation is not started if it was still
+   * waiting for the database.
+   */
   const enqueue = <T>(operation: (db: SqlDatabase) => Promise<T>, onFailure: (failure: BufferFailure) => T) => {
     const refused = refusal();
     if (refused !== undefined) return Promise.resolve(onFailure(failure(refused)));
-    const run = tail.then(async () => {
+    const job = work.then(async () => {
+      if (stalled !== undefined) throw stalled;
+      const timer = setTimeout(
+        () => stop(new BufferError('stalled', new Error('The database did not answer in time'))),
+        operationTimeoutMs,
+      );
       try {
-        // Queued behind a call that stalled: never run after it.
+        const db = await (connection ??= connect());
+        // Its time ran out while the database was opening: the statement must never start late.
         if (stalled !== undefined) throw stalled;
-        return await withTimeout(database().then(operation));
-      } catch (error) {
-        if (error instanceof BufferError && error.reason === 'stalled') stalled = error;
-        return onFailure(failure(error));
+        return await operation(db);
+      } finally {
+        clearTimeout(timer);
       }
     });
-    tail = run;
-    return run;
+    work = settle(job);
+    return Promise.race([job, stall]).catch((error: unknown) => onFailure(failure(error)));
   };
 
   /**
    * Runs statements on `db`. SQLite undoes a failed statement on its own; the connection is then closed, so that the
    * next call starts on a new one (after an I/O error, a file removed underneath…).
    */
-  const statement = async <T>(db: SqlDatabase, body: () => Promise<T>): Promise<T> => {
+  const statement = async <T>(body: () => Promise<T>): Promise<T> => {
     try {
       return await body();
     } catch (error) {
@@ -357,35 +475,61 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
   };
 
   return {
-    get: (key) =>
-      enqueue<GetResult>(
+    get: (key) => {
+      let storedKey: string;
+      try {
+        if (typeof key !== 'string') throw invalid('The key must be a string');
+        storedKey = encodeText(key);
+      } catch (error) {
+        return Promise.resolve({ ...failure(error), entry: undefined });
+      }
+      return enqueue<GetResult>(
         (db) =>
-          statement(db, async () => {
-            const [row] = await db.all(`SELECT ${COLUMNS} FROM drafts WHERE key = ?`, [key]);
-            return { ok: true, entry: toEntry(row) };
+          statement(async () => {
+            const [row] = await db.all(`SELECT ${COLUMNS} FROM drafts WHERE key = ?`, [storedKey]);
+            if (row === undefined) return { ok: true, entry: undefined };
+            const decoded = decodeRow(row);
+            if ('entry' in decoded) return { ok: true, entry: decoded.entry };
+            return { ok: false, reason: 'unreadable', error: decoded.unreadable.error, entry: undefined };
           }),
         (failed) => ({ ...failed, entry: undefined }),
-      ),
+      );
+    },
 
     put: (key, value) => {
       const refused = refusal();
       if (refused !== undefined) return Promise.resolve(failure(refused));
-      // Snapshot the value now: the caller may change its object before the write runs.
+      // Snapshot and check the value now: the caller may change its object before the write runs.
       let params: SqlValue[];
       try {
         const { content, base, page } = value;
-        const pageJson =
-          base === null && page !== undefined
-            ? JSON.stringify(
-                page.title === undefined ? { creation: page.creation } : { creation: page.creation, title: page.title },
-              )
-            : null;
+        if (typeof key !== 'string' || typeof content !== 'string') throw invalid('The key and text must be strings');
+        let storedPage: string | null = null;
+        if (base === null) {
+          if (page !== undefined) {
+            const { creation, title } = page;
+            if (
+              (creation !== null && typeof creation !== 'string') ||
+              (title !== undefined && typeof title !== 'string')
+            ) {
+              throw invalid('The page holds a value that is not text');
+            }
+            storedPage = encodeText(JSON.stringify(title === undefined ? { creation } : { creation, title }));
+          }
+        } else if (
+          typeof base !== 'object' ||
+          typeof base.content !== 'string' ||
+          typeof base.draftVersion !== 'number' ||
+          !Number.isInteger(base.draftVersion)
+        ) {
+          throw invalid('The base must hold a text and an integer draftVersion');
+        }
         params = [
-          key,
-          content,
-          base === null ? null : base.content,
+          encodeText(key),
+          encodeText(content),
+          base === null ? null : encodeText(base.content),
           base === null ? null : base.draftVersion,
-          pageJson,
+          storedPage,
           now(),
         ];
       } catch (error) {
@@ -393,7 +537,7 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
       }
       return enqueue<PutResult>(
         (db) =>
-          statement(db, async () => {
+          statement(async () => {
             await db.run(
               `INSERT INTO drafts (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT (key) DO UPDATE SET content = excluded.content, base_content = excluded.base_content,
@@ -408,21 +552,29 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
     },
 
     delete: (key, condition) => {
-      // Snapshot the condition now: the caller may change its object before the delete runs.
-      let ifContent: string | undefined;
+      // Snapshot the condition now: the caller may change its object before the delete runs. A condition that is
+      // given must hold a text: anything else is refused, never read as "delete whatever is stored".
+      let storedKey: string;
+      let storedContent: string | undefined;
       try {
-        ifContent = condition === undefined ? undefined : condition.ifContent;
+        if (typeof key !== 'string') throw invalid('The key must be a string');
+        storedKey = encodeText(key);
+        if (condition !== undefined) {
+          const ifContent: unknown = (condition as { ifContent?: unknown } | null)?.ifContent;
+          if (typeof ifContent !== 'string') throw invalid('A delete condition must hold the confirmed text');
+          storedContent = encodeText(ifContent);
+        }
       } catch (error) {
         return Promise.resolve({ ...failure(error), deleted: false });
       }
       return enqueue<DeleteResult>(
         (db) =>
-          statement(db, async () => {
+          statement(async () => {
             // One statement: the check and the delete cannot be split by a write.
             const { changes } =
-              ifContent === undefined
-                ? await db.run('DELETE FROM drafts WHERE key = ?', [key])
-                : await db.run('DELETE FROM drafts WHERE key = ? AND content = ?', [key, ifContent]);
+              storedContent === undefined
+                ? await db.run('DELETE FROM drafts WHERE key = ?', [storedKey])
+                : await db.run('DELETE FROM drafts WHERE key = ? AND content = ?', [storedKey, storedContent]);
             return { ok: true, deleted: changes > 0 };
           }),
         (failed) => ({ ...failed, deleted: false }),
@@ -432,26 +584,43 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
     list: () =>
       enqueue<ListResult>(
         (db) =>
-          statement(db, async () => {
+          statement(async () => {
             const rows = await db.all(`SELECT ${COLUMNS} FROM drafts ORDER BY updated_at DESC, key`, []);
-            const entries = rows.map(toEntry).filter((entry): entry is BufferEntry => entry !== undefined);
-            return { ok: true, entries };
+            const entries: BufferEntry[] = [];
+            const unreadable: UnreadableRow[] = [];
+            for (const row of rows) {
+              const decoded = decodeRow(row);
+              if ('entry' in decoded) entries.push(decoded.entry);
+              else unreadable.push(decoded.unreadable);
+            }
+            return { ok: true, entries, unreadable };
           }),
-        (failed) => ({ ...failed, entries: [] }),
+        (failed) => ({ ...failed, entries: [], unreadable: [] }),
       ),
 
-    close: async () => {
-      if (closed) return;
-      closed = true;
-      await tail;
-      const pending = connection;
-      connection = undefined;
-      if (pending === undefined) return;
-      try {
-        await (await pending).close();
-      } catch {
-        // It never opened, or is already closed: nothing to close.
-      }
-    },
+    close: () =>
+      (closing ??= (async () => {
+        const shut = async () => {
+          const pending = connection;
+          connection = undefined;
+          if (pending !== undefined) await drop(pending);
+        };
+        const pendingWork = work;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const drained = await Promise.race([
+          pendingWork.then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), drainTimeoutMs);
+          }),
+        ]);
+        clearTimeout(timer);
+        if (!drained) {
+          // Close it whenever the work settles; until then, nothing else may write (see `CloseResult`).
+          void pendingWork.then(shut);
+          return { drained: false };
+        }
+        await shut();
+        return { drained: !inheritedUndrained };
+      })()),
   };
 };

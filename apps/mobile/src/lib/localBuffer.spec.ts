@@ -7,12 +7,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  encodeText,
   localBufferSchema,
   openLocalBuffer,
+  type DeleteCondition,
   type LocalBuffer,
   type LocalBufferOptions,
   type Migration,
   type SqlDatabase,
+  type SqlValue,
 } from './localBuffer';
 import { nodeSqlDatabase } from './nodeSqlDatabase';
 
@@ -40,7 +43,7 @@ const countdown = () => {
 };
 
 /** A buffer on the test's database file, on real SQLite, whose statements answer slower the earlier they start. */
-const setup = (options: Partial<LocalBufferOptions> = {}) => {
+const setupBuffer = (options: Partial<LocalBufferOptions> = {}) => {
   let clock = 1000;
   const delay = countdown();
   const buffer = openLocalBuffer({
@@ -51,6 +54,9 @@ const setup = (options: Partial<LocalBufferOptions> = {}) => {
   opened.push(buffer);
   return buffer;
 };
+
+/** The default buffer; the encoding tests shadow it with one on another binding. */
+const setup = setupBuffer;
 
 /** Reads the database file directly, outside the buffer. */
 const inspect = <T>(read: (db: DatabaseSync) => T): T => {
@@ -124,6 +130,19 @@ describe('openLocalBuffer', () => {
   });
 
   describe('conditional delete', () => {
+    it('refuses a condition that holds no text, and keeps the entry', async () => {
+      const buffer = setup();
+      await buffer.put('doc', { content: 'Text', base });
+      for (const condition of [{}, { ifContent: undefined }, { ifContent: 3 }, null]) {
+        expect(await buffer.delete('doc', condition as unknown as DeleteCondition)).toMatchObject({
+          ok: false,
+          reason: 'failed',
+          deleted: false,
+        });
+      }
+      expect((await buffer.get('doc')).entry?.content).toBe('Text');
+    });
+
     it('keeps text typed while the save was in flight', async () => {
       const buffer = setup();
       await buffer.put('doc', { content: 'Sent', base });
@@ -194,7 +213,9 @@ describe('openLocalBuffer', () => {
       expect(await buffer.get('doc')).toMatchObject({ ok: false, reason: 'unavailable', entry: undefined });
       expect(await writing).toEqual({ ok: true });
       await closing;
-      expect(inspect((db) => db.prepare('SELECT content FROM drafts').all())).toEqual([{ content: 'Before close' }]);
+      expect(inspect((db) => db.prepare('SELECT content FROM drafts').all())).toEqual([
+        { content: encodeText('Before close') },
+      ]);
     });
 
     it('stores a page only without a base, and keeps a page without a title', async () => {
@@ -205,24 +226,37 @@ describe('openLocalBuffer', () => {
       expect((await buffer.get('b')).entry?.page).toEqual({ creation: null });
     });
 
-    it('reads a malformed row defensively: whatever holds text is returned', async () => {
+    it('reports a row it cannot decode with its key, lists the others, and leaves it in place', async () => {
       const buffer = setup();
       await buffer.put('doc', { content: 'Text', base });
       await buffer.close();
+      const blob = new Uint8Array([0x22, 0x41, 0x22]);
       inspect((db) => {
-        db.exec(`INSERT INTO drafts VALUES ('bad-base', 'Text 2', 'Server', 'three', NULL, 5)`);
-        db.exec(`INSERT INTO drafts VALUES ('bad-page', 'Text 3', NULL, NULL, '{not json', 4)`);
-        db.exec(`INSERT INTO drafts VALUES ('odd-page', 'Text 4', NULL, NULL, '{"creation":3}', 3)`);
+        const insert = db.prepare('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)');
+        insert.run(encodeText('blob-text'), blob, null, null, null, 6);
+        insert.run(encodeText('raw-text'), 'Not encoded', null, null, null, 5);
+        insert.run(encodeText('bad-base'), encodeText('Text 2'), encodeText('Server'), 'three', null, 4);
+        insert.run(encodeText('half-base'), encodeText('Text 3'), null, 3, null, 3);
+        insert.run(encodeText('bad-page'), encodeText('Text 4'), null, null, encodeText('{not json'), 2);
+        insert.run('raw-key', encodeText('Text 5'), null, null, null, 1);
       });
-      const result = await setup().list();
-      expect(result.ok && result.entries.map(({ key, content, base: b, page }) => ({ key, content, b, page }))).toEqual(
-        [
-          { key: 'doc', content: 'Text', b: base, page: undefined },
-          { key: 'bad-base', content: 'Text 2', b: null, page: undefined },
-          { key: 'bad-page', content: 'Text 3', b: null, page: undefined },
-          { key: 'odd-page', content: 'Text 4', b: null, page: undefined },
-        ],
-      );
+      const before = inspect((db) => db.prepare('SELECT * FROM drafts ORDER BY key').all());
+
+      const reader = setup();
+      const result = await reader.list();
+      expect(result.ok && result.entries.map((entry) => entry.key)).toEqual(['doc']);
+      expect(result.ok && result.unreadable.map((row) => row.key)).toEqual([
+        'blob-text',
+        'raw-text',
+        'bad-base',
+        'half-base',
+        'bad-page',
+        'raw-key',
+      ]);
+      expect(await reader.get('blob-text')).toMatchObject({ ok: false, reason: 'unreadable', entry: undefined });
+      expect(await reader.get('bad-page')).toMatchObject({ ok: false, reason: 'unreadable', entry: undefined });
+      await reader.close();
+      expect(inspect((db) => db.prepare('SELECT * FROM drafts ORDER BY key').all())).toEqual(before);
     });
 
     it('keeps an entry whole when the app is killed during its writes', async () => {
@@ -245,6 +279,7 @@ describe('openLocalBuffer', () => {
             const letter = 'abcdefghij'[n % 10];
             const result = await buffer.put('doc', { content: letter.repeat(1 << 20), base: { content: letter, draftVersion: n } });
             if (!result.ok) { console.error(result); process.exit(1); }
+            // Write 3 is acknowledged: the parent kills the writer only after it.
             if (n === 3) process.stdout.write('ready\\n');
           }
           `,
@@ -267,6 +302,10 @@ describe('openLocalBuffer', () => {
       const letter = entry?.content[0] ?? '';
       expect(entry?.content).toBe(letter.repeat(1 << 20));
       expect(entry?.base?.content).toBe(letter);
+      // Never older than the last acknowledged write, and the text is the one written with that version.
+      const written = entry?.base?.draftVersion ?? -1;
+      expect(written).toBeGreaterThanOrEqual(3);
+      expect(letter).toBe('abcdefghij'[written % 10]);
     }, 20_000);
   });
 
@@ -461,6 +500,7 @@ describe('openLocalBuffer', () => {
       let ran = 0;
       const buffer = setup({
         operationTimeoutMs: 50,
+        drainTimeoutMs: 50,
         open: async () => {
           const db = nodeSqlDatabase(path);
           return {
@@ -480,7 +520,177 @@ describe('openLocalBuffer', () => {
       expect(await queued).toMatchObject({ ok: false, reason: 'stalled', deleted: false });
       expect(await buffer.get('doc')).toMatchObject({ ok: false, reason: 'stalled' });
       expect(ran).toBe(2);
+      expect(await buffer.close()).toEqual({ drained: false });
+    });
+  });
+
+  describe('after a stall', () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    it('never starts a write whose time ran out while the database was opening, and closes once it opened', async () => {
+      let release = () => undefined as void;
+      const opened = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let runs = 0;
+      let closes = 0;
+      const buffer = setup({
+        operationTimeoutMs: 50,
+        drainTimeoutMs: 5000,
+        open: async () => {
+          await opened;
+          const db = nodeSqlDatabase(path);
+          return {
+            ...db,
+            run: (sql, params) => {
+              runs++;
+              return db.run(sql, params);
+            },
+            close: () => {
+              closes++;
+              return db.close();
+            },
+          };
+        },
+      });
+      expect(await buffer.put('doc', { content: 'Stale', base })).toMatchObject({ ok: false, reason: 'stalled' });
+
+      // Two closes share one promise, and neither answers before the open settled.
+      const first = buffer.close();
+      const second = buffer.close();
+      expect(second).toBe(first);
+      let answered = false;
+      void first.then(() => {
+        answered = true;
+      });
+      await sleep(100);
+      expect(answered).toBe(false);
+
+      release();
+      expect(await first).toEqual({ drained: true });
+      expect(await second).toEqual({ drained: true });
+      expect(runs).toBe(0);
+      expect(closes).toBe(1);
+      expect((await setup().get('doc')).entry).toBeUndefined();
+    });
+
+    it('lets a replacement write only after a write that reached SQLite after its timeout landed', async () => {
+      let late = false;
+      const old = setup({
+        operationTimeoutMs: 50,
+        open: async () => {
+          const db = nodeSqlDatabase(path);
+          // Once `late`, a statement is sent before the timeout and reaches SQLite after it.
+          return { ...db, run: async (sql, params) => (late && (await sleep(150)), db.run(sql, params)) };
+        },
+      });
+      expect(await old.put('doc', { content: 'Older', base })).toEqual({ ok: true });
+      late = true;
+      expect(await old.put('doc', { content: 'Older, late', base })).toMatchObject({ ok: false, reason: 'stalled' });
+
+      // A replacement without test delays: it would write at once, before the late write lands.
+      const replacement = setup({ previous: old.close(), open: async () => nodeSqlDatabase(path) });
+      expect(await replacement.put('doc', { content: 'Newer', base })).toEqual({ ok: true });
+      await sleep(200);
+      expect((await replacement.get('doc')).entry?.content).toBe('Newer');
+    });
+
+    it('answers "stalled" in every replacement when the old work cannot be drained', async () => {
+      const old = setup({
+        operationTimeoutMs: 50,
+        drainTimeoutMs: 50,
+        open: async () => ({ ...nodeSqlDatabase(path), run: () => new Promise<never>(() => undefined) }),
+      });
+      expect(await old.put('doc', { content: 'Hangs', base })).toMatchObject({ ok: false, reason: 'stalled' });
+
+      const replacement = setup({ previous: old.close() });
+      expect(await replacement.put('doc', { content: 'Newer', base })).toMatchObject({ ok: false, reason: 'stalled' });
+      expect(await replacement.close()).toEqual({ drained: false });
+      const third = setup({ previous: replacement.close() });
+      expect(await third.get('doc')).toMatchObject({ ok: false, reason: 'stalled' });
+    });
+  });
+
+  /**
+   * Binds and reads strings as `expo-sqlite` 58 does on iOS (`sqlite3_bind_text(…, -1, …)` and `String(cString:)`): cut
+   * at the first NUL, lone surrogates replaced (Swift strings hold no lone surrogate). Node binds them faithfully.
+   */
+  const iosLike = async (): Promise<SqlDatabase> => {
+    const db = nodeSqlDatabase(path);
+    const native = (value: unknown) =>
+      typeof value === 'string' ? new TextDecoder().decode(new TextEncoder().encode(value.split('\u0000')[0])) : value;
+    const bind = (params: readonly SqlValue[]) => params.map(native) as SqlValue[];
+    return {
+      ...db,
+      run: (sql, params) => db.run(sql, bind(params)),
+      all: async (sql, params) =>
+        (await db.all(sql, bind(params))).map((row) =>
+          Object.fromEntries(Object.entries(row as object).map(([column, value]) => [column, native(value)])),
+        ),
+    };
+  };
+
+  describe.each([
+    ['Node', undefined],
+    ['an iOS-like binding', iosLike],
+  ])('texts stored exactly, through %s', (_, open) => {
+    const setup = (options: Partial<LocalBufferOptions> = {}) =>
+      setupBuffer(open === undefined ? options : { open, ...options });
+    const long = 'Éte\u0301 \u0000 😀 x\ud800 '.repeat(30_000);
+    const texts = {
+      nul: 'A\u0000B',
+      composed: 'caf\u00e9',
+      decomposed: 'cafe\u0301',
+      lone: 'x\ud800y',
+      long,
+    };
+
+    it('reads back every text as written: the key, the text, the base and the page', async () => {
+      const buffer = setup();
+      for (const text of Object.values(texts)) {
+        await buffer.put(text, { content: text, base: { content: text, draftVersion: 1 } });
+        await buffer.put(`page ${text}`, { content: text, base: null, page: { creation: text, title: text } });
+      }
       await buffer.close();
+      const reader = setup();
+      for (const text of Object.values(texts)) {
+        const { entry } = await reader.get(text);
+        expect(entry?.key).toBe(text);
+        expect(entry?.content).toBe(text);
+        expect(entry?.base?.content).toBe(text);
+        expect((await reader.get(`page ${text}`)).entry?.page).toEqual({ creation: text, title: text });
+      }
+      const result = await reader.list();
+      expect(result.ok && result.entries).toHaveLength(Object.keys(texts).length * 2);
+    });
+
+    it('sends only printable ASCII to the database', async () => {
+      const buffer = setup();
+      for (const text of Object.values(texts)) {
+        await buffer.put(text, { content: text, base: null, page: { creation: text } });
+      }
+      await buffer.close();
+      const values = inspect((db) => db.prepare('SELECT key, content, page FROM drafts').all()).flatMap((row) =>
+        Object.values(row),
+      );
+      expect(values.every((value) => typeof value === 'string' && /^[\x20-\x7e]*$/.test(value))).toBe(true);
+    });
+
+    it('deletes only on the exact text: not a prefix before a NUL, another normalization or a replaced surrogate', async () => {
+      const buffer = setup();
+      const cases: [string, string][] = [
+        [texts.nul, 'A'],
+        [texts.decomposed, texts.composed],
+        [texts.composed, texts.decomposed],
+        [texts.lone, 'x\ufffdy'],
+        [texts.long, texts.long.slice(0, -1)],
+      ];
+      for (const [stored, confirmed] of cases) {
+        await buffer.put('doc', { content: stored, base });
+        expect(await buffer.delete('doc', { ifContent: confirmed })).toEqual({ ok: true, deleted: false });
+        expect((await buffer.get('doc')).entry?.content).toBe(stored);
+        expect(await buffer.delete('doc', { ifContent: stored })).toEqual({ ok: true, deleted: true });
+      }
     });
   });
 });
