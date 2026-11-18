@@ -853,7 +853,7 @@ describe('Editor autosave', () => {
       expect(status()).toBe('Draft saved · changed since revision 3');
     });
 
-    it('makes no version of text typed after the click and saved along with it, and says so', async () => {
+    it('makes a version of the text on screen at the click, even when later text is typed before it is sent', async () => {
       open();
       hold = (call) => call.path.endsWith('/draft');
       type('X');
@@ -865,12 +865,12 @@ describe('Editor autosave', () => {
       await releaseHeld();
       await elapse();
 
-      expect(draftSaves().map((call) => (call.body as SaveDraftInput).content)).toEqual(['X', 'B']);
-      expect(calls.filter((call) => call.method === 'POST')).toEqual([]);
-      expect(versions()).toEqual([]);
+      // The click's text is the version; the text typed after it is saved as the draft after the version.
+      expect(draftSaves().map((call) => (call.body as SaveDraftInput).content)).toEqual(['X', 'A', 'B']);
+      expect(versions()).toEqual([[null, 'A']]);
       expect(textarea().value).toBe('B');
       expect(server().draft?.content).toBe('B');
-      expect(screen.getByText(/The version was not saved: the text changed while it was being saved/)).toBeTruthy();
+      expect(screen.queryByText(/The version was not saved/)).toBeNull();
       expect(unload().defaultPrevented).toBe(false);
     });
 
@@ -886,11 +886,13 @@ describe('Editor autosave', () => {
       fireEvent.change(screen.getByPlaceholderText(/^Untitled/), { target: { value: 'Renamed' } });
       type('The end. Or is it?');
       await elapse(1000);
-      expect(server()).toMatchObject({ title: 'Renamed', draft: { content: 'The end. Or is it?' } });
+      // The rename goes at once; the draft waits for the version's answer (one write of the text at a time).
+      expect(server()).toMatchObject({ title: 'Renamed', draft: { content: 'The end.' } });
 
       delay = () => false;
       for (const answer of held.splice(0)) answer();
       await elapse(100);
+      expect(server().draft?.content).toBe('The end. Or is it?');
       const cached = queryClient.getQueryData<Document>(queryKeys.document('doc-1'));
       expect(cached).toMatchObject({ title: 'Renamed', revision: 3, content: 'The end.' });
       expect(cached?.draft).toEqual(server().draft);
@@ -948,7 +950,7 @@ describe('Editor autosave', () => {
       expect(unload().defaultPrevented).toBe(false);
     });
 
-    it('when the text typed meanwhile reaches the server first, makes no version of it, and says so', async () => {
+    it('saves the text typed while the version is created after it, as the draft', async () => {
       open();
       type('The end.');
       hold = (call) => call.method === 'POST';
@@ -956,18 +958,22 @@ describe('Editor autosave', () => {
       await elapse();
       type('The end. Or is it?');
       await elapse(1000);
-      expect(server().draft?.content).toBe('The end. Or is it?');
+      expect(server().draft?.content).toBe('The end.');
+      expect(status()).toBe('Saving version…');
 
       await releaseHeld();
-      expect(versions()).toEqual([]);
+      expect(versions()).toEqual([[null, 'The end.']]);
       expect(textarea().value).toBe('The end. Or is it?');
-      expect(status()).toBe('Draft saved · changed since revision 2');
-      expect(screen.getByText(/The version was not saved: the text changed while it was being saved/)).toBeTruthy();
+      expect(server().draft?.content).toBe('The end. Or is it?');
+      expect(status()).toBe('Draft saved · changed since revision 3');
       expect(unload().defaultPrevented).toBe(false);
 
       fireEvent.click(saveButton());
       await elapse();
-      expect(versions()).toEqual([[null, 'The end. Or is it?']]);
+      expect(versions()).toEqual([
+        [null, 'The end.'],
+        [null, 'The end. Or is it?'],
+      ]);
     });
 
     it('when another device moved the draft, shows the conflict, keeps the text, and makes no version', async () => {
@@ -1001,7 +1007,7 @@ describe('Editor autosave', () => {
       calls = [];
       fireEvent.click(saveButton());
       await elapse();
-      expect(calls.map((call) => call.body)).toEqual([
+      expect(calls.filter((call) => call.method === 'POST').map((call) => call.body)).toEqual([
         { draftVersion: 4, baseRevision: 2 },
         { draftVersion: 4, baseRevision: 3 },
       ]);
@@ -1028,7 +1034,7 @@ describe('Editor autosave', () => {
       expect(screen.queryByText(/The version/)).toBeNull();
     });
 
-    it('after a failure, says the text is saved as a draft, and lets the writer try again', async () => {
+    it('after a failure, keeps the version and creates it on a later try', async () => {
       open();
       intercept = (call) =>
         call.method === 'POST' ? reply(500, { statusCode: 500, message: 'Internal server error' }) : undefined;
@@ -1037,31 +1043,30 @@ describe('Editor autosave', () => {
       await elapse();
 
       expect(versions()).toEqual([]);
-      expect(status()).toBe('Draft saved · changed since revision 2');
-      expect(
-        screen.getByText(/The version could not be saved .*Your text is saved as a draft: try again\./),
-      ).toBeTruthy();
-      expect(unload().defaultPrevented).toBe(false);
+      expect(status()).toBe('Version waiting for the server');
+      expect(unload().defaultPrevented).toBe(true);
 
       intercept = () => undefined;
-      fireEvent.click(saveButton());
-      await elapse();
+      await elapse(1000);
       expect(versions()).toEqual([[null, 'The end.']]);
-      expect(screen.queryByText(/The version could not be saved/)).toBeNull();
+      expect(status()).toBe('Saved · revision 3');
     });
 
-    it('with the server unreachable, leaves the error to the notification', async () => {
+    it('with the server unreachable between the draft and the version, keeps the version for its return', async () => {
       open();
       type('The end.');
       await elapse(1000);
-      intercept = (call) => (call.method === 'POST' ? reply(503) : undefined);
+      // The server goes away after the draft is saved: the version's request and every read fail.
+      intercept = (call) => (call.method === 'POST' || call.method === 'GET' ? reply(503) : undefined);
       fireEvent.click(saveButton());
       await elapse();
       expect(reachability.isUnreachable()).toBe(true);
       expect(screen.queryByRole('alert')).toBeNull();
-      expect(
-        screen.getByText('The version could not be saved. Your text is saved as a draft: try again.'),
-      ).toBeTruthy();
+      expect(status()).toBe('Version waiting for the server');
+
+      intercept = () => undefined;
+      await elapse(1000);
+      expect(versions()).toEqual([[null, 'The end.']]);
     });
 
     it('saves the first version of a document that has none', async () => {
@@ -1076,7 +1081,9 @@ describe('Editor autosave', () => {
 
       fireEvent.click(saveButton());
       await elapse();
-      expect(calls.map((call) => call.body)).toEqual([{ draftVersion: 1, baseRevision: null }]);
+      expect(calls.filter((call) => call.method === 'POST').map((call) => call.body)).toEqual([
+        { draftVersion: 1, baseRevision: null },
+      ]);
       expect(versions()).toEqual([[null, 'A first line.']]);
       expect(status()).toBe('Saved · revision 1');
     });

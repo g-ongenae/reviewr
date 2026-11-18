@@ -27,7 +27,7 @@ import {
   type LeftText,
 } from './deviceBuffer';
 import type { BufferPage } from './localBuffer';
-import { createVersionQueue, type VersionQueue } from './versionQueue';
+import { createVersionQueue, holdOnStop, type VersionQueue } from './versionQueue';
 
 /**
  * The draft an editor opens on. The API always sends it; documents without one (fixtures written before drafts
@@ -366,6 +366,15 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
         throw error;
       }
     },
+    nameRevision: async (revision, name) => {
+      try {
+        await api.nameRevision(id, revision, name);
+        reachability.reportSuccess();
+      } catch (error) {
+        reachability.reportError(error);
+        throw error;
+      }
+    },
     head: () => queryClient.getQueryData<Document>(queryKeys.document(id))?.revision ?? 0,
     toSaveResult,
     onRevision: (saved) => cacheRevision(queryClient, saved),
@@ -416,6 +425,7 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
     if (state.status === 'saved') letGo(queryClient, entry, state.content);
   };
   machine.subscribe(mirror);
+  holdOnStop(machine, versions);
   registry.set(id, entry);
   return entry;
 };

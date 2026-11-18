@@ -18,12 +18,14 @@ export const keptCopyLabel = 'Another copy kept on this device';
 interface HeldTextProps {
   label: string;
   text: string;
+  /** A line under the label, saying what happened to the text. */
+  note?: ReactNode;
   /** Actions shown after "Copy". */
   children?: ReactNode;
 }
 
 /** A text the writer could lose, read-only, with its label and a way to copy it. */
-export const HeldText = ({ label, text, children }: HeldTextProps) => {
+export const HeldText = ({ label, text, note, children }: HeldTextProps) => {
   const field = useRef<HTMLTextAreaElement>(null);
   const [copied, setCopied] = useState(false);
   const copy = () => {
@@ -35,6 +37,7 @@ export const HeldText = ({ label, text, children }: HeldTextProps) => {
   return (
     <section className="held-text" aria-label={label}>
       <h3>{label}</h3>
+      {note !== undefined && <p className="held-text-note">{note}</p>}
       <textarea ref={field} readOnly value={text} aria-label={label} rows={4} />
       <div className="held-text-actions">
         <button type="button" onClick={copy}>

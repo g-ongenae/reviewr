@@ -3,7 +3,7 @@ import { ApiError } from '@reviewr/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAutosave, type Autosave, type Draft, type SaveResult } from './autosave';
 import { toSaveResult } from './useAutosave';
-import { createVersionQueue, type VersionQueue } from './versionQueue';
+import { createVersionQueue, holdOnStop, type VersionQueue } from './versionQueue';
 
 /** An error of the API with its body, as the client throws it (a 409 body carries more than `ApiErrorBody`). */
 const apiError = (status: number, body: Record<string, unknown> = {}) =>
@@ -17,7 +17,7 @@ const apiError = (status: number, body: Record<string, unknown> = {}) =>
 const fakeServer = () => {
   let draft: Draft = { content: 'Once', draftVersion: 1 };
   let head = { revision: 1, content: 'Once' };
-  const revisions: { content: string; name: string | null }[] = [];
+  const revisions: { revision: number; content: string; name: string | null }[] = [];
   const calls: string[] = [];
   let inFlight = 0;
   let maxInFlight = 0;
@@ -95,13 +95,22 @@ const fakeServer = () => {
         });
       }
       head = { revision: head.revision + 1, content: draft.content };
-      revisions.push({ content: draft.content, name: input.name ?? null });
+      revisions.push({ revision: head.revision, content: draft.content, name: input.name ?? null });
       return document();
+    });
+
+  const nameRevision = (revision: number, name: string) =>
+    answer(`PATCH ${revision} ${name}`, () => {
+      const named = revisions.find((item) => item.revision === revision);
+      if (named === undefined) throw apiError(404);
+      named.name = name;
+      return named;
     });
 
   return {
     saveDraft,
     createRevision,
+    nameRevision,
     calls,
     revisions,
     draft: () => draft,
@@ -114,6 +123,7 @@ const fakeServer = () => {
     /** Another device saves a version of the draft it holds. */
     otherVersion: () => {
       head = { revision: head.revision + 1, content: draft.content };
+      revisions.push({ revision: head.revision, content: draft.content, name: 'Theirs' });
     },
     setLose: (next: typeof lose) => {
       lose = next;
@@ -140,12 +150,13 @@ describe('createVersionQueue', () => {
   let autosave: Autosave;
   let headSeen: number;
 
-  /** The editor's "Save version": flush, then queue the text on screen when the draft could not be saved. */
-  const saveVersion = async (text: string, name?: string) => {
-    const flushed = await autosave.flush();
-    if (flushed === 'failed') queue.enqueue({ text, name });
-    return flushed;
+  /** The editor's "Save version": the text and its name are queued at the click, then the machine saves now. */
+  const saveVersion = (text: string, name?: string) => {
+    queue.enqueue({ text, name });
+    return autosave.flush();
   };
+  /** A read of the document: the machine is told about the server's draft. */
+  const read = () => autosave.refresh(server.draft());
 
   const versions = () => server.revisions.map(({ content, name }) => [name, content]);
   const offline = () => server.setFail(unreachable);
@@ -157,6 +168,7 @@ describe('createVersionQueue', () => {
     headSeen = 1;
     queue = createVersionQueue({
       createRevision: server.createRevision,
+      nameRevision: server.nameRevision,
       head: () => headSeen,
       toSaveResult,
       onRevision: (document) => {
@@ -170,6 +182,7 @@ describe('createVersionQueue', () => {
       debounceMs: 500,
       retryDelayMs: () => 1000,
     });
+    holdOnStop(autosave, queue);
   });
 
   afterEach(() => {
@@ -283,7 +296,11 @@ describe('createVersionQueue', () => {
     server.setLose((call) => call.startsWith('POST') && ++posts === 1);
     server.calls.length = 0;
     await vi.advanceTimersByTimeAsync(1000);
-    // The revision was made, its answer lost: sent again, it finds the draft already the head.
+    expect(server.calls).toEqual(['PUT A@1', 'POST @2']);
+    // The machine knows the server holds A: the version's draft, on which the revision is sent again.
+    expect(autosave.getSnapshot()).toMatchObject({ status: 'retrying', base: { content: 'A', draftVersion: 2 } });
+    await vi.advanceTimersByTimeAsync(1000);
+    // The revision was made, its answer lost: sent again on the same draft and head, it finds the draft the head.
     expect(server.calls).toEqual(['PUT A@1', 'POST @2', 'PUT A@2', 'POST @2', 'PUT B@2']);
     expect(versions()).toEqual([[null, 'A']]);
     expect(autosave.getSnapshot().status).toBe('saved');
@@ -306,6 +323,116 @@ describe('createVersionQueue', () => {
     expect(versions()).toEqual([[null, 'A']]);
     expect(server.draft()).toEqual({ content: 'A, then more', draftVersion: 3 });
     expect(autosave.getSnapshot().status).toBe('saved');
+  });
+
+  it('a revision whose answer was lost is held, not sent again, once the head moved and its text is back', async () => {
+    offline();
+    autosave.edit('A');
+    await saveVersion('A', 'Mine');
+    autosave.edit('B');
+    online();
+    let posts = 0;
+    server.setLose((call) => call.startsWith('POST') && ++posts === 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(versions()).toEqual([['Mine', 'A']]);
+
+    // Another device saves and versions its text, then puts A back in the draft.
+    server.otherDraft('Other');
+    server.otherVersion();
+    server.otherDraft('A');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(versions()).toEqual([
+      ['Mine', 'A'],
+      ['Theirs', 'Other'],
+    ]);
+    expect(queue.getSnapshot()).toEqual({ pending: [], held: [{ text: 'A', name: 'Mine', reason: 'unsure' }] });
+    expect(server.draft().content).toBe('B');
+    expect(autosave.getSnapshot().status).toBe('saved');
+  });
+
+  it('names a version whose requests are already sent by renaming it once created', async () => {
+    autosave.edit('A');
+    server.hold();
+    const first = saveVersion('A');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(server.calls).toEqual(['PUT A@1']);
+    // The name comes while the version's requests are on their way.
+    const second = saveVersion('A', 'Named');
+    await server.release();
+    await expect(first).resolves.toBe('saved');
+    await expect(second).resolves.toBe('saved');
+    expect(server.calls).toEqual(['PUT A@1', 'POST @2', 'PUT A@2', 'POST @2', 'PATCH 2 Named']);
+    expect(versions()).toEqual([['Named', 'A']]);
+  });
+
+  describe('a failed write of the latest text after a version was created', () => {
+    const failLatestOnce = async () => {
+      offline();
+      autosave.edit('A');
+      await saveVersion('A');
+      autosave.edit('B');
+      let failed = false;
+      server.setFail((call) => {
+        if (call !== 'PUT B@2' || failed) return undefined;
+        failed = true;
+        return unreachable();
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(versions()).toEqual([[null, 'A']]);
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'retrying', base: { content: 'A', draftVersion: 2 } });
+    };
+
+    it('is a conflict when another device writes the old text back, never a write over it', async () => {
+      await failLatestOnce();
+      server.otherDraft('Once');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(server.draft()).toEqual({ content: 'Once', draftVersion: 3 });
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', base: { content: 'A', draftVersion: 2 } });
+    });
+
+    it('takes a read of the version it created as its own', async () => {
+      await failLatestOnce();
+      read();
+      expect(autosave.getSnapshot().status).toBe('retrying');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(server.draft().content).toBe('B');
+      expect(autosave.getSnapshot().status).toBe('saved');
+    });
+  });
+
+  it('takes a read of a queued text whose answer was lost as its own, and goes on', async () => {
+    offline();
+    autosave.edit('A');
+    await saveVersion('A');
+    autosave.edit('B');
+    online();
+    let puts = 0;
+    server.setLose((call) => call.startsWith('PUT A') && ++puts === 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(server.draft()).toEqual({ content: 'A', draftVersion: 2 });
+    read();
+    expect(autosave.getSnapshot().status).not.toBe('conflict');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(versions()).toEqual([[null, 'A']]);
+    expect(server.draft().content).toBe('B');
+    expect(queue.getSnapshot()).toEqual({ pending: [], held: [] });
+  });
+
+  it('holds the queued versions as soon as a read shows a conflict, so resolving it sends none of them', async () => {
+    offline();
+    autosave.edit('A');
+    await saveVersion('A');
+    autosave.edit('B');
+    server.otherDraft('Theirs');
+    read();
+    expect(autosave.getSnapshot().status).toBe('conflict');
+    expect(queue.getSnapshot()).toEqual({ pending: [], held: [{ text: 'A', name: undefined, reason: 'conflict' }] });
+
+    online();
+    autosave.resolve('B and Theirs', server.draft());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(versions()).toEqual([]);
+    expect(server.draft().content).toBe('B and Theirs');
   });
 
   it('is tried again on a head another device moved, since the draft did not move', async () => {
@@ -429,5 +556,47 @@ describe('createVersionQueue', () => {
     expect(server.draft().content).toBe('Page one, two');
     expect(versions()).toEqual([[null, 'Page one']]);
     expect(autosave.getSnapshot().status).toBe('saved');
+  });
+
+  it('a refused creation is its own text: the page is created with the latest one, the queued text is held', async () => {
+    let body: string | undefined;
+    let created = false;
+    const create = async (draft: Draft): Promise<SaveResult> => {
+      body ??= draft.content;
+      const result = await server.saveDraft({ content: body, draftVersion: 1 });
+      if (result.kind === 'rejected') {
+        // Rule 3 of the identity of a page: the server stored nothing, a changed text is a new creation.
+        body = undefined;
+        return { ...result, permanent: false };
+      }
+      if (result.kind !== 'saved') return result;
+      created = true;
+      return { ...result, content: body };
+    };
+    const save = (draft: Draft) => (created ? server.saveDraft(draft) : create(draft));
+    autosave.dispose();
+    autosave = createAutosave({
+      base: { content: '', draftVersion: 0 },
+      save: (draft) => queue.send(draft, save, () => !created),
+      mustSave: queue.hasPending,
+      debounceMs: 500,
+      retryDelayMs: () => 1000,
+    });
+    holdOnStop(autosave, queue);
+    offline();
+    autosave.edit('Too large');
+    await expect(saveVersion('Too large')).resolves.toBe('failed');
+    autosave.edit('Fine');
+
+    server.setFail((call) => (call.startsWith('PUT Too large') ? apiError(413) : undefined));
+    server.calls.length = 0;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(server.calls).toEqual(['PUT Too large@1', 'PUT Fine@1', 'PUT Too large@2']);
+    expect(server.draft().content).toBe('Fine');
+    expect(queue.getSnapshot()).toEqual({
+      pending: [],
+      held: [{ text: 'Too large', name: undefined, reason: 'refused' }],
+    });
+    expect(autosave.getSnapshot()).toMatchObject({ status: 'saved', content: 'Fine' });
   });
 });

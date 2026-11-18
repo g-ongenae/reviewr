@@ -38,6 +38,9 @@ let revisions: Revision[];
 let calls: Call[];
 /** While true, every request fails as if the server were unreachable (a 503 from the proxy). */
 let down: boolean;
+/** Requests matching `holding` wait until `release`, then get the API's answer at that time. */
+let holding: (call: Call) => boolean;
+let waiting: (() => void)[];
 
 const draftConflict = (draft: Document['draft']) =>
   reply(409, { statusCode: 409, message: 'Conflict', code: 'draft_conflict', draft });
@@ -81,6 +84,12 @@ const fakeApi = ({ method, path, body }: Call): Response => {
     });
     return reply(200, next);
   }
+  if (method === 'PATCH' && sub === 'revisions') {
+    const revision = revisions.find((item) => item.revision === Number(path.split('/')[4]));
+    if (revision === undefined) return reply(404, { statusCode: 404, message: 'Not found' });
+    revision.name = (body as { name: string | null }).name;
+    return reply(200, revision);
+  }
   return reply(404, { statusCode: 404, message: 'Not found' });
 };
 
@@ -117,6 +126,14 @@ const open = (id = 'doc-1') => {
 };
 
 const elapse = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
+/** Answers the requests held, and those they lead to, until none is left. */
+const release = async () => {
+  holding = () => false;
+  while (waiting.length > 0) {
+    for (const answer of waiting.splice(0)) answer();
+    await elapse();
+  }
+};
 const textarea = () => screen.getByPlaceholderText<HTMLTextAreaElement>('Start writing…');
 const type = (value: string) => fireEvent.change(textarea(), { target: { value } });
 const status = () => screen.getAllByRole('status')[0]?.textContent;
@@ -142,6 +159,8 @@ beforeEach(() => {
   revisions = [];
   calls = [];
   down = false;
+  holding = () => false;
+  waiting = [];
   queryClient = createQueryClient();
   queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false, staleTime: Infinity } });
   for (const document of db.values()) queryClient.setQueryData(queryKeys.document(document.id), document);
@@ -158,6 +177,7 @@ beforeEach(() => {
     if (down) return Promise.resolve(reply(503));
     if (call.method === 'GET' && call.path.includes('/revisions')) return Promise.resolve(reply(200, []));
     calls.push(call);
+    if (holding(call)) return new Promise<Response>((resolve) => waiting.push(() => resolve(fakeApi(call))));
     return Promise.resolve(fakeApi(call));
   });
 });
@@ -242,6 +262,49 @@ describe('"Save version" while the server is unreachable', () => {
     expect(status()).toBe('Saved · revision 3');
   });
 
+  it('a click while the queue is being sent keeps its own text, even when more is typed before it is sent', async () => {
+    open();
+    down = true;
+    type('Once upon a tide. A.');
+    fireEvent.click(saveButton());
+    await elapse();
+    type('Once upon a tide. A. B.');
+
+    // The server is back, slowly: the first version is on its way when the writer saves another, then types on.
+    down = false;
+    holding = () => true;
+    await elapse(30_000);
+    expect(waiting.length).toBe(1);
+    fireEvent.click(saveButton());
+    type('Once upon a tide. A. B. C.');
+    await release();
+    await elapse(1000);
+
+    expect(versions()).toEqual([
+      [null, 'Once upon a tide. A.'],
+      [null, 'Once upon a tide. A. B.'],
+    ]);
+    expect(server().draft?.content).toBe('Once upon a tide. A. B. C.');
+    expect(status()).toBe('Draft saved · changed since revision 4');
+  });
+
+  it('a name given for a version whose requests are on their way is given to it once created', async () => {
+    open();
+    type('Once upon a tide. Named later.');
+    holding = () => true;
+    fireEvent.click(saveButton());
+    await elapse();
+    expect(status()).toBe('Saving version…');
+    // The same text, now with a name, while its draft request is on its way.
+    saveNamed('Named later');
+    await release();
+    await elapse();
+
+    expect(versions()).toEqual([['Named later', 'Once upon a tide. Named later.']]);
+    expect(calls.filter((call) => call.method === 'PATCH').map((call) => call.body)).toEqual([{ name: 'Named later' }]);
+    expect(status()).toBe('Saved · revision 3');
+  });
+
   describe('when the draft was changed on another device meanwhile', () => {
     it('writes nothing over it: the version stays readable and copyable until discarded, and the text is a conflict', async () => {
       open();
@@ -260,7 +323,7 @@ describe('"Save version" while the server is unreachable', () => {
       expect(textarea().value).toBe('Once upon a tide. Mine, and more.');
       const held = screen.getByRole('region', { name: 'Version “Mine”, not saved' });
       expect(within(held).getByRole<HTMLTextAreaElement>('textbox').value).toBe('Once upon a tide. Mine.');
-      expect(screen.getByText(/the text was changed on another device before it could be created/)).toBeTruthy();
+      expect(within(held).getByText(/changed on another device before this version could be created/)).toBeTruthy();
       expect(unload().defaultPrevented).toBe(true);
 
       // Leaving and coming back still shows it.
@@ -270,7 +333,7 @@ describe('"Save version" while the server is unreachable', () => {
       await elapse();
       fireEvent.click(
         within(screen.getByRole('region', { name: 'Version “Mine”, not saved' })).getByRole('button', {
-          name: 'Discard this version',
+          name: 'Discard: Version “Mine”, not saved',
         }),
       );
       expect(screen.queryByRole('region', { name: 'Version “Mine”, not saved' })).toBeNull();

@@ -892,6 +892,71 @@ describe('createAutosave', () => {
     });
   });
 
+  describe('a save of several writes', () => {
+    // A save that wrote A (version 2) before the text, as a queue of versions does, then failed on the text.
+    const startAndFailAfterA = async () => {
+      start({ base: { content: 'O', draftVersion: 1 }, retryDelayMs: () => 1000 });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().answer({
+        kind: 'failed',
+        error: new Error('503'),
+        confirmed: { content: 'A', draftVersion: 2 },
+      });
+    };
+
+    it('takes the confirmed draft as its base before the failure, and sends on it', async () => {
+      await startAndFailAfterA();
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'retrying', base: { content: 'A', draftVersion: 2 } });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(server.calls.at(-1)).toEqual({ content: 'B', draftVersion: 2 });
+    });
+
+    it('a read of the confirmed draft is no conflict', async () => {
+      await startAndFailAfterA();
+      autosave.refresh({ content: 'A', draftVersion: 2 });
+      expect(status()).toBe('retrying');
+    });
+
+    it('another device writing its base text back after the confirmed draft is a conflict, not its own base', async () => {
+      await startAndFailAfterA();
+      await vi.advanceTimersByTimeAsync(1000);
+      await server.current().answer({ kind: 'conflict', server: { content: 'O', draftVersion: 3 } });
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'conflict',
+        content: 'B',
+        base: { content: 'A', draftVersion: 2 },
+        server: { content: 'O', draftVersion: 3 },
+      });
+    });
+
+    it('takes a draft holding the text whose write failed as its own, even when another text was sent', async () => {
+      start({ base: { content: 'O', draftVersion: 1 }, retryDelayMs: () => 60_000 });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      // The call wrote A first: that write may have landed, B was never sent.
+      await server.current().answer({ kind: 'failed', error: new TypeError('Failed to fetch'), unknown: 'A' });
+      autosave.refresh({ content: 'A', draftVersion: 2 });
+      expect(autosave.getSnapshot()).toMatchObject({ status: 'unsaved', base: { content: 'A', draftVersion: 2 } });
+    });
+
+    it('takes the confirmed draft before a conflict, so the merge starts from it', async () => {
+      start({ base: { content: 'O', draftVersion: 1 } });
+      autosave.edit('B');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().answer({
+        kind: 'conflict',
+        server: { content: 'Theirs', draftVersion: 3 },
+        confirmed: { content: 'A', draftVersion: 2 },
+      });
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'conflict',
+        base: { content: 'A', draftVersion: 2 },
+        server: { content: 'Theirs', draftVersion: 3 },
+      });
+    });
+  });
+
   describe('dispose', () => {
     it('during a request, ignores the response and sends nothing more', async () => {
       start();

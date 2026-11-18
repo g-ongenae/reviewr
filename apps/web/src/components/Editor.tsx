@@ -1,7 +1,6 @@
 import type { Document } from '@reviewr/shared';
 import {
   ApiError,
-  conflictOf,
   contentMaxLength,
   describeError,
   displayTitle,
@@ -18,7 +17,6 @@ import {
   cacheDocument,
   discardAutosave,
   discardCopy,
-  draftOf,
   isGone,
   useAutosave,
   useKeptCopies,
@@ -72,24 +70,6 @@ const titleRetryMs = 5000;
 
 /** Whether the server refused a rename (a 4xx): sending the same title again cannot help, a changed one may. */
 const refused = (error: unknown): boolean => error instanceof ApiError && error.status < 500;
-
-/** What "Save version" sends: the version's name, and the text on screen when the writer asked for it. */
-interface VersionRequest {
-  name: string | undefined;
-  text: string;
-}
-
-/** The text was changed before it was confirmed: the version would hold another text than the one asked for. */
-const textMoved = new Error('The text changed while the version was being saved');
-
-/** Why "Save version" created no version, when the draft itself was saved. */
-const versionError = (error: unknown): string => {
-  if (error === textMoved || conflictOf(error)?.code === 'draft_conflict') {
-    return 'The version was not saved: the text changed while it was being saved. Your text is saved as a draft: save the version again to keep it.';
-  }
-  const detail = inlineError(error);
-  return `The version could not be saved${detail ? ` (${detail})` : ''}. Your text is saved as a draft: try again.`;
-};
 
 /** What happened to a merged text that was not applied. */
 const stopText = (stop: Stop): string => {
@@ -179,66 +159,6 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
     return () => clearTimeout(timer);
   }, [isNew, title, titleEdit, titleDirty, rename.isPending, titleRetry, titleWaits, sendTitle]);
 
-  /**
-   * Saves a version: the draft first, then the server's draft of the counter the machine holds as confirmed becomes a
-   * revision. Text typed meanwhile is not part of it: the autosave saves it as a draft. When the draft cannot be saved
-   * for now (the server unreachable), the version is queued with the text on screen, and the machine creates it once the
-   * server is back, before the latest text; otherwise (a conflict, a refusal) nothing more happens: the status says why.
-   */
-  const save = useMutation({
-    mutationFn: async ({ name, text }: VersionRequest): Promise<Document | undefined> => {
-      const flushed = await autosave.flush();
-      if (flushed === 'failed') versions.enqueue({ text, name });
-      if (flushed !== 'saved') return undefined;
-      // The flush may end on a later text, typed after the click and sent along with it: that one is not the version.
-      const { draftVersion, content: confirmed } = autosave.getSnapshot().base;
-      if (confirmed !== text) throw textMoved;
-      let baseRevision = document.revision;
-      // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
-      for (let attempt = 1; ; attempt++) {
-        try {
-          return await api.createRevision(document.id, {
-            name,
-            draftVersion,
-            baseRevision: baseRevision === 0 ? null : baseRevision,
-          });
-        } catch (error) {
-          const conflict = conflictOf(error);
-          if (conflict?.code !== 'stale_revision' || attempt === 3) throw error;
-          baseRevision = conflict.revision;
-        }
-      }
-    },
-    onSuccess: async (saved) => {
-      if (saved === undefined) return;
-      // The answer may be older than a draft saved or a rename confirmed since the request started: those stay. The
-      // title never comes from this answer: it cannot tell a title older than the cached one from a newer one (the
-      // title may have changed and changed back meanwhile), so only renames and reads of the document write it.
-      if (!isGone(queryClient, saved.id)) {
-        queryClient.setQueryData<Document>(queryKeys.document(saved.id), (cached) => {
-          if (cached === undefined) return saved;
-          if (cached.revision > saved.revision) return cached;
-          const newerDraft = (cached.draft?.draftVersion ?? 0) > (saved.draft?.draftVersion ?? 0);
-          return {
-            ...saved,
-            title: cached.title,
-            draft: newerDraft ? cached.draft : saved.draft,
-          };
-        });
-      }
-      autosave.refresh(draftOf(saved));
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) }),
-      ]);
-    },
-    onError: (error) => {
-      // The draft moved: the machine keeps the local text, and shows a conflict unless the draft holds that text.
-      const conflict = conflictOf(error);
-      if (conflict?.code === 'draft_conflict') autosave.refresh(conflict.draft, true);
-    },
-  });
-
   /** The name of the next version, while the writer gives one. */
   const [versionName, setVersionName] = useState<string | undefined>(undefined);
   const nameButton = useRef<HTMLButtonElement>(null);
@@ -248,10 +168,15 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
     setVersionName(undefined);
     nameButton.current?.focus();
   };
-  /** Saves the text on screen now as a version; the writer goes back to the text. */
+  /**
+   * Saves the text on screen now as a version; the writer goes back to the text. The text and the name are queued at the
+   * click, in order with every other version: the autosave machine creates the version at once when the server is
+   * reachable, once it is back otherwise (see `versionQueue`), and the text typed since is saved as a draft after it.
+   */
   const saveVersion = (name?: string) => {
     const trimmed = name?.trim().slice(0, revisionNameMaxLength);
-    save.mutate({ name: trimmed === '' ? undefined : trimmed, text: content });
+    versions.enqueue({ name: trimmed === '' ? undefined : trimmed, text: content });
+    void autosave.flush();
     if (versionName !== undefined) {
       setVersionName(undefined);
       textField.current?.focus();
@@ -311,7 +236,6 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
     changedSinceVersion &&
     // A blank page is never created: there is nothing to save as a version.
     (!isNew || content.trim() !== '') &&
-    !save.isPending &&
     state.status !== 'conflict' &&
     state.status !== 'rejected';
   const saveNow = useEffectEvent(() => {
@@ -337,16 +261,15 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   // Closing the page is guarded for every document at once, by `useAutosaveGuard` in the app.
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
-  const actionError = save.isError ? versionError(save.error) : inlineError(remove.error);
+  const actionError = inlineError(remove.error);
   const { result: pendingResult, stop } = sessionState;
   /** The view replaces the text only while there is a conflict: once it is resolved, the text comes back. */
   const showReconciliation = reconciling && state.status === 'conflict';
   const historyLabel = showHistory ? 'Hide history' : 'History';
   /** The text's state first; then the title's, while it is not saved. */
-  const status = save.isPending
-    ? 'Saving version…'
-    : queuedVersions.length > 0
-      ? queuedStatus(queuedVersions)
+  const status =
+    queuedVersions.length > 0
+      ? queuedStatus(queuedVersions, state.status === 'retrying')
       : isNew && state.status === 'saved'
         ? // The blank page: nothing typed yet, or only a title, saved with the text once there is one.
           titleDirty
@@ -367,9 +290,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
           {toolbarStart}
           <span
             className={
-              state.status === 'saved' && !save.isPending && !titleDirty && queuedVersions.length === 0
-                ? 'status'
-                : 'status dirty'
+              state.status === 'saved' && !titleDirty && queuedVersions.length === 0 ? 'status' : 'status dirty'
             }
             role="status"
             title={statusTooltip}

@@ -11,6 +11,15 @@ export interface Draft {
   draftVersion: number;
 }
 
+/**
+ * A draft the server confirmed during a `save` call that did more than one write (versions queued before the text, for
+ * instance), before the write the call ends on: it holds a text this machine sent. The machine takes it as its base
+ * before it handles the outcome, so that its next request, a read and a 409 all start from what the server holds.
+ */
+export interface Progress {
+  confirmed?: Draft;
+}
+
 /** What a `save` call can answer. A rejected promise counts as `failed`. */
 export type SaveResult =
   /**
@@ -20,14 +29,18 @@ export type SaveResult =
    */
   | { kind: 'saved'; draftVersion: number; content?: string }
   /** The `draftVersion` sent was stale: someone else saved meanwhile. `server` is the server's current draft. */
-  | { kind: 'conflict'; server: Draft }
-  /** The request failed (network error, 5xx…). The text is kept and sent again later. */
-  | { kind: 'failed'; error: unknown }
+  | ({ kind: 'conflict'; server: Draft } & Progress)
+  /**
+   * The request failed (network error, 5xx…). The text is kept and sent again later. `unknown` is the text whose write
+   * may or may not have landed, when it is not the one sent (a call that writes another text first): a draft holding it
+   * is this machine's, not a conflict.
+   */
+  | ({ kind: 'failed'; error: unknown; unknown?: string } & Progress)
   /**
    * The server refused this draft: sending it again cannot help. When `permanent` (the document was deleted), nothing is
    * ever sent again; otherwise (too large, invalid) a changed text is sent, never the refused one.
    */
-  | { kind: 'rejected'; error: unknown; permanent: boolean };
+  | ({ kind: 'rejected'; error: unknown; permanent: boolean } & Progress);
 
 /**
  * Saves `content` as the draft, based on `draftVersion` (the version the content was written from). It is never
@@ -147,6 +160,9 @@ const fingerprint = (text: string): string => {
   return `${text.length}:${(4294967296 * (2097151 & low) + (high >>> 0)).toString(36)}`;
 };
 
+/** How many texts whose write may have landed the machine remembers (see `unknownTexts`). */
+const maxUnknownTexts = 8;
+
 const defaultRetryDelayMs = (attempt: number) => Math.min(1000 * 2 ** (attempt - 1), 30_000);
 
 const globalTimers: Timers = {
@@ -182,11 +198,19 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   let timer: unknown;
   let failures = 0;
   /**
-   * A request failed, so whether the server holds `base` or what was sent (`unknownText`) is unknown. Until an answer
-   * or a newer confirmed draft says what the server holds, text equal to `base` is not known to be saved.
+   * A request failed, so whether the server holds `base` or a text whose write failed (`unknownTexts`) is unknown.
+   * Until an answer or a newer confirmed draft says what the server holds, text equal to `base` is not known to be saved.
    */
   let uncertain = false;
-  let unknownText: string | undefined;
+  let unknownTexts: string[] = [];
+  /**
+   * The last few texts only: a writer typing through a long outage sends a new text on every retry. Forgetting an older
+   * one can only make a conflict of a write that did land, never take another device's text for this machine's.
+   */
+  const rememberUnknown = (text: string) => {
+    if (unknownTexts.includes(text)) return;
+    unknownTexts = [...unknownTexts, text].slice(-maxUnknownTexts);
+  };
   let lastError: unknown;
   /** The server's draft while in conflict. */
   let server: Draft | undefined;
@@ -277,11 +301,11 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
     const confirmed = later;
     later = undefined;
     if (confirmed === undefined || confirmed.draftVersion <= base.draftVersion) return;
-    const ours = [content, base.content, sent, unknownText];
+    const ours = [content, base.content, sent, ...unknownTexts];
     if (ours.includes(confirmed.content)) {
       base = confirmed;
       uncertain = false;
-      unknownText = undefined;
+      unknownTexts = [];
       failures = 0;
       lastError = undefined;
     } else {
@@ -331,12 +355,22 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   };
 
   const settle = (sent: Draft, seq: number, result: SaveResult) => {
+    // A write of the same call landed before its outcome: whatever failed after it was written on it.
+    if (
+      result.kind !== 'saved' &&
+      result.confirmed !== undefined &&
+      result.confirmed.draftVersion > base.draftVersion
+    ) {
+      base = result.confirmed;
+      uncertain = false;
+      unknownTexts = [];
+    }
     switch (result.kind) {
       case 'saved': {
         const saved = result.content ?? sent.content;
         base = { content: saved, draftVersion: result.draftVersion };
         uncertain = false;
-        unknownText = undefined;
+        unknownTexts = [];
         failures = 0;
         lastError = undefined;
         // A read kept meanwhile may hold the text sent (when the server saved another one): it is this machine's.
@@ -353,19 +387,19 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
       }
       case 'conflict':
         // The text sent did not land: the server holds `result.server`, or a newer draft read meanwhile. That draft may
-        // be a text of this machine whose answer was lost (`unknownText`): then it is the base, not a conflict.
+        // be a text of this machine whose answer was lost (`unknownTexts`): then it is the base, not a conflict.
         uncertain = false;
         failures = 0;
         lastError = undefined;
         keep(result.server);
         reconcile(sent.content);
-        unknownText = undefined;
+        unknownTexts = [];
         advance('now');
         return;
       case 'failed':
         failures++;
         uncertain = true;
-        unknownText = sent.content;
+        rememberUnknown(result.unknown ?? sent.content);
         lastError = result.error;
         settleFlushes('failed', true);
         schedule(retryDelayMs(failures));
