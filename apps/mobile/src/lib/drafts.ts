@@ -1,4 +1,12 @@
-import { createAutosave, type Autosave, type Draft, type SaveResult } from '@reviewr/autosave';
+import {
+  captureDelete,
+  createAutosave,
+  deleteAsSeen,
+  type Autosave,
+  type DeleteCapture,
+  type Draft,
+  type SaveResult,
+} from '@reviewr/autosave';
 import { createReconcileSession, type ReconcileSession, type SessionApi, type Side } from '@reviewr/reconcile';
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
@@ -72,6 +80,10 @@ export interface Entry {
   users: number;
   /** A screen opened it and does not hold it yet: it is not dropped meanwhile. */
   opening: boolean;
+  /** How many versions and restores of this app run for it. */
+  writes: number;
+  /** A delete is waiting for its answer: no restore starts meanwhile. */
+  deleting: boolean;
 }
 
 export interface Drafts {
@@ -99,6 +111,17 @@ export interface Drafts {
     version: { title: string | null; content: string },
     head: { revision: number; content: string },
   ): Promise<RestoreOutcome>;
+  /**
+   * What a delete confirmed now carries (see `captureDelete` of `@reviewr/autosave`): `revision` is the head the screen
+   * rendered. Refused while a version, a restore or "Keep mine" runs, or in a conflict.
+   */
+  captureDelete(id: string, revision: number): DeleteCapture;
+  /** Sends the delete of a capture (see `deleteAsSeen`); no restore starts until it is answered. */
+  deleteAsSeen(
+    id: string,
+    capture: DeleteCapture,
+    deleteDocument: (seen: { revision: number; draftVersion: number }) => Promise<void>,
+  ): Promise<void>;
   /** Drops a deleted document's entry without saving. */
   discard(id: string): void;
 }
@@ -198,7 +221,7 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
       debounceMs,
       rename: async (value) => onDocument(await api.renameDocument(id, value), 'title'),
     });
-    return { autosave, session, title, document, users: 0, opening: false };
+    return { autosave, session, title, document, users: 0, opening: false, writes: 0, deleting: false };
   };
 
   const entryOf = (id: string): Entry => {
@@ -237,12 +260,25 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
 
   const canRestore = (id: string): boolean => {
     const entry = entries.get(id);
-    if (entry === undefined || entry.session.getSnapshot().running) return false;
+    if (entry === undefined || entry.deleting || entry.session.getSnapshot().running) return false;
     const state = entry.autosave.getSnapshot();
     return state.status !== 'conflict' && !(state.status === 'rejected' && state.permanent);
   };
 
-  const saveVersion = async (id: string, revision: number, name?: string): Promise<Document | undefined> => {
+  /** Counts `write` among the writes of the entry while it runs, for `captureDelete`. */
+  const counted = async <T>(entry: Entry, write: () => Promise<T>): Promise<T> => {
+    entry.writes++;
+    try {
+      return await write();
+    } finally {
+      entry.writes--;
+    }
+  };
+
+  const saveVersion = async (id: string, revision: number, name?: string): Promise<Document | undefined> =>
+    counted(entryOf(id), async () => savedVersion(id, revision, name));
+
+  const savedVersion = async (id: string, revision: number, name?: string): Promise<Document | undefined> => {
     const { autosave } = entryOf(id);
     const text = autosave.getSnapshot().content;
     if ((await autosave.flush()) !== 'saved') return undefined;
@@ -269,6 +305,30 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
         baseRevision = conflict.revision;
       }
     }
+  };
+
+  /** Puts an old version in the editor: see `restore`. */
+  const restoreVersion: Drafts['restore'] = async (id, version, head) => {
+    const { autosave, title } = entryOf(id);
+    const text = autosave.getSnapshot().content;
+    // The text on screen may be in no version: it is kept as one before it is replaced.
+    if (text !== head.content) {
+      let kept: Document | undefined;
+      try {
+        kept = await saveVersion(id, head.revision, `Before restore — ${day.format(now())}`);
+      } catch (error) {
+        return { kind: 'failed', error };
+      }
+      if (kept === undefined) {
+        const state = autosave.getSnapshot();
+        if (state.status === 'retrying' || state.status === 'rejected') return { kind: 'failed', error: state.error };
+        return { kind: 'refused' };
+      }
+    }
+    if (!canRestore(id) || autosave.getSnapshot().content !== text) return { kind: 'failed', error: textMoved };
+    title.edit(version.title ?? '');
+    autosave.edit(version.content);
+    return { kind: 'restored' };
   };
 
   const read = (document: Document) => {
@@ -326,26 +386,22 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
 
     async restore(id, version, head) {
       if (!canRestore(id)) return { kind: 'refused' };
-      const { autosave, title } = entryOf(id);
-      const text = autosave.getSnapshot().content;
-      // The text on screen may be in no version: it is kept as one before it is replaced.
-      if (text !== head.content) {
-        let kept: Document | undefined;
-        try {
-          kept = await saveVersion(id, head.revision, `Before restore — ${day.format(now())}`);
-        } catch (error) {
-          return { kind: 'failed', error };
-        }
-        if (kept === undefined) {
-          const state = autosave.getSnapshot();
-          if (state.status === 'retrying' || state.status === 'rejected') return { kind: 'failed', error: state.error };
-          return { kind: 'refused' };
-        }
+      return counted(entryOf(id), async () => restoreVersion(id, version, head));
+    },
+
+    captureDelete(id, revision) {
+      const { autosave, session, writes } = entryOf(id);
+      return captureDelete(autosave, revision, writes > 0 || session.getSnapshot().running);
+    },
+
+    async deleteAsSeen(id, capture, deleteDocument) {
+      const entry = entryOf(id);
+      entry.deleting = true;
+      try {
+        await deleteAsSeen(entry.autosave, capture, deleteDocument);
+      } finally {
+        entry.deleting = false;
       }
-      if (!canRestore(id) || autosave.getSnapshot().content !== text) return { kind: 'failed', error: textMoved };
-      title.edit(version.title ?? '');
-      autosave.edit(version.content);
-      return { kind: 'restored' };
     },
 
     discard(id) {

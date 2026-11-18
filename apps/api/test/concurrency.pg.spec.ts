@@ -466,8 +466,9 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
       // eslint-disable-next-line no-console -- shows in the CI log that both orders were exercised
       console.info(`update vs saveDraft orders seen: ${[...orders].join(', ')}`);
     });
-    it('a delete with what the client saw racing saveDraft never destroys the saved text', async () => {
-      const orders: Set<string> = new Set();
+    // Claims no order: the one where the save lands first is forced by the lock-holder test above. Whatever order the
+    // server picks, a draft it acknowledged is never deleted, and a delete it acknowledged left no document behind.
+    it('a delete with what the client saw racing saveDraft never destroys an acknowledged text', async () => {
       for (let round: number = 0; round < rounds; round += 1) {
         const doc = await create('v1');
         const [removed, draft] = await Promise.all([
@@ -477,20 +478,20 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
             (error: unknown) => ({ ok: false as const, error }),
           ),
         ]);
+        const { rows } = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM documents WHERE id = $1', [
+          doc.id,
+        ]);
 
-        if (removed.ok) {
-          // The delete came first: the save finds no document, and no text was acknowledged.
-          expect(draft.ok ? undefined : draft.error).toBeInstanceOf(NotFoundException);
-        } else {
-          // The save came first and was acknowledged: the delete is refused and the text is still there.
-          expect(draft).toMatchObject({ ok: true, saved: { content: 'two pages', draftVersion: 2 } });
-          expect(removed.conflict).toMatchObject({ code: 'document_changed', draft: { content: 'two pages' } });
+        // Exactly one of the two went through, and the other one says why.
+        expect(removed.ok).toBe(!draft.ok);
+        if (draft.ok) {
+          expect(removed.ok ? undefined : removed.conflict).toMatchObject({ code: 'document_changed' });
           expect((await service.get(doc.id)).draft?.content).toBe('two pages');
+        } else {
+          expect(draft.error).toBeInstanceOf(NotFoundException);
+          expect(rows[0]?.n).toBe(0);
         }
-        orders.add(removed.ok ? 'delete first' : 'draft first');
       }
-      // eslint-disable-next-line no-console -- shows in the CI log that both orders were exercised
-      console.info(`delete vs saveDraft orders seen: ${[...orders].join(', ')}`);
     });
   });
 });

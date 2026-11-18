@@ -1,4 +1,4 @@
-import type { AutosaveState } from '@reviewr/autosave';
+import type { AutosaveState, DeleteCapture } from '@reviewr/autosave';
 import type { Stop } from '@reviewr/reconcile';
 import type { Document } from '@reviewr/shared';
 import { conflictOf, contentMaxLength, describeError, displayTitle, titleMaxLength } from '@reviewr/shared';
@@ -8,7 +8,6 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
-import { changedElsewhere, deleteAsSeen } from '@/lib/deleteAsSeen';
 import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
 import { countWords } from '@/lib/format';
 import type { TitleState } from '@/lib/title';
@@ -112,15 +111,14 @@ const Editor = ({ document }: { document: Document }) => {
 
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
+  /**
+   * Deletes the document as the writer saw it when confirming (see `deleteAsSeen` of `@reviewr/autosave`): the head
+   * this screen rendered, and the draft version of the text on it. Until the answer, the text, the title and "Save
+   * version" are frozen, so nothing typed after the confirmation can be lost, and no write of this app causes a 409.
+   */
   const remove = useMutation({
-    mutationFn: () =>
-      deleteAsSeen({
-        autosave,
-        // The head shown now: the text's save may have taken a while, and a read may have brought a newer one.
-        revision: () => queryClient.getQueryData<Document>(queryKeys.document(document.id))?.revision ?? document.revision,
-        savingVersion: saveVersion.isPending,
-        deleteDocument: (seen) => api.deleteDocument(document.id, seen),
-      }),
+    mutationFn: (capture: DeleteCapture) =>
+      drafts.deleteAsSeen(document.id, capture, (seen) => api.deleteDocument(document.id, seen)),
     onSuccess: async () => {
       drafts.discard(document.id);
       queryClient.removeQueries({ queryKey: queryKeys.document(document.id) });
@@ -130,22 +128,29 @@ const Editor = ({ document }: { document: Document }) => {
     onError: (error) => {
       const message = inlineError(error);
       if (message !== undefined) Alert.alert('Could not delete', message);
-      // Read it again: a newer draft goes to the autosave, which never replaces unsaved text with it.
-      if (changedElsewhere(error)) {
+      // Changed elsewhere: read it again. A newer draft goes to the autosave, which never replaces unsaved text with it.
+      if (conflictOf(error)?.code === 'document_changed') {
         void queryClient.invalidateQueries({ queryKey: queryKeys.document(document.id), exact: true });
         void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(document.id) });
         void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       }
     },
   });
+  const frozen = remove.isPending;
 
   const confirmDelete = () =>
     Alert.alert('Delete document?', 'This also deletes its whole history.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => remove.mutate() },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        // Captured when the writer confirms: the head this screen showed, never one read later.
+        onPress: () => remove.mutate(drafts.captureDelete(document.id, document.revision)),
+      },
     ]);
 
   const canSave =
+    !frozen &&
     changedSinceVersion &&
     !saveVersion.isPending &&
     !busy &&
@@ -238,6 +243,7 @@ const Editor = ({ document }: { document: Document }) => {
         ))}
         <TextInput
           style={[styles.titleInput, { color: theme.text }]}
+          editable={!frozen}
           placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
           placeholderTextColor={theme.muted}
           value={titleState.value}
@@ -252,7 +258,7 @@ const Editor = ({ document }: { document: Document }) => {
           value={content}
           maxLength={contentMaxLength}
           // Read-only while "Keep mine" runs: it saves the text it was given.
-          editable={!busy}
+          editable={!busy && !frozen}
           onChangeText={autosave.edit}
           multiline
           scrollEnabled={false}

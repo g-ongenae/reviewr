@@ -1,6 +1,9 @@
 import type { DeleteDocumentInput } from '@reviewr/shared';
 import { Transform } from 'class-transformer';
-import { IsInt, Min, ValidateIf } from 'class-validator';
+import { IsInt, Max, Min, ValidateIf } from 'class-validator';
+
+/** Largest value of a PostgreSQL `integer`, the type of both counters: a larger one could never match. */
+const integerMax: number = 2_147_483_647;
 
 /**
  * A query parameter holding a counter: a string of digits becomes a number, anything else (a sign, a fraction, a
@@ -23,6 +26,7 @@ export class DeleteDocumentQueryDto implements Partial<DeleteDocumentInput> {
   @Transform(toCounter)
   @IsInt()
   @Min(0)
+  @Max(integerMax)
   public revision?: number;
 
   /** `draftVersion` of the draft last seen. */
@@ -30,5 +34,6 @@ export class DeleteDocumentQueryDto implements Partial<DeleteDocumentInput> {
   @Transform(toCounter)
   @IsInt()
   @Min(1)
+  @Max(integerMax)
   public draftVersion?: number;
 }

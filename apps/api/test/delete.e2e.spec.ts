@@ -131,6 +131,8 @@ describe('Delete with what the client saw', () => {
     ['a negative revision', '?revision=-1&draftVersion=1'],
     ['a fractional draftVersion', '?revision=1&draftVersion=1.5'],
     ['a zero draftVersion', '?revision=1&draftVersion=0'],
+    ['a revision past the integer column', '?revision=2147483648&draftVersion=1'],
+    ['a draftVersion past the integer column', '?revision=1&draftVersion=2147483648'],
     ['a word', '?revision=one&draftVersion=1'],
     ['a parameter sent twice', '?revision=1&revision=1&draftVersion=1'],
     ['an unknown parameter', '?revision=1&draftVersion=1&force=1'],
