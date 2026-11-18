@@ -21,6 +21,7 @@ export const startOfDay = (now: number): number => new Date(now).setHours(0, 0, 
 export const startOfNextDay = (start: number): number => {
   const next = new Date(start);
   next.setDate(next.getDate() + 1);
+
   return next.getTime();
 };
 
@@ -37,8 +38,12 @@ export const lastRevisionBefore = (
     ?.filter((revision) => Date.parse(revision.createdAt) < today)
     .reduce<number | undefined>((latest, { revision }) => Math.max(latest ?? revision, revision), undefined);
 
+/** What a read gave: the text once it came, "unavailable" when it failed, "loading" meanwhile. */
 const fromRead = (read: BaselineRead<{ content: string }>): Baseline => {
-  if (read.data !== undefined) return { status: 'ready', content: read.data.content };
+  if (read.data !== undefined) {
+    return { status: 'ready', content: read.data.content };
+  }
+
   return read.isError ? { status: 'unavailable' } : { status: 'loading' };
 };
 
@@ -53,10 +58,19 @@ export const todayBaseline = (
   revisions: BaselineRead<readonly Pick<RevisionSummary, 'revision' | 'createdAt'>[]>,
   revision: BaselineRead<{ content: string }>,
 ): Baseline => {
-  if (Date.parse(document.createdAt) >= today) return { status: 'ready', content: '' };
-  if (Date.parse(document.updatedAt) < today) return { status: 'ready', content: document.content };
-  if (revisions.data === undefined) return revisions.isError ? { status: 'unavailable' } : { status: 'loading' };
-  if (lastRevisionBefore(revisions.data, today) === undefined) return { status: 'ready', content: '' };
+  if (Date.parse(document.createdAt) >= today) {
+    return { status: 'ready', content: '' };
+  }
+  if (Date.parse(document.updatedAt) < today) {
+    return { status: 'ready', content: document.content };
+  }
+  if (revisions.data === undefined) {
+    return revisions.isError ? { status: 'unavailable' } : { status: 'loading' };
+  }
+  if (lastRevisionBefore(revisions.data, today) === undefined) {
+    return { status: 'ready', content: '' };
+  }
+
   return fromRead(revision);
 };
 
