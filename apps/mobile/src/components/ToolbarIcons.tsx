@@ -1,8 +1,11 @@
 import type { ReactNode } from 'react';
 import Svg, { Circle, Path } from 'react-native-svg';
 
-/** The web's toolbar icons (apps/web/src/components/ToolbarIcons.tsx), with the same paths: both apps draw the same. */
-const Icon = ({ color, size = 18, children }: { color: string; size?: number; children: ReactNode }) => (
+/**
+ * The web's toolbar icons (apps/web/src/components/ToolbarIcons.tsx), with the same paths and the same 16 pt size: both
+ * apps draw the same.
+ */
+const Icon = ({ color, size = 16, children }: { color: string; size?: number; children: ReactNode }) => (
   <Svg
     width={size}
     height={size}

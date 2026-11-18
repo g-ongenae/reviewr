@@ -22,9 +22,10 @@ const colors = (theme: Theme, kind: ToolbarButtonKind, pressed: boolean) => {
     const fill = pressed ? theme.accentDark : theme.accent;
     return { background: fill, border: fill, content: '#fff' };
   }
+  // Pressed as the web's hovered icon button: the border colour fills it and its outline darkens.
   return {
-    background: pressed ? theme.surface : theme.background,
-    border: theme.border,
+    background: pressed ? theme.border : theme.background,
+    border: pressed ? theme.muted : theme.border,
     content: kind === 'danger' ? theme.danger : theme.text,
   };
 };
@@ -61,17 +62,21 @@ export const ToolbarButton = ({ label, onPress, icon: IconOf, text, kind = 'neut
   );
 };
 
-/** The actions at the right of a screen's header, in the web's order. */
+/**
+ * The actions at the right of a screen's header, in the web's order. The gap keeps a tap that misses one button from
+ * landing on its neighbour (Delete is next to Save version). Four buttons take 4 × 44 + 3 × 6 = 194 pt.
+ */
 export const ToolbarActions = ({ children }: { children: ReactNode }) => (
   <View style={styles.actions}>{children}</View>
 );
 
 const styles = StyleSheet.create({
-  actions: { flexDirection: 'row', alignItems: 'center' },
+  actions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   target: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   box: {
     minWidth: 36,
-    height: 36,
+    // A minimum, not a height: a label in a large system font makes the button taller instead of being clipped.
+    minHeight: 36,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -79,7 +84,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 6,
   },
-  withText: { paddingHorizontal: 12 },
+  withText: { paddingHorizontal: 12, paddingVertical: 6 },
   text: { fontSize: 15, fontWeight: '600' },
   disabled: { opacity: 0.5 },
 });
