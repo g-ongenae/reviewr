@@ -120,3 +120,9 @@
   color: var(--muted);
   background: var(--bg-soft);
 }
+
+/* Why a restore restored nothing, under its button. */
+.restore-error {
+  margin: 0.5rem 0 0;
+  line-height: 1.4;
+}

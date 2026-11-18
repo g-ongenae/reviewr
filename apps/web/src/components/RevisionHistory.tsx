@@ -8,7 +8,11 @@ import './RevisionHistory.css';
 
 interface Props {
   document: Document;
-  onRestore: (revision: Revision) => void;
+  /**
+   * Restores a revision into the editor. It may take a while (the text on screen is first kept as a version): its
+   * promise holds the message to show when nothing was restored.
+   */
+  onRestore: (revision: Revision) => Promise<string | undefined> | undefined;
   /** Restoring is not possible now (a merge is being saved). */
   restoreDisabled?: boolean;
 }
@@ -16,6 +20,18 @@ interface Props {
 /** Lists past revisions; selecting one previews it and offers to restore it into the editor. */
 export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }: Props) => {
   const [selected, setSelected] = useState<number | undefined>(undefined);
+  const [restoring, setRestoring] = useState(false);
+  /** Why the last restore restored nothing. */
+  const [notRestored, setNotRestored] = useState<string | undefined>(undefined);
+  const restore = async (revision: Revision) => {
+    setRestoring(true);
+    setNotRestored(undefined);
+    try {
+      setNotRestored(await onRestore(revision));
+    } finally {
+      setRestoring(false);
+    }
+  };
   const revisions = useQuery({
     queryKey: queryKeys.revisions(document.id),
     queryFn: () => api.listRevisions(document.id),
@@ -42,7 +58,10 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
             revision={revision}
             current={revision.revision === document.revision}
             selected={revision.revision === selected}
-            onSelect={() => setSelected(revision.revision === selected ? undefined : revision.revision)}
+            onSelect={() => {
+              setSelected(revision.revision === selected ? undefined : revision.revision);
+              setNotRestored(undefined);
+            }}
           />
         ))}
       </ul>
@@ -58,11 +77,16 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
               {preview.data.revision !== document.revision && (
                 <button
                   className="primary"
-                  disabled={restoreDisabled}
-                  onClick={() => preview.data && onRestore(preview.data)}
+                  disabled={restoreDisabled || restoring}
+                  onClick={() => preview.data && void restore(preview.data)}
                 >
-                  Restore into editor
+                  {restoring ? 'Restoring…' : 'Restore into editor'}
                 </button>
+              )}
+              {notRestored && (
+                <p className="error small restore-error" role="alert">
+                  {notRestored}
+                </p>
               )}
             </>
           )}

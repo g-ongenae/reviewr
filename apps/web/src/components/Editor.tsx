@@ -26,6 +26,7 @@ import {
 } from '../autosave/useAutosave';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
+import { cacheKeptVersion, restore, restoreMessage } from '../restore';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
 import { RevisionHistory } from './RevisionHistory';
@@ -627,10 +628,21 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
         <RevisionHistory
           document={document}
           restoreDisabled={busy}
-          onRestore={(revision) => {
-            editTitle(revision.title ?? '');
-            autosave.edit(revision.content);
-          }}
+          // The text on screen is first kept as a version when it is in no version: see `restore`.
+          onRestore={(revision) =>
+            restore({
+              autosave,
+              head: document,
+              busy: () => session.getSnapshot().running,
+              gone: () => isGone(queryClient, document.id),
+              createRevision: (input) => api.createRevision(document.id, input),
+              onKept: (saved) => cacheKeptVersion(queryClient, autosave, saved),
+              apply: () => {
+                editTitle(revision.title ?? '');
+                autosave.edit(revision.content);
+              },
+            }).then(restoreMessage)
+          }
         />
       )}
     </div>
