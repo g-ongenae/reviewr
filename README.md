@@ -68,3 +68,7 @@ After changing `apps/api/src/database/schema.ts`, generate a migration with `pnp
 The types are defined in `packages/shared/src/types.ts`. Titles are limited to 200 characters and content to 1,000,000.
 
 There is no authentication yet: all documents are shared by everyone who can reach the API.
+
+## License
+
+reviewr is source-available under the [PolyForm Shield License 1.0.0](LICENSE.md). You may use, modify and share it for any purpose, including commercial use, except to provide a product that competes with reviewr.
