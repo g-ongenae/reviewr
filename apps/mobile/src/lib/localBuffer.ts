@@ -1,65 +1,29 @@
 /**
- * The local buffer: the text being written, kept in SQLite on the phone until the server confirmed it.
+ * The local buffer: the text being written, kept in SQLite on the phone until the server confirmed it. For each
+ * document it keeps the writer's latest text and its **base** (the server draft content and `draftVersion` the edits
+ * started from), so that the text survives the app being killed and can be compared three-way with the server later.
+ * The same contract as the web's `apps/web/src/autosave/localBuffer.ts`, behind a narrow `SqlDatabase` (`expo-sqlite`
+ * on the phone, `node:sqlite` in the tests).
  *
- * It keeps, for each document, the writer's latest text and the **base** it started from (the server draft content and
- * `draftVersion` the edits were made on), so the text can be restored after the app was killed or a request failed,
- * and compared three-way with the server's draft later. The key names the document, which may not exist on the server
- * yet: its `base` is then `null`, and its `page` holds what its creation needs.
+ * **Single writer.** One buffer on one connection for the life of the process (`deviceLocalBuffer()`), never replaced,
+ * one statement at a time: nothing else writes to the database, so an older write can never land after a newer one.
+ * The web's tab locks and per-tab copies are not needed. Each guarantee is documented on the API below.
  *
- * The same contract as the web's `apps/web/src/autosave/localBuffer.ts`, on SQLite and for one process. It is
- * framework-free (no React, no HTTP) and talks to the database through `SqlDatabase`, a narrow interface:
- * `deviceLocalBuffer()` gives it `expo-sqlite`, the tests give it Node's `node:sqlite`, so the same SQL runs in both.
+ * **What the editor must do (the next pull request):**
  *
- * **One buffer, one connection, one statement at a time, for the life of the process.** It is never replaced:
- * `deviceLocalBuffer()` always answers the same one. Every call goes through one queue, and a call starts only once
- * the one before it settled, so an older write can never land after a newer one.
+ * - Keep its latest text, and any confirmation not yet applied to the buffer, in memory whatever the buffer answers,
+ *   and show when the text is not kept on the device yet (`stalled`) or not at all (other failures).
+ * - After a failure or a stall, put the text again and re-run the conditional delete once the buffer answers. A
+ *   statement that timed out has an unknown outcome until the next successful write for that key.
+ * - A conditional delete that answers `ok` with nothing deleted means the row holds another text (or none): reconcile
+ *   it with what the server holds, never ignore it.
+ * - On start, compare each restored row with the server's current draft and with the row's base before anything is
+ *   autosaved. A row that diverges goes through the usual conflict, never straight over the server's draft: the row
+ *   alone cannot tell a stale snapshot from unsaved edits.
+ * - A read that fails is a failed restore (keep the notice, read again), not "nothing stored".
+ * - Keep unreadable rows, show them, and discard one (`discardUnreadable`) only on an explicit action.
  *
- * Guarantees:
- *
- * - **Call order.** The last `put` for a key wins even when calls overlap, a `delete` made before a later `put` never
- *   removes that later text, and a read sees every write made before it.
- * - **A put that answered `ok` is on disk.** Each write is one SQL statement, so an entry is the old one or the new
- *   one, never part of each, even if the app is killed during the write; commits are synced (`synchronous = FULL`).
- * - **Texts stored exactly.** Every text (key, content, base, page) is stored as JSON with every character outside
- *   printable ASCII escaped (`encodeText`), so the native layer only ever sees printable ASCII. `expo-sqlite` on iOS
- *   binds strings up to their first NUL and cannot carry a lone surrogate; neither can alter the stored value. Equal
- *   texts always encode the same, and different texts differently (composed and decomposed accents stay distinct).
- * - **Conditional delete.** `delete(key, { ifContent })` removes the entry only if it still holds exactly that text,
- *   compared in the same statement on the encoded form. A condition that is given but holds no string is refused.
- * - **A row it cannot read is reported, kept, and never overwritten by a routine write.** A row whose key, text, base
- *   or page is not exactly what `put` writes makes `get` answer `unreadable`, is listed in `list`'s `unreadable`, and
- *   makes a `put` for its key answer `unreadable` without writing. Only an explicit `discardUnreadable(rowid)` (or an
- *   unconditional `delete(key)`) removes it.
- * - **Never throws.** Every call resolves with `{ ok: false, reason }` on failure, which the app can show as one notice
- *   ("this text is not kept on this device"); reads then answer "nothing stored". The buffer holds no text of its own.
- *   A failed open is tried again by the next call.
- * - **Stalls are reported, and they end.** A call that the database does not answer within `operationTimeoutMs`
- *   (opening included) answers `stalled`. Its statement may still be running: `expo-sqlite` cannot cancel it, so its
- *   outcome is unknown until the next write for that key succeeds. Nothing runs beside it: the calls already waiting
- *   answer `stalled` and are dropped, and every call made while it runs answers `stalled` at once, without being
- *   kept, so memory stays bounded however long it lasts. A call whose time ran out before its statement started (the
- *   database was still opening) never starts it. Once the hung statement settles, the queue works again: the next
- *   `put` writes the latest text and the next confirmation deletes it, without a restart.
- * - **Versioned schema.** `PRAGMA user_version` is the number of schema steps applied. Opening applies the missing
- *   steps of `localBufferSchema` in one transaction, so an upgrade happens entirely or not at all and buffered text is
- *   kept across it. Later versions (the outbox) append a step. A database whose version this code does not know (newer
- *   than its schema, or invalid) is never changed: every call answers `unsupported`.
- * - **`close()` is for tests and shutdown only,** and bounded by `closeTimeoutMs`: it lets the calls made before it
- *   finish, then closes the connection, and answers `ok` only if both happened in time. A timeout answers `stalled`,
- *   a failed native close `failed`; the buffer refuses every call after `close()` in all cases.
- *
- * What the editor must do with it (the next pull request): keep the latest unsaved text in memory whatever the buffer
- * answers, show when it is not kept on the device yet (pending, `stalled`) or not at all (other failures), and write it
- * again on the next edit or when the buffer answers again; a statement that timed out has an unknown outcome until the
- * next successful write for that key.
- *
- * Left out, compared with the web: the phone runs one process, so there are no locks between tabs, no per-tab copies
- * of an entry, and no step aside for an upgrade made by another tab.
- *
- * Not done yet:
- *
- * - **Outbox.** Pending operations (create, save draft, save version, rename) and their replay on reconnect are a
- *   separate table, added by a later schema step.
+ * Not done yet: the outbox (pending creations, versions and renames), as a later schema step.
  */
 
 /** The server draft the local edits started from. */
@@ -137,15 +101,28 @@ export interface DeleteCondition {
   ifContent: string;
 }
 
+/**
+ * Every call resolves, never rejects, and runs after every call made before it: the last `put` for a key wins, a
+ * `delete` made before a later `put` never removes that later text, and a read sees every write made before it.
+ *
+ * A call the database does not answer within `operationTimeoutMs` (opening included) answers `stalled`; a write it had
+ * already started may still land (`expo-sqlite` cannot cancel it), one it had not started never starts. Until it
+ * settles nothing else runs: the calls waiting behind it and every call made meanwhile answer `stalled` and are not
+ * kept. Once it settles, calls run again, without a restart.
+ */
 export interface LocalBuffer {
   /** Reads the entry for `key`. */
   get(key: string): Promise<GetResult>;
   /**
    * Stores the latest text for `key` and the base it started from (or its page), replacing what was there, unless
-   * what is there cannot be read (`unreadable`).
+   * what is there cannot be read (`unreadable`). One statement, synced to disk: an `ok` is on disk, and a kill during
+   * the write leaves the old entry or the new one, never part of each.
    */
   put(key: string, value: { content: string; base: BufferBase | null; page?: BufferPage }): Promise<PutResult>;
-  /** Removes the entry for `key`, unconditionally or only if it still holds `condition.ifContent`. */
+  /**
+   * Removes the entry for `key`, unconditionally or only if it still holds exactly `condition.ifContent` (compared by
+   * the DELETE itself). A conditional delete answers `unreadable` and removes nothing when the row cannot be read.
+   */
   delete(key: string, condition?: DeleteCondition): Promise<DeleteResult>;
   /** Every entry, the most recently written first, and the rows that cannot be read. */
   list(): Promise<ListResult>;
@@ -175,7 +152,11 @@ export interface SqlDatabase {
 /** One schema step: run, inside the upgrade's transaction, when upgrading from version `index` to `index + 1`. */
 export type Migration = (db: SqlDatabase) => Promise<void>;
 
-/** The schema: the database version is its length. Append to it, never edit a step that shipped. */
+/**
+ * The schema: the database version (`PRAGMA user_version`) is its length. Append to it, never edit a step that
+ * shipped. The missing steps run in one transaction on open; a database at a version this code does not know is never
+ * changed, and every call answers `unsupported`.
+ */
 export const localBufferSchema: readonly Migration[] = [
   // 1: the buffered drafts. Every TEXT column holds `encodeText` of its value (`page`: the encoded JSON of the page,
   // only without a base), so that only printable ASCII crosses the native layer.
@@ -196,7 +177,11 @@ export const localBufferSchema: readonly Migration[] = [
 const toAscii = (json: string) =>
   json.replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
-/** A text as stored: its JSON string literal, in printable ASCII. One text, one encoding. */
+/**
+ * A text as stored: its JSON string literal, in printable ASCII. One text, one encoding (composed and decomposed accents
+ * stay distinct). `expo-sqlite` on iOS binds strings up to their first NUL and cannot carry a lone surrogate; only
+ * printable ASCII reaches it.
+ */
 export const encodeText = (text: string): string => toAscii(JSON.stringify(text));
 
 /**
@@ -350,7 +335,8 @@ const SELECT = `SELECT rowid, ${COLUMNS} FROM drafts`;
 
 /** One call: its operation, and how to answer its caller (the first answer wins). */
 interface Call {
-  run: (db: SqlDatabase) => Promise<void>;
+  /** `expired` turns true once the call answered `stalled`: a job checks it before each write it starts. */
+  run: (db: SqlDatabase, expired: () => boolean) => Promise<void>;
   fail: (failure: BufferFailure) => void;
 }
 
@@ -375,8 +361,14 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
 
   const stalledError = () => new BufferError('stalled', new Error('The database did not answer in time'));
 
+  /** The close of a handle whose upgrade failed: no new connection opens before it is confirmed. */
+  let cleanup: Promise<void> = Promise.resolve();
+  let cleanupFailed: { error: unknown } | undefined;
+
   const connect = (): Promise<SqlDatabase> => {
     const opening = (async () => {
+      await cleanup;
+      if (cleanupFailed !== undefined) throw new BufferError('failed', cleanupFailed.error);
       let db: SqlDatabase;
       try {
         db = await open();
@@ -386,7 +378,13 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
       try {
         await upgrade(db, schema);
       } catch (error) {
-        await db.close().catch(() => undefined);
+        // The call answers the upgrade's failure now; the handle's close is tracked apart.
+        cleanup = db.close().then(
+          () => undefined,
+          (closeError: unknown) => {
+            cleanupFailed = { error: closeError };
+          },
+        );
         throw error;
       }
       return db;
@@ -419,7 +417,7 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
       try {
         const db = await (connection ??= connect());
         // Its time ran out while the database was opening: the statement never starts late.
-        if (!timedOut) await call.run(db);
+        if (!timedOut) await call.run(db, () => timedOut);
       } catch (error) {
         call.fail(failure(error));
       } finally {
@@ -432,7 +430,10 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
   };
 
   /** Queues `operation`; answers at once when the buffer is closed or busy with a hung statement. */
-  const enqueue = <T>(operation: (db: SqlDatabase) => Promise<T>, onFailure: (failure: BufferFailure) => T) =>
+  const enqueue = <T>(
+    operation: (db: SqlDatabase, write: <R>(statement: () => Promise<R>) => Promise<R>) => Promise<T>,
+    onFailure: (failure: BufferFailure) => T,
+  ) =>
     new Promise<T>((resolve) => {
       let answered = false;
       const answer = (value: T) => {
@@ -444,7 +445,15 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
       if (closing !== undefined)
         return fail(failure(new BufferError('unavailable', new Error('The local buffer is closed'))));
       if (hung) return fail(failure(stalledError()));
-      waiting.push({ run: async (db) => answer(await operation(db)), fail });
+      // A write is started only while the call has not answered `stalled`, even after a read that answered late.
+      const run = async (db: SqlDatabase, expired: () => boolean) =>
+        answer(
+          await operation(db, (statement) => {
+            if (expired()) throw stalledError();
+            return statement();
+          }),
+        );
+      waiting.push({ run, fail });
       pump();
     });
 
@@ -513,19 +522,21 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
         return refuse(error, (failed): PutResult => failed);
       }
       return enqueue<PutResult>(
-        async (db) => {
+        async (db, write) => {
           // A row that cannot be read is kept for recovery, never replaced by a routine write.
           const [row] = await db.all(`${SELECT} WHERE key = ?`, [params[0] ?? null]);
           if (row !== undefined) {
             const decoded = decodeRow(row);
             if ('unreadable' in decoded) return { ok: false, reason: 'unreadable', error: decoded.unreadable.error };
           }
-          await db.run(
-            `INSERT INTO drafts (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)
+          await write(() =>
+            db.run(
+              `INSERT INTO drafts (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (key) DO UPDATE SET content = excluded.content, base_content = excluded.base_content,
                base_draft_version = excluded.base_draft_version, page = excluded.page,
                updated_at = excluded.updated_at`,
-            params,
+              params,
+            ),
           );
           return { ok: true };
         },
@@ -549,12 +560,22 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
       } catch (error) {
         return refuse(error, onFailure);
       }
-      return enqueue<DeleteResult>(async (db) => {
-        // One statement: the check and the delete cannot be split by a write.
-        const { changes } =
-          storedContent === undefined
-            ? await db.run('DELETE FROM drafts WHERE key = ?', [storedKey])
-            : await db.run('DELETE FROM drafts WHERE key = ? AND content = ?', [storedKey, storedContent]);
+      return enqueue<DeleteResult>(async (db, write) => {
+        if (storedContent === undefined) {
+          const { changes } = await db.run('DELETE FROM drafts WHERE key = ?', [storedKey]);
+          return { ok: true, deleted: changes > 0 };
+        }
+        // A confirmation never removes a row that cannot be read, even if its text matches.
+        const [row] = await db.all(`${SELECT} WHERE key = ?`, [storedKey]);
+        if (row === undefined) return { ok: true, deleted: false };
+        const decoded = decodeRow(row);
+        if ('unreadable' in decoded) {
+          return { ok: false, reason: 'unreadable', error: decoded.unreadable.error, deleted: false };
+        }
+        // The exact text is still compared by the DELETE itself.
+        const { changes } = await write(() =>
+          db.run('DELETE FROM drafts WHERE key = ? AND content = ?', [storedKey, storedContent]),
+        );
         return { ok: true, deleted: changes > 0 };
       }, onFailure);
     },
@@ -579,11 +600,11 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
       if (typeof rowid !== 'number' || !Number.isInteger(rowid)) {
         return refuse(invalid('The rowid must be an integer'), onFailure);
       }
-      return enqueue<DeleteResult>(async (db) => {
+      return enqueue<DeleteResult>(async (db, write) => {
         const [row] = await db.all(`${SELECT} WHERE rowid = ?`, [rowid]);
         // Gone, or readable (written again since): nothing to discard.
         if (row === undefined || 'entry' in decodeRow(row)) return { ok: true, deleted: false };
-        const { changes } = await db.run('DELETE FROM drafts WHERE rowid = ?', [rowid]);
+        const { changes } = await write(() => db.run('DELETE FROM drafts WHERE rowid = ?', [rowid]));
         return { ok: true, deleted: changes > 0 };
       }, onFailure);
     },
@@ -606,19 +627,15 @@ export const openLocalBuffer = (options: LocalBufferOptions): LocalBuffer => {
           }
           const pending = connection;
           connection = undefined;
-          if (pending === undefined) return { ok: true };
-          let db: SqlDatabase;
+          const db = await pending?.catch(() => undefined); // A failed open has no handle left to close.
           try {
-            db = await pending;
-          } catch {
-            return { ok: true }; // It never opened: nothing to close.
-          }
-          try {
-            await db.close();
-            return { ok: true };
+            await db?.close();
           } catch (error) {
             return failure(error);
           }
+          // A handle whose upgrade failed must be closed too.
+          await cleanup;
+          return cleanupFailed === undefined ? { ok: true } : failure(cleanupFailed.error);
         })();
         const result = await Promise.race([shutdown, deadline]);
         clearTimeout(timer);

@@ -299,6 +299,25 @@ describe('openLocalBuffer', () => {
       expect((await buffer.get('doc')).entry?.content).toBe('New');
     });
 
+    it('never lets a confirmation remove a row it cannot read, even when the text matches', async () => {
+      await setup().list();
+      inspect((db) => {
+        const insert = db.prepare('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)');
+        insert.run(encodeText('bad-base'), encodeText('A'), encodeText('Server'), 'three', null, 2);
+        insert.run(encodeText('bad-page'), encodeText('A'), null, null, encodeText('{not json'), 1);
+      });
+      const before = inspect((db) => db.prepare('SELECT * FROM drafts ORDER BY key').all());
+      const buffer = setup();
+      for (const key of ['bad-base', 'bad-page']) {
+        expect(await buffer.delete(key, { ifContent: 'A' })).toMatchObject({
+          ok: false,
+          reason: 'unreadable',
+          deleted: false,
+        });
+      }
+      expect(inspect((db) => db.prepare('SELECT * FROM drafts ORDER BY key').all())).toEqual(before);
+    });
+
     it('keeps an entry whole when the app is killed during its writes', async () => {
       // A child process writes 1 MB texts in a loop, through this module, and is killed with SIGKILL mid-loop.
       const modules = {
@@ -611,6 +630,51 @@ describe('openLocalBuffer', () => {
       expect(await buffer.delete('doc', { ifContent: 'Newer' })).toEqual({ ok: true, deleted: true });
     });
 
+    it('never starts a write after its own read answered late', async () => {
+      await setup().put('doc', { content: 'A', base });
+      inspect((db) =>
+        db
+          .prepare('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)')
+          .run(encodeText('bad'), 'Not encoded', null, null, null, 0),
+      );
+      const rowid = inspect(
+        (db) =>
+          (db.prepare('SELECT rowid FROM drafts WHERE key = ?').get(encodeText('bad')) as { rowid: number }).rowid,
+      );
+      let slowRead = false;
+      let runs = 0;
+      const buffer = setup({
+        operationTimeoutMs: 50,
+        open: async () => {
+          const db = nodeSqlDatabase(path);
+          return {
+            ...db,
+            all: async (sql, params) => {
+              if (slowRead) await sleep(150);
+              return db.all(sql, params);
+            },
+            run: (sql, params) => {
+              runs++;
+              return db.run(sql, params);
+            },
+          };
+        },
+      });
+      await buffer.list(); // Opened before the reads are slowed down.
+      slowRead = true;
+      for (const call of [
+        () => buffer.put('doc', { content: 'B', base }),
+        () => buffer.delete('doc', { ifContent: 'A' }),
+        () => buffer.discardUnreadable(rowid),
+      ]) {
+        expect(await call()).toMatchObject({ ok: false, reason: 'stalled' });
+        await sleep(150);
+      }
+      expect(runs).toBe(0);
+      slowRead = false;
+      expect((await buffer.get('doc')).entry?.content).toBe('A');
+    });
+
     it('recovers from a slow first open: the write that timed out never runs, the next one does', async () => {
       let runs = 0;
       const buffer = setup({
@@ -633,6 +697,38 @@ describe('openLocalBuffer', () => {
       expect(runs).toBe(0);
       expect(await buffer.put('doc', { content: 'Newer', base })).toEqual({ ok: true });
       expect((await buffer.get('doc')).entry?.content).toBe('Newer');
+    });
+  });
+
+  describe('a failed upgrade', () => {
+    const failing: Migration = () => Promise.reject(new Error('step failed'));
+
+    it('answers the failure, keeps the failed close of its handle for close(), and never opens again', async () => {
+      const closeError = new Error('close failed');
+      let opens = 0;
+      const buffer = setup({
+        schema: [...localBufferSchema, failing],
+        open: async () => {
+          opens++;
+          return { ...nodeSqlDatabase(path), close: () => Promise.reject(closeError) };
+        },
+      });
+      expect(await buffer.get('doc')).toMatchObject({ ok: false, reason: 'failed' });
+      expect(await buffer.get('doc')).toEqual({ ok: false, reason: 'failed', error: closeError, entry: undefined });
+      expect(opens).toBe(1);
+      expect(await buffer.close()).toEqual({ ok: false, reason: 'failed', error: closeError });
+    });
+
+    it('answers the failure at once, even when the close of its handle never answers', async () => {
+      const buffer = setup({
+        schema: [...localBufferSchema, failing],
+        operationTimeoutMs: 1000,
+        closeTimeoutMs: 50,
+        open: async () => ({ ...nodeSqlDatabase(path), close: () => new Promise<never>(() => undefined) }),
+      });
+      const result = await buffer.get('doc');
+      expect(result).toMatchObject({ ok: false, reason: 'failed' });
+      expect(!result.ok && (result.error as Error).message).toBe('step failed');
     });
   });
 
