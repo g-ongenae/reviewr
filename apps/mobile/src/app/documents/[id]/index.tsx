@@ -6,6 +6,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ToolbarActions, ToolbarButton } from '@/components/ToolbarButton';
+import { HistoryIcon, SaveIcon, TrashIcon } from '@/components/ToolbarIcons';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
 import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
@@ -172,17 +174,27 @@ const Editor = ({ document }: { document: Document }) => {
       <Stack.Screen
         options={{
           headerRight: () => (
-            <View style={styles.headerActions}>
-              <Pressable
-                hitSlop={8}
+            <ToolbarActions>
+              <ToolbarButton
+                label="History"
+                icon={HistoryIcon}
                 onPress={() => router.push({ pathname: '/documents/[id]/history', params: { id: document.id } })}
-              >
-                <Text style={[styles.headerButton, { color: theme.accent }]}>History</Text>
-              </Pressable>
-              <Pressable hitSlop={8} onPress={() => saveVersion.mutate()} disabled={!canSave}>
-                <Text style={[styles.headerButton, { color: canSave ? theme.accent : theme.muted }]}>Save version</Text>
-              </Pressable>
-            </View>
+              />
+              <ToolbarButton
+                label="Delete"
+                icon={TrashIcon}
+                kind="danger"
+                disabled={remove.isPending}
+                onPress={confirmDelete}
+              />
+              <ToolbarButton
+                label="Save version"
+                icon={SaveIcon}
+                kind="primary"
+                disabled={!canSave}
+                onPress={() => saveVersion.mutate()}
+              />
+            </ToolbarActions>
           ),
         }}
       />
@@ -244,9 +256,6 @@ const Editor = ({ document }: { document: Document }) => {
           scrollEnabled={false}
           textAlignVertical="top"
         />
-        <Pressable onPress={confirmDelete} disabled={remove.isPending} style={styles.deleteButton}>
-          <Text style={{ color: theme.danger }}>Delete document</Text>
-        </Pressable>
       </ScrollView>
     </View>
   );
@@ -255,8 +264,6 @@ const Editor = ({ document }: { document: Document }) => {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   message: { padding: 24, textAlign: 'center' },
-  headerActions: { flexDirection: 'row', gap: 20 },
-  headerButton: { fontSize: 16, fontWeight: '600' },
   statusBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -271,5 +278,4 @@ const styles = StyleSheet.create({
   held: { gap: 8, padding: 12, marginBottom: 12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 },
   titleInput: { fontSize: 26, fontWeight: '700', paddingVertical: 8 },
   contentInput: { flexGrow: 1, minHeight: 300, fontSize: 18, lineHeight: 28, fontFamily: 'serif' },
-  deleteButton: { alignSelf: 'center', padding: 16, marginTop: 24 },
 });

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ToolbarButton } from '@/components/ToolbarButton';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
 import { textMoved } from '@/lib/drafts';
@@ -104,13 +105,15 @@ export default function HistoryScreen() {
                   <>
                     <Text style={[styles.previewText, { color: theme.text }]}>{preview.data.content}</Text>
                     {item.revision !== currentRevision && (
-                      <Pressable
-                        style={[styles.restoreButton, { backgroundColor: theme.accent }]}
-                        disabled={restoring}
-                        onPress={() => void restore()}
-                      >
-                        <Text style={styles.restoreLabel}>{restoring ? 'Restoring…' : 'Restore into editor'}</Text>
-                      </Pressable>
+                      <View style={styles.restore}>
+                        <ToolbarButton
+                          label={restoring ? 'Restoring…' : 'Restore into editor'}
+                          text={restoring ? 'Restoring…' : 'Restore into editor'}
+                          kind="primary"
+                          disabled={restoring}
+                          onPress={() => void restore()}
+                        />
+                      </View>
                     )}
                   </>
                 )}
@@ -130,6 +133,5 @@ const styles = StyleSheet.create({
   title: { fontSize: 17, fontWeight: '500' },
   preview: { paddingHorizontal: 16, paddingBottom: 16, gap: 12 },
   previewText: { fontSize: 16, lineHeight: 24, fontFamily: 'serif' },
-  restoreButton: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6 },
-  restoreLabel: { color: '#fff', fontWeight: '600' },
+  restore: { alignSelf: 'flex-start' },
 });

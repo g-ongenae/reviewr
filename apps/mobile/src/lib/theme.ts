@@ -2,6 +2,8 @@ import { useColorScheme } from 'react-native';
 
 const light = {
   accent: '#db2777',
+  /** The accent of a pressed primary button, as the web's hover. */
+  accentDark: '#be185d',
   background: '#ffffff',
   surface: '#f4f4f5',
   border: '#e4e4e7',
