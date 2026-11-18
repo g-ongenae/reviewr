@@ -94,6 +94,7 @@ Web client — an autosave state machine, not just a debounce:
   - later: "keep all mine / all theirs" for texts with many conflicts;
   - the package's tests run on a real Hermes runtime in the CI (done): the same cases as on Node, from source and from bytecode, on the Hermes version of the mobile app's React Native; the tests of `@reviewr/autosave` run there too, asynchronous tests and fake timers included (done); later: a run on a real phone, of the bundle Metro builds (on Linux, Hermes uses ICU where Android and iOS use the platform's libraries, and the tests turn on Hermes' own block scoping where Metro's Babel preset rewrites `let` and `const` first);
 - flush before "Save version", navigation, `beforeunload` and tab hide (done for every document with unsaved text, including one already left; closing the page can still cut the last request short: the local buffer then brings the text back at the next start on this device);
+- later: a read of a document answered late can still put an older draft back in the web's cache after a newer one was saved (the mobile app has a rule against it, see below). No text is lost: a document reopened at that moment starts from the older text until the next read, and a text typed meanwhile shows a conflict with this tab's own save;
 - tests with delayed responses, failed requests, typing during creation, and offline edits reconciled against a moved server draft.
 
 Mobile — the same behaviour as the web, on the same packages; the phone is where offline writing happens most:
