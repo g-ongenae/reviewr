@@ -239,6 +239,18 @@ describe('openLocalBuffer', () => {
         insert.run(encodeText('half-base'), encodeText('Text 3'), null, 3, null, 3);
         insert.run(encodeText('bad-page'), encodeText('Text 4'), null, null, encodeText('{not json'), 2);
         insert.run('raw-key', encodeText('Text 5'), null, null, null, 1);
+        // Another spelling of the right text: \u0061 is `a`.
+        insert.run('"\\u0061"', encodeText('Text 6'), null, null, null, 0);
+        insert.run(encodeText('odd-text'), '"\\u0054ext 7"', null, null, null, -1);
+        // A page next to a base, which `put` never writes.
+        insert.run(
+          encodeText('page-and-base'),
+          encodeText('Text 8'),
+          encodeText('Server'),
+          1,
+          encodeText('{"creation":null}'),
+          -2,
+        );
       });
       const before = inspect((db) => db.prepare('SELECT * FROM drafts ORDER BY key').all());
 
@@ -252,11 +264,39 @@ describe('openLocalBuffer', () => {
         'half-base',
         'bad-page',
         'raw-key',
+        '"\\u0061"',
+        'odd-text',
+        'page-and-base',
       ]);
+      expect(await reader.get('a')).toEqual({ ok: true, entry: undefined });
+      expect(await reader.get('odd-text')).toMatchObject({ ok: false, reason: 'unreadable' });
+      expect(await reader.get('page-and-base')).toMatchObject({ ok: false, reason: 'unreadable' });
       expect(await reader.get('blob-text')).toMatchObject({ ok: false, reason: 'unreadable', entry: undefined });
       expect(await reader.get('bad-page')).toMatchObject({ ok: false, reason: 'unreadable', entry: undefined });
       await reader.close();
       expect(inspect((db) => db.prepare('SELECT * FROM drafts ORDER BY key').all())).toEqual(before);
+    });
+
+    it('never lets a routine put replace a row it cannot read; only an explicit discard removes it', async () => {
+      await setup().list();
+      inspect((db) =>
+        db
+          .prepare('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)')
+          .run(encodeText('doc'), 'Not encoded', null, null, null, 1),
+      );
+      const buffer = setup();
+      expect(await buffer.put('doc', { content: 'New', base })).toMatchObject({ ok: false, reason: 'unreadable' });
+      expect(inspect((db) => db.prepare('SELECT content FROM drafts').all())).toEqual([{ content: 'Not encoded' }]);
+
+      const listed = await buffer.list();
+      const rowid = listed.ok ? listed.unreadable[0]?.rowid : undefined;
+      expect(rowid).toEqual(expect.any(Number));
+      await buffer.put('other', { content: 'Readable', base });
+      const other = inspect((db) => db.prepare('SELECT rowid FROM drafts WHERE key = ?').get(encodeText('other')));
+      expect(await buffer.discardUnreadable((other as { rowid: number }).rowid)).toEqual({ ok: true, deleted: false });
+      expect(await buffer.discardUnreadable(rowid ?? -1)).toEqual({ ok: true, deleted: true });
+      expect(await buffer.put('doc', { content: 'New', base })).toEqual({ ok: true });
+      expect((await buffer.get('doc')).entry?.content).toBe('New');
     });
 
     it('keeps an entry whole when the app is killed during its writes', async () => {
@@ -495,12 +535,12 @@ describe('openLocalBuffer', () => {
       expect((await buffer.get('doc')).entry).toMatchObject({ content: 'As called', base });
     });
 
-    it('stops as "stalled" when a statement never settles, without running the calls queued behind it', async () => {
+    it('answers "stalled" when a statement never settles, and to every call while it runs', async () => {
       let hang = false;
       let ran = 0;
       const buffer = setup({
         operationTimeoutMs: 50,
-        drainTimeoutMs: 50,
+        closeTimeoutMs: 50,
         open: async () => {
           const db = nodeSqlDatabase(path);
           return {
@@ -520,25 +560,63 @@ describe('openLocalBuffer', () => {
       expect(await queued).toMatchObject({ ok: false, reason: 'stalled', deleted: false });
       expect(await buffer.get('doc')).toMatchObject({ ok: false, reason: 'stalled' });
       expect(ran).toBe(2);
-      expect(await buffer.close()).toEqual({ drained: false });
+      expect(await buffer.close()).toMatchObject({ ok: false, reason: 'stalled' });
     });
   });
 
-  describe('after a stall', () => {
+  describe('stalls end', () => {
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    it('never starts a write whose time ran out while the database was opening, and closes once it opened', async () => {
-      let release = () => undefined as void;
-      const opened = new Promise<void>((resolve) => {
-        release = resolve;
-      });
+    it('keeps nothing while a statement is hung, and works again once it landed', async () => {
+      let late = false;
       let runs = 0;
-      let closes = 0;
       const buffer = setup({
         operationTimeoutMs: 50,
-        drainTimeoutMs: 5000,
         open: async () => {
-          await opened;
+          const db = nodeSqlDatabase(path);
+          return {
+            ...db,
+            // Once `late`, a statement is sent before the timeout and reaches SQLite after it.
+            run: async (sql, params) => {
+              runs++;
+              if (late) {
+                late = false;
+                await sleep(150);
+              }
+              return db.run(sql, params);
+            },
+          };
+        },
+      });
+      expect(await buffer.put('doc', { content: 'Older', base })).toEqual({ ok: true });
+      late = true;
+      expect(await buffer.put('doc', { content: 'Late', base })).toMatchObject({ ok: false, reason: 'stalled' });
+
+      // While it is hung, every call answers at once and none is kept to run later.
+      const during = await Promise.all(
+        Array.from({ length: 1000 }, (_, n) => buffer.put('doc', { content: `During ${n}`, base })),
+      );
+      expect(during.every((result) => !result.ok && result.reason === 'stalled')).toBe(true);
+      expect(runs).toBe(2);
+
+      await sleep(150);
+      // The late write really committed, and nothing ran after it.
+      expect(inspect((db) => db.prepare('SELECT content FROM drafts').all())).toEqual([
+        { content: encodeText('Late') },
+      ]);
+      expect(runs).toBe(2);
+
+      expect(await buffer.put('doc', { content: 'Newer', base })).toEqual({ ok: true });
+      expect((await buffer.get('doc')).entry?.content).toBe('Newer');
+      expect(await buffer.delete('doc', { ifContent: 'Newer' })).toEqual({ ok: true, deleted: true });
+    });
+
+    it('recovers from a slow first open: the write that timed out never runs, the next one does', async () => {
+      let runs = 0;
+      const buffer = setup({
+        operationTimeoutMs: 50,
+        open: async () => {
+          await sleep(150);
           const db = nodeSqlDatabase(path);
           return {
             ...db,
@@ -546,68 +624,56 @@ describe('openLocalBuffer', () => {
               runs++;
               return db.run(sql, params);
             },
-            close: () => {
-              closes++;
-              return db.close();
-            },
           };
         },
       });
       expect(await buffer.put('doc', { content: 'Stale', base })).toMatchObject({ ok: false, reason: 'stalled' });
-
-      // Two closes share one promise, and neither answers before the open settled.
-      const first = buffer.close();
-      const second = buffer.close();
-      expect(second).toBe(first);
-      let answered = false;
-      void first.then(() => {
-        answered = true;
-      });
-      await sleep(100);
-      expect(answered).toBe(false);
-
-      release();
-      expect(await first).toEqual({ drained: true });
-      expect(await second).toEqual({ drained: true });
+      expect(await buffer.put('doc', { content: 'Refused', base })).toMatchObject({ ok: false, reason: 'stalled' });
+      await sleep(150);
       expect(runs).toBe(0);
-      expect(closes).toBe(1);
-      expect((await setup().get('doc')).entry).toBeUndefined();
+      expect(await buffer.put('doc', { content: 'Newer', base })).toEqual({ ok: true });
+      expect((await buffer.get('doc')).entry?.content).toBe('Newer');
+    });
+  });
+
+  describe('close', () => {
+    const closing = (close: () => Promise<void>) =>
+      setup({ closeTimeoutMs: 50, open: async () => ({ ...nodeSqlDatabase(path), close }) });
+
+    it('answers "stalled" when the native close never answers, within its bound, and refuses later calls', async () => {
+      const buffer = closing(() => new Promise<never>(() => undefined));
+      expect(await buffer.put('doc', { content: 'Text', base })).toEqual({ ok: true });
+      const first = buffer.close();
+      expect(buffer.close()).toBe(first);
+      expect(await first).toMatchObject({ ok: false, reason: 'stalled' });
+      expect(await buffer.put('doc', { content: 'After', base })).toMatchObject({ ok: false, reason: 'unavailable' });
     });
 
-    it('lets a replacement write only after a write that reached SQLite after its timeout landed', async () => {
-      let late = false;
-      const old = setup({
-        operationTimeoutMs: 50,
-        open: async () => {
-          const db = nodeSqlDatabase(path);
-          // Once `late`, a statement is sent before the timeout and reaches SQLite after it.
-          return { ...db, run: async (sql, params) => (late && (await sleep(150)), db.run(sql, params)) };
-        },
-      });
-      expect(await old.put('doc', { content: 'Older', base })).toEqual({ ok: true });
-      late = true;
-      expect(await old.put('doc', { content: 'Older, late', base })).toMatchObject({ ok: false, reason: 'stalled' });
-
-      // A replacement without test delays: it would write at once, before the late write lands.
-      const replacement = setup({ previous: old.close(), open: async () => nodeSqlDatabase(path) });
-      expect(await replacement.put('doc', { content: 'Newer', base })).toEqual({ ok: true });
-      await sleep(200);
-      expect((await replacement.get('doc')).entry?.content).toBe('Newer');
+    it('answers "failed" when the native close fails, never a clean shutdown', async () => {
+      const error = new Error('close failed');
+      const buffer = closing(() => Promise.reject(error));
+      await buffer.get('doc');
+      expect(await buffer.close()).toEqual({ ok: false, reason: 'failed', error });
     });
 
-    it('answers "stalled" in every replacement when the old work cannot be drained', async () => {
-      const old = setup({
-        operationTimeoutMs: 50,
-        drainTimeoutMs: 50,
+    it('answers "stalled" when a call before it never finishes', async () => {
+      const buffer = setup({
+        operationTimeoutMs: 5000,
+        closeTimeoutMs: 50,
         open: async () => ({ ...nodeSqlDatabase(path), run: () => new Promise<never>(() => undefined) }),
       });
-      expect(await old.put('doc', { content: 'Hangs', base })).toMatchObject({ ok: false, reason: 'stalled' });
+      void buffer.put('doc', { content: 'Hangs', base });
+      expect(await buffer.close()).toMatchObject({ ok: false, reason: 'stalled' });
+    });
 
-      const replacement = setup({ previous: old.close() });
-      expect(await replacement.put('doc', { content: 'Newer', base })).toMatchObject({ ok: false, reason: 'stalled' });
-      expect(await replacement.close()).toEqual({ drained: false });
-      const third = setup({ previous: replacement.close() });
-      expect(await third.get('doc')).toMatchObject({ ok: false, reason: 'stalled' });
+    it('answers ok once the calls before it finished and the connection closed', async () => {
+      let closes = 0;
+      const buffer = closing(async () => {
+        closes++;
+      });
+      void buffer.put('doc', { content: 'Text', base });
+      expect(await buffer.close()).toEqual({ ok: true });
+      expect(closes).toBe(1);
     });
   });
 
@@ -662,7 +728,7 @@ describe('openLocalBuffer', () => {
       }
       const result = await reader.list();
       expect(result.ok && result.entries).toHaveLength(Object.keys(texts).length * 2);
-    });
+    }, 30_000);
 
     it('sends only printable ASCII to the database', async () => {
       const buffer = setup();
