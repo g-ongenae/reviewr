@@ -104,7 +104,10 @@ Mobile — the same behaviour as the web, on the same packages; the phone is whe
 - restore goes into the editor (done), and the text it replaces is first kept as a version named "Before restore" when it is in no version; the web's restore follows the same rule (done), and restores nothing when that version cannot be made; later: a title renamed since the last version, with the text unchanged, is in no version and a restore still replaces it (see the title changed alone, above);
 - a read answered late never puts an older draft, revision or title back as if it were saved (done);
 - later: naming a version and the version names in the history; creating a document as a draft-only document;
-- later: a local buffer and the offline outbox (SQLite); until then a text typed while the server is unreachable is retried from memory only, and is lost if the app is killed;
+- local buffer and offline outbox (SQLite):
+  - the storage module `apps/mobile/src/lib/localBuffer.ts` on `expo-sqlite` (done): each document's local text with its base, writes in call order, a delete conditional on the confirmed text, nothing thrown into the editor, and a versioned schema that leaves a database written by a newer build untouched; tested with real SQL on Node, a writer killed in the middle of a write included; not run on a phone yet;
+  - later: used from the editor (written on every edit, deleted once the server confirmed that text, restored on start, one notice when the text cannot be kept); until then a text typed while the server is unreachable is retried from memory only, and is lost if the app is killed. It needs a new build of the app, since `expo-sqlite` is a native module;
+  - later: the outbox (versions, creations and renames made offline);
 - later: share with the web what each app now has of its own (reading a failed save, the "Save version" loop, the rule against late reads).
 
 Done: e2e tests for draft conflicts, version creation and the migration on a populated old database; merge fixtures (French prose, overlapping and adjacent edits, deletions on one side); a day written offline on the phone reconciles with edits made on the web.
