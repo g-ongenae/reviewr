@@ -2,6 +2,7 @@ import { displayTitle } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { router, Stack } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ToolbarButton } from '@/components/ToolbarButton';
 import { api, apiUrl, inlineError, queryKeys } from '@/lib/api';
 import { formatDate } from '@/lib/format';
 import { useTheme } from '@/lib/theme';
@@ -29,9 +30,13 @@ export default function DocumentListScreen() {
       <Stack.Screen
         options={{
           headerRight: () => (
-            <Pressable onPress={() => create.mutate()} disabled={create.isPending} hitSlop={12}>
-              <Text style={[styles.headerButton, { color: theme.accent }]}>New</Text>
-            </Pressable>
+            <ToolbarButton
+              label="New document"
+              text="+ New"
+              kind="primary"
+              disabled={create.isPending}
+              onPress={() => create.mutate()}
+            />
           ),
         }}
       />
@@ -73,7 +78,6 @@ export default function DocumentListScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  headerButton: { fontSize: 16, fontWeight: '600' },
   message: { padding: 24, textAlign: 'center' },
   separator: { height: StyleSheet.hairlineWidth, marginLeft: 16 },
   item: { paddingHorizontal: 16, paddingVertical: 14, gap: 4 },
