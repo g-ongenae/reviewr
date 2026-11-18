@@ -11,6 +11,7 @@ import { HistoryIcon, SaveIcon, StatsIcon, TrashIcon } from '@/components/Toolba
 import { WritingStatsPanel } from '@/components/WritingStats';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
+import { askToDelete, type SeenPair } from '@/lib/askToDelete';
 import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
 import type { TitleState } from '@/lib/title';
 import { useTheme } from '@/lib/theme';
@@ -117,8 +118,12 @@ const Editor = ({ document }: { document: Document }) => {
 
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
+  /**
+   * Deletes the document with the pair this screen showed when the confirmation opened (see `askToDelete`). Until the
+   * answer, the text, the title and "Save version" are frozen.
+   */
   const remove = useMutation({
-    mutationFn: () => api.deleteDocument(document.id),
+    mutationFn: (seen: SeenPair) => api.deleteDocument(document.id, seen),
     onSuccess: async () => {
       drafts.discard(document.id);
       queryClient.removeQueries({ queryKey: queryKeys.document(document.id) });
@@ -128,16 +133,30 @@ const Editor = ({ document }: { document: Document }) => {
     onError: (error) => {
       const message = inlineError(error);
       if (message !== undefined) Alert.alert('Could not delete', message);
+      // Changed elsewhere: read it again. A newer draft goes to the autosave, which never replaces unsaved text with it.
+      if (conflictOf(error)?.code === 'document_changed') {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.document(document.id), exact: true });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(document.id) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
+      }
     },
   });
+  const frozen = remove.isPending;
 
   const confirmDelete = () =>
-    Alert.alert('Delete document?', 'This also deletes its whole history.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => remove.mutate() },
-    ]);
+    askToDelete(
+      { state, revision: document.revision, writing: saveVersion.isPending || busy },
+      (onConfirm) =>
+        Alert.alert('Delete document?', 'This also deletes its whole history.', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Delete', style: 'destructive', onPress: onConfirm },
+        ]),
+      (seen) => remove.mutate(seen),
+      (message) => Alert.alert('Could not delete', message),
+    );
 
   const canSave =
+    !frozen &&
     changedSinceVersion &&
     !saveVersion.isPending &&
     !busy &&
@@ -228,6 +247,8 @@ const Editor = ({ document }: { document: Document }) => {
           {notice.keepMine === true && (
             <Pressable
               style={[styles.noticeButton, { backgroundColor: theme.accent }]}
+              // Off while a delete is pending, as the text: a conflict a read brings then waits for the answer.
+              disabled={frozen}
               onPress={() => void drafts.keepMine(document.id)}
             >
               <Text style={styles.noticeButtonLabel}>Keep mine</Text>
@@ -256,6 +277,7 @@ const Editor = ({ document }: { document: Document }) => {
         ))}
         <TextInput
           style={[styles.titleInput, { color: theme.text }]}
+          editable={!frozen}
           placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
           placeholderTextColor={theme.muted}
           value={titleState.value}
@@ -270,7 +292,7 @@ const Editor = ({ document }: { document: Document }) => {
           value={content}
           maxLength={contentMaxLength}
           // Read-only while "Keep mine" runs: it saves the text it was given.
-          editable={!busy}
+          editable={!busy && !frozen}
           onChangeText={autosave.edit}
           multiline
           scrollEnabled={false}

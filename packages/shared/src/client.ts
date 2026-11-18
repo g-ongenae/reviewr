@@ -3,6 +3,7 @@ import type {
   CreateDocumentInput,
   CreateDraftDocumentInput,
   CreateRevisionInput,
+  DeleteDocumentInput,
   Document,
   DocumentDraft,
   DocumentSummary,
@@ -118,10 +119,17 @@ export class ReviewrClient {
   }
 
   /**
-   * Delete a document and its history.
+   * Delete a document and its history. With `seen` (the head revision and `draftVersion` last read), the document is
+   * deleted only if neither moved since: otherwise nothing is deleted and the call rejects with a 409 `ApiError`
+   * whose body is a `DocumentChangedBody` (read it with `conflictOf`), holding what the server has now.
    */
-  public async deleteDocument(id: string): Promise<void> {
-    return this.request('DELETE', documentPath(id));
+  public async deleteDocument(id: string, seen?: DeleteDocumentInput): Promise<void> {
+    const query: string =
+      seen === undefined
+        ? ''
+        : `?${new URLSearchParams({ revision: String(seen.revision), draftVersion: String(seen.draftVersion) }).toString()}`;
+
+    return this.request('DELETE', `${documentPath(id)}${query}`);
   }
 
   /**

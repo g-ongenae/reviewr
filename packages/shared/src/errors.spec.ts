@@ -70,6 +70,19 @@ describe('describeError', () => {
     expect(describeError(new ApiError(502, undefined))).toBe('Server unreachable');
   });
 
+  it('says in plain words that a delete refused for a moved document deleted nothing', () => {
+    const error: ApiError = new ApiError(409, {
+      statusCode: 409,
+      message: 'Document was modified elsewhere: it is at revision 2',
+      code: 'document_changed',
+      revision: 2,
+      draft: { content: 'x', draftVersion: 3, baseRevision: 2 },
+    } as never);
+    expect(describeError(error)).toBe(
+      'This document was changed elsewhere since this screen read it, so it was not deleted. Check its text, then delete it again if you still mean to.',
+    );
+  });
+
   it('uses the message sent by the API', () => {
     expect(describeError(new ApiError(404, { statusCode: 404, message: 'Document not found' }))).toBe(
       'Document not found',

@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import type {
   ConflictBody,
+  DeleteDocumentInput,
   Document,
   DocumentDraft,
   DocumentSummary,
@@ -420,13 +421,40 @@ export class DocumentsService {
 
   /**
    * Delete a document and its whole history.
+   *
+   * With `seen`, only if the head revision and the draft's `draftVersion` are still the ones the client saw;
+   * otherwise nothing is deleted and the call fails with 409 `document_changed`, holding the current head revision
+   * and draft. The check is part of the DELETE statement: a save that holds the row makes it wait, and it then
+   * decides on the committed row, so a text saved between the client's read and the delete is never destroyed.
+   * Both counters only grow, so the row read for the 409 can never match `seen` again.
    */
-  public async delete(id: string): Promise<void> {
+  public async delete(id: string, seen?: DeleteDocumentInput): Promise<void> {
+    if (seen === undefined) {
+      const deleted: { id: string }[] = await this.db
+        .delete(documents)
+        .where(eq(documents.id, id))
+        .returning({ id: documents.id });
+      assertFound(deleted[0], id);
+
+      return;
+    }
     const deleted: { id: string }[] = await this.db
       .delete(documents)
-      .where(eq(documents.id, id))
+      .where(
+        and(eq(documents.id, id), eq(documents.revision, seen.revision), eq(documents.draftVersion, seen.draftVersion)),
+      )
       .returning({ id: documents.id });
-    assertFound(deleted[0], id);
+    if (deleted.length > 0) {
+      return;
+    }
+    const [row] = await this.db.select().from(documents).where(eq(documents.id, id));
+    const current: DocumentRow = assertFound(row, id);
+    throw conflict({
+      code: 'document_changed',
+      message: `Document was modified elsewhere: it is at revision ${current.revision} and draft version ${current.draftVersion}, the delete is based on revision ${seen.revision} and draft version ${seen.draftVersion}`,
+      revision: current.revision,
+      draft: toDocumentDraft(current),
+    });
   }
 
   /**

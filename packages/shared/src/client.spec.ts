@@ -136,6 +136,48 @@ describe('ReviewrClient.nameRevision', () => {
   });
 });
 
+describe('ReviewrClient.deleteDocument', () => {
+  it('sends no precondition when none is given, as builds already installed do', async () => {
+    const fetchFn = vi.fn(async () => new Response(undefined, { status: 204 }));
+    const client: ReviewrClient = new ReviewrClient('http://api.test', fetchFn);
+
+    await expect(client.deleteDocument('a/b')).resolves.toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents/a%2Fb',
+      expect.objectContaining({ method: 'DELETE', body: undefined }),
+    );
+  });
+
+  it('sends what it saw as query parameters', async () => {
+    const fetchFn = vi.fn(async () => new Response(undefined, { status: 204 }));
+    const client: ReviewrClient = new ReviewrClient('http://api.test', fetchFn);
+
+    await client.deleteDocument('id', { revision: 0, draftVersion: 4 });
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents/id?revision=0&draftVersion=4',
+      expect.objectContaining({ method: 'DELETE', body: undefined }),
+    );
+  });
+
+  it('exposes what the server holds now through conflictOf when the document moved', async () => {
+    const body = {
+      statusCode: 409,
+      error: 'Conflict',
+      message: 'moved',
+      code: 'document_changed',
+      revision: 2,
+      draft: serverDraft,
+    };
+    const client: ReviewrClient = new ReviewrClient(
+      'http://api.test',
+      vi.fn(async () => jsonResponse(409, body)),
+    );
+
+    const error: unknown = await client.deleteDocument('id', { revision: 1, draftVersion: 2 }).catch((e: unknown) => e);
+    expect(conflictOf(error)).toEqual(body);
+  });
+});
+
 describe('conflictOf', () => {
   const conflict409 = (body: object): ApiError => new ApiError(409, { statusCode: 409, message: 'Conflict', ...body });
 
@@ -150,6 +192,11 @@ describe('conflictOf', () => {
     // eslint-disable-next-line no-null/no-null -- the API sends JSON null
     const draft: DocumentDraft = { ...serverDraft, baseRevision: null };
     expect(conflictOf(conflict409({ code: 'draft_conflict', draft }))).toMatchObject({ draft });
+  });
+
+  it('returns a well-formed document_changed body, also for a document without a revision', () => {
+    const body = { code: 'document_changed', revision: 0, draft: serverDraft };
+    expect(conflictOf(conflict409(body))).toMatchObject(body);
   });
 
   it('ignores errors that are not structured 409s', () => {
@@ -175,6 +222,9 @@ describe('conflictOf', () => {
     ['a fractional baseRevision', { code: 'draft_conflict', draft: { ...serverDraft, baseRevision: 1.5 } }],
     ['no revision', { code: 'stale_revision' }],
     ['a string revision', { code: 'stale_revision', revision: '2' }],
+    ['a document_changed without draft', { code: 'document_changed', revision: 1 }],
+    ['a document_changed without revision', { code: 'document_changed', draft: serverDraft }],
+    ['a negative revision', { code: 'document_changed', revision: -1, draft: serverDraft }],
   ])('rejects a known code with %s', (_case: string, body: object) => {
     expect(conflictOf(conflict409(body))).toBeUndefined();
   });

@@ -1,4 +1,11 @@
-import type { ConflictBody, CreateRevisionInput, Document, DocumentDraft, SaveDraftInput } from '@reviewr/shared';
+import type {
+  ConflictBody,
+  CreateRevisionInput,
+  DeleteDocumentInput,
+  Document,
+  DocumentDraft,
+  SaveDraftInput,
+} from '@reviewr/shared';
 import { ApiError } from '@reviewr/shared';
 import type { DraftsApi } from './drafts';
 
@@ -112,8 +119,20 @@ export class FakeApi implements DraftsApi {
     return this.read();
   }
 
+  /** Deletes the document, only if it is still as `seen` when given (`document_changed` otherwise). */
+  async deleteDocument(_id: string, seen?: DeleteDocumentInput): Promise<void> {
+    await this.gate(seen === undefined ? 'deleteDocument' : `deleteDocument ${seen.revision} ${seen.draftVersion}`);
+    if (seen !== undefined && (seen.revision !== this.document.revision || seen.draftVersion !== this.draft.draftVersion)) {
+      throw this.conflict({ code: 'document_changed', revision: this.document.revision, draft: this.draft });
+    }
+    this.gone = true;
+  }
+
   private conflict(
-    body: { code: 'draft_conflict'; draft: DocumentDraft } | { code: 'stale_revision'; revision: number },
+    body:
+      | { code: 'draft_conflict'; draft: DocumentDraft }
+      | { code: 'stale_revision'; revision: number }
+      | { code: 'document_changed'; revision: number; draft: DocumentDraft },
   ) {
     return new ApiError(409, { statusCode: 409, message: 'Conflict', ...structuredClone(body) } as ConflictBody);
   }

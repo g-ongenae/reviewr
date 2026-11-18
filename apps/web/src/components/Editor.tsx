@@ -15,6 +15,7 @@ import type { ReactNode } from 'react';
 import { useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
 import type { AutosaveState } from '../autosave/autosave';
+import { deleteAsSeen } from '../autosave/autosave';
 import {
   cacheDocument,
   discardAutosave,
@@ -269,6 +270,8 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   /** Saves the text on screen now as a version; the writer goes back to the text. */
   const saveVersion = (name?: string) => {
     const trimmed = name?.trim().slice(0, revisionNameMaxLength);
+    remove.reset();
+    setDeleteRefused(undefined);
     save.mutate({ name: trimmed === '' ? undefined : trimmed, text: content });
     if (versionName !== undefined) {
       setVersionName(undefined);
@@ -314,8 +317,21 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   const otherPages = usePagesNotCreated(document.id);
   const pages = isNew ? otherPages : [];
 
+  /**
+   * Deletes the document with the pair this screen showed when the confirmation opened (see `deleteAsSeen`). Until the
+   * answer, this editor is frozen: no edit, version, restore or merge.
+   */
   const remove = useMutation({
-    mutationFn: () => api.deleteDocument(document.id),
+    mutationFn: (seen: { revision: number; draftVersion: number }) => api.deleteDocument(document.id, seen),
+    onError: async (error) => {
+      if (conflictOf(error)?.code !== 'document_changed') return;
+      // Read it again through the normal path: a newer draft reaches the autosave, which never replaces unsaved text.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.document(document.id), exact: true }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.revisions(document.id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
+      ]);
+    },
     onSuccess: async () => {
       discard();
       setUnsavedChanges(false);
@@ -325,7 +341,26 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
     },
   });
 
+  /** A delete is waiting for its answer: this editor writes nothing meanwhile. */
+  const frozen = remove.isPending;
+  /** Why the last delete was not asked: the screen was not in a state to delete from. */
+  const [deleteRefused, setDeleteRefused] = useState<string | undefined>(undefined);
+  /** Takes the pair this render shows, then asks: whatever arrives while the dialog is open, the delete carries it. */
+  const confirmDelete = () => {
+    const decision = deleteAsSeen({
+      state,
+      revision: document.revision,
+      writing: save.isPending || sessionState.running || restores.restoring !== undefined,
+    });
+    remove.reset();
+    setDeleteRefused('refused' in decision ? decision.refused : undefined);
+    if ('refused' in decision || !window.confirm('Delete this document and its whole history?')) return;
+    save.reset();
+    remove.mutate(decision.seen);
+  };
+
   const canSave =
+    !frozen &&
     changedSinceVersion &&
     // A blank page is never created: there is nothing to save as a version.
     (!isNew || content.trim() !== '') &&
@@ -355,7 +390,9 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   // Closing the page is guarded for every document at once, by `useAutosaveGuard` in the app.
 
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
-  const actionError = save.isError ? versionError(save.error, state) : inlineError(remove.error);
+  const actionError = save.isError ? versionError(save.error, state) : undefined;
+  /** Why the last delete deleted nothing: shown above any other notice, until the writer does something else. */
+  const deleteError = deleteRefused ?? inlineError(remove.error);
   const { result: pendingResult, stop } = sessionState;
   /** The view replaces the text only while there is a conflict: once it is resolved, the text comes back. */
   const showReconciliation = reconciling && state.status === 'conflict';
@@ -404,7 +441,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
           <button
             className="toolbar-action danger"
             disabled={isNew || remove.isPending}
-            onClick={() => window.confirm('Delete this document and its whole history?') && remove.mutate()}
+            onClick={confirmDelete}
             aria-label="Delete"
             title="Delete"
           >
@@ -481,6 +518,11 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
           </div>
         )}
 
+        {deleteError && (
+          <div className="banner error" role="alert">
+            {deleteError}
+          </div>
+        )}
         {state.status === 'rejected' ? (
           <div className="banner error" role="alert">
             <span>
@@ -506,7 +548,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
                 Your text is intact. Some versions may already have been kept in the history.
               </span>
               {!showReconciliation && (
-                <button className="primary" onClick={() => setReconciling(true)}>
+                <button className="primary" disabled={frozen} onClick={() => setReconciling(true)}>
                   Compare and merge
                 </button>
               )}
@@ -515,7 +557,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
             !showReconciliation && (
               <div className="banner" role="alert">
                 <span>This text was also changed on another device.</span>
-                <button className="primary" onClick={() => setReconciling(true)}>
+                <button className="primary" disabled={frozen} onClick={() => setReconciling(true)}>
                   Compare and merge
                 </button>
               </div>
@@ -621,6 +663,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
               placeholder={displayTitle({ title: undefined, createdAt: document.createdAt })}
               value={title}
               maxLength={titleMaxLength}
+              readOnly={frozen}
               onChange={(event) => editTitle(event.target.value)}
               onBlur={() => {
                 if (!isNew && titleDirty && !rename.isPending) sendTitle(title, titleEdit);
@@ -633,7 +676,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
               placeholder={welcome ? undefined : 'Start writing…'}
               value={content}
               maxLength={contentMaxLength}
-              readOnly={busy}
+              readOnly={busy || frozen}
               onChange={(event) => autosave.edit(event.target.value)}
               autoFocus
             />
@@ -650,7 +693,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
       {showHistory && (
         <RevisionHistory
           document={document}
-          restoreDisabled={busy}
+          restoreDisabled={busy || frozen}
           restoring={restores.restoring}
           notRestored={restores.notRestored}
           // The text on screen is first kept as a version when it is in no version: see `restore`.

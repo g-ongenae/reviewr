@@ -1,7 +1,7 @@
 /* eslint-disable no-null/no-null -- an unnamed version is sent as null, as the API does */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
-import { ConflictException, UnprocessableEntityException } from '@nestjs/common';
+import { ConflictException, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import type { ConflictBody, Document, DocumentDraft } from '@reviewr/shared';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
@@ -267,6 +267,33 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
       expect(result).toMatchObject({ ok: true, value: { revision: 2, content: 'v2' } });
       expect(await revisionsOf(doc.id)).toHaveLength(2);
     });
+    it('a delete with what the client saw answers document_changed when the draft moved while it waited', async () => {
+      const doc = await create('v1');
+      const result = await whileLocked(
+        doc.id,
+        async () => service.delete(doc.id, { revision: 1, draftVersion: 1 }),
+        async (holder) =>
+          holder.query(`UPDATE documents SET draft_content = 'two pages', draft_version = 2 WHERE id = $1`, [doc.id]),
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        conflict: { code: 'document_changed', revision: 1, draft: { content: 'two pages', draftVersion: 2 } },
+      });
+      expect((await service.get(doc.id)).draft?.content).toBe('two pages');
+    });
+
+    it('a delete with what the client saw deletes once the row it waited for is unchanged', async () => {
+      const doc = await create('v1');
+      const result = await whileLocked(
+        doc.id,
+        async () => service.delete(doc.id, { revision: 1, draftVersion: 1 }),
+        async () => undefined,
+      );
+
+      expect(result).toEqual({ ok: true, value: undefined });
+      expect(await revisionsOf(doc.id)).toEqual([]);
+    });
   });
 
   describe('races', { timeout: raceTimeout }, () => {
@@ -438,6 +465,33 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
       }
       // eslint-disable-next-line no-console -- shows in the CI log that both orders were exercised
       console.info(`update vs saveDraft orders seen: ${[...orders].join(', ')}`);
+    });
+    // Claims no order: the one where the save lands first is forced by the lock-holder test above. Whatever order the
+    // server picks, a draft it acknowledged is never deleted, and a delete it acknowledged left no document behind.
+    it('a delete with what the client saw racing saveDraft never destroys an acknowledged text', async () => {
+      for (let round: number = 0; round < rounds; round += 1) {
+        const doc = await create('v1');
+        const [removed, draft] = await Promise.all([
+          settle(service.delete(doc.id, { revision: 1, draftVersion: 1 })),
+          service.saveDraft(doc.id, { content: 'two pages', draftVersion: 1 }).then(
+            (saved) => ({ ok: true as const, saved }),
+            (error: unknown) => ({ ok: false as const, error }),
+          ),
+        ]);
+        const { rows } = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM documents WHERE id = $1', [
+          doc.id,
+        ]);
+
+        // Exactly one of the two went through, and the other one says why.
+        expect(removed.ok).toBe(!draft.ok);
+        if (draft.ok) {
+          expect(removed.ok ? undefined : removed.conflict).toMatchObject({ code: 'document_changed' });
+          expect((await service.get(doc.id)).draft?.content).toBe('two pages');
+        } else {
+          expect(draft.error).toBeInstanceOf(NotFoundException);
+          expect(rows[0]?.n).toBe(0);
+        }
+      }
     });
   });
 });

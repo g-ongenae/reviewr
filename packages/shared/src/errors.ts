@@ -34,12 +34,19 @@ const apiDetail = (body: ApiErrorBody | undefined): string | undefined => {
   return undefined;
 };
 
+/** What a delete refused with `document_changed` tells the writer. */
+const documentChangedMessage: string =
+  'This document was changed elsewhere since this screen read it, so it was not deleted. Check its text, then delete it again if you still mean to.';
+
 /**
  * Message to show the user for a failed request. Never exposes raw HTTP statuses.
  */
 export const describeError = (error: unknown): string => {
   if (isServerUnreachable(error)) {
     return 'Server unreachable';
+  }
+  if (conflictOf(error)?.code === 'document_changed') {
+    return documentChangedMessage;
   }
   if (error instanceof ApiError) {
     return (
@@ -58,6 +65,9 @@ export const describeError = (error: unknown): string => {
 
 /** A counter of the API: an integer >= 1. */
 const isCounter = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1;
+
+/** A head revision of the API: a counter, or 0 for a document without a revision yet. */
+const isHeadRevision = (value: unknown): value is number => value === 0 || isCounter(value);
 
 /**
  * Whether a value has the shape of a `DocumentDraft`.
@@ -89,6 +99,8 @@ const isConflictBody = (body: unknown): body is ConflictBody => {
       return isDraft(conflict.draft);
     case 'stale_revision':
       return isCounter(conflict.revision);
+    case 'document_changed':
+      return isHeadRevision(conflict.revision) && isDraft(conflict.draft);
     default:
       return false;
   }

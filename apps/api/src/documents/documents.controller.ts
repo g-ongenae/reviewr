@@ -11,11 +11,13 @@ import {
   Patch,
   Post,
   Put,
+  Query,
 } from '@nestjs/common';
 import type { Document, DocumentDraft, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
 import { DocumentsService } from './documents.service.js';
 import { CreateDocumentBodyDto } from './dto/create-document-body.dto.js';
 import { CreateRevisionDto } from './dto/create-revision.dto.js';
+import { DeleteDocumentQueryDto } from './dto/delete-document-query.dto.js';
 import { NameRevisionDto } from './dto/name-revision.dto.js';
 import { RenameDocumentDto } from './dto/rename-document.dto.js';
 import { SaveDraftDto } from './dto/save-draft.dto.js';
@@ -80,12 +82,17 @@ export class DocumentsController {
   }
 
   /**
-   * DELETE /documents/:id
+   * DELETE /documents/:id[?revision=&draftVersion=]: with what the client last saw, 409 `document_changed` if the
+   * document moved since. The precondition travels in the query: a DELETE body has no defined meaning in HTTP.
    */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  public async delete(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    await this.documentsService.delete(id);
+  public async delete(@Param('id', ParseUUIDPipe) id: string, @Query() query: DeleteDocumentQueryDto): Promise<void> {
+    const { revision, draftVersion } = query;
+    await this.documentsService.delete(
+      id,
+      revision === undefined || draftVersion === undefined ? undefined : { revision, draftVersion },
+    );
   }
 
   /**
