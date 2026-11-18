@@ -55,6 +55,8 @@ export const ToolbarButton = ({
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ disabled, expanded }}
+      // The same state as an ARIA prop, which React Native Web also passes on.
+      aria-expanded={expanded}
       disabled={disabled}
       onPress={onPress}
       style={styles.target}
