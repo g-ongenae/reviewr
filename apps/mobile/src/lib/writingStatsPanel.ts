@@ -16,7 +16,11 @@ const panel = storedBoolean(
   true,
 );
 
-export const useWritingStatsPanel = (): [open: boolean, toggle: () => void] => [
+/**
+ * Whether the panel is shown, or undefined while the stored choice is read: then the panel is not drawn (it never
+ * appears and disappears again) and the toggle offers to show it, which a tap does.
+ */
+export const useWritingStatsPanel = (): [open: boolean | undefined, toggle: () => void] => [
   useSyncExternalStore(panel.subscribe, panel.get),
-  () => panel.set(!panel.get()),
+  () => panel.set(!(panel.get() ?? false)),
 ];

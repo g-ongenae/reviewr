@@ -113,7 +113,7 @@ const Editor = ({ document }: { document: Document }) => {
   /** The other device's text of a conflict and the texts "Keep mine" holds: none is in the text field. */
   const hidden = heldTexts({ session, autosave });
   const [showStats, toggleStats] = useWritingStatsPanel();
-  const baselines = useWritingBaselines(document);
+  const baselines = useWritingBaselines(document, showStats);
 
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
@@ -180,9 +180,10 @@ const Editor = ({ document }: { document: Document }) => {
           headerRight: () => (
             <ToolbarActions>
               <ToolbarButton
-                label={showStats ? 'Hide writing stats' : 'Show writing stats'}
+                label={showStats === true ? 'Hide writing stats' : 'Show writing stats'}
                 icon={StatsIcon}
-                expanded={showStats}
+                // While the stored choice is read, no panel is drawn: the toggle offers to show it.
+                expanded={showStats === true}
                 onPress={toggleStats}
               />
               <ToolbarButton
@@ -211,7 +212,7 @@ const Editor = ({ document }: { document: Document }) => {
       <View style={[styles.statusBar, { borderColor: theme.border }]}>
         <Text style={{ color: saved ? theme.muted : theme.accent }}>{status}</Text>
       </View>
-      {showStats && (
+      {showStats === true && (
         <WritingStatsPanel
           content={content}
           baseline={baselines.today}

@@ -57,6 +57,15 @@ export const ToolbarButton = ({
       accessibilityState={{ disabled, expanded }}
       // The same state as an ARIA prop, which React Native Web also passes on.
       aria-expanded={expanded}
+      // TalkBack offers "expand" or "collapse" on a button with an expanded state: either one toggles it.
+      accessibilityActions={expanded === undefined ? undefined : [{ name: expanded ? 'collapse' : 'expand' }]}
+      onAccessibilityAction={
+        expanded === undefined
+          ? undefined
+          : ({ nativeEvent: { actionName } }) => {
+              if ((actionName === 'expand' && !expanded) || (actionName === 'collapse' && expanded)) onPress();
+            }
+      }
       disabled={disabled}
       onPress={onPress}
       style={styles.target}

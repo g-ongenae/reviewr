@@ -11,6 +11,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { api, queryKeys } from './api';
+import { baselineReads } from './baselineReads';
 
 /** Local midnight that started today, in ms; moves on by itself when the next day begins. */
 const useStartOfToday = (): number => {
@@ -25,29 +26,33 @@ const useStartOfToday = (): number => {
 
 /**
  * What the writing stats measure the text against, read as the history screen reads revisions: the phone's `api` and
- * query keys, so a revision read here is not read again there. See `todayBaseline` and `lastRevisionBaseline`.
+ * query keys, so a revision read here is not read again there. See `todayBaseline` and `lastRevisionBaseline`. Nothing
+ * is read unless the panel is `shown` (see `baselineReads`).
  */
-export const useWritingBaselines = (document: Document): { today: Baseline; lastRevision: Baseline } => {
+export const useWritingBaselines = (
+  document: Document,
+  shown: boolean | undefined,
+): { today: Baseline; lastRevision: Baseline } => {
   const today = useStartOfToday();
-  const needsHistory = todayNeedsHistory(document, today);
+  const history = todayNeedsHistory(document, today);
+  const previous = previousRevisionOf(document);
   const revisions = useQuery({
     queryKey: queryKeys.revisions(document.id),
     queryFn: () => api.listRevisions(document.id),
-    enabled: needsHistory,
+    enabled: baselineReads(shown, { history, lastBeforeToday: undefined, previous }).revisions,
   });
   const lastBeforeToday = lastRevisionBefore(revisions.data, today);
+  const reads = baselineReads(shown, { history, lastBeforeToday, previous });
   const todayRevision = useQuery({
     queryKey: queryKeys.revision(document.id, lastBeforeToday ?? 0),
     queryFn: () => api.getRevision(document.id, lastBeforeToday ?? 0),
-    enabled: needsHistory && lastBeforeToday !== undefined,
+    enabled: reads.todayRevision,
     staleTime: Infinity, // Revisions are immutable.
   });
-
-  const previous = previousRevisionOf(document);
   const previousRevision = useQuery({
     queryKey: queryKeys.revision(document.id, previous),
     queryFn: () => api.getRevision(document.id, previous),
-    enabled: previous > 0,
+    enabled: reads.previousRevision,
     staleTime: Infinity,
   });
 

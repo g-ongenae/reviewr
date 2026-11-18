@@ -15,28 +15,30 @@ const memoryStore = (initial: Record<string, string> = {}) => {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe('storedBoolean', () => {
-  it('answers the default until the store is read, then the stored value, and tells its listeners', async () => {
+  it('is unknown until the store is read, then the stored value, and tells its listeners', async () => {
     const { store } = memoryStore({ open: 'false' });
     const value = storedBoolean(async () => store, 'open', true);
     const listener = vi.fn();
     value.subscribe(listener);
-    expect(value.get()).toBe(true);
+    // Never the default first: a stored "false" must not show the panel for a moment.
+    expect(value.get()).toBeUndefined();
     await settle();
     expect(value.get()).toBe(false);
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the default when nothing or something else is stored', async () => {
-    const { store } = memoryStore({ open: 'maybe' });
-    const value = storedBoolean(async () => store, 'open', true);
+  it('becomes the default when nothing or something else is stored', async () => {
+    const nothing = storedBoolean(async () => memoryStore().store, 'open', true);
+    const garbage = storedBoolean(async () => memoryStore({ open: 'maybe' }).store, 'open', false);
     await settle();
-    expect(value.get()).toBe(true);
-    expect(storedBoolean(async () => memoryStore().store, 'open', false).get()).toBe(false);
+    expect(nothing.get()).toBe(true);
+    expect(garbage.get()).toBe(false);
   });
 
   it('writes what is set, for the next start', async () => {
     const { store, items } = memoryStore();
     const value = storedBoolean(async () => store, 'open', true);
+    await settle();
     value.set(false);
     expect(value.get()).toBe(false);
     await settle();
@@ -50,11 +52,31 @@ describe('storedBoolean', () => {
     const { store } = memoryStore({ open: 'true' });
     const value = storedBoolean(async () => store, 'open', true);
     value.set(false);
+    expect(value.get()).toBe(false);
     await settle();
     expect(value.get()).toBe(false);
   });
 
-  it('never throws when the store cannot be opened, read or written: it keeps working in memory', async () => {
+  it('stores the last value set, even when an earlier write is slower', async () => {
+    const items = new Map<string, string>();
+    const delays = [30, 0];
+    const store: KeyValueStore = {
+      getItemAsync: async () => null,
+      setItemAsync: async (key, stored) => {
+        await new Promise((resolve) => setTimeout(resolve, delays.shift() ?? 0));
+        items.set(key, stored);
+      },
+    };
+    const value = storedBoolean(async () => store, 'open', true);
+    await settle();
+    value.set(false); // Its write takes 30 ms.
+    value.set(true); // Its write is instant, but must land after the first one.
+    expect(value.get()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(items.get('open')).toBe('true');
+  });
+
+  it('never throws when the store cannot be opened, read or written: it falls back, then keeps working in memory', async () => {
     const throwing = storedBoolean(
       () => {
         throw new Error('no native module');
@@ -68,7 +90,9 @@ describe('storedBoolean', () => {
       setItemAsync: async () => Promise.reject(new Error('locked')),
     };
     const failing = storedBoolean(async () => broken, 'open', true);
+    await settle();
     for (const value of [throwing, rejecting, failing]) {
+      expect(value.get()).toBe(true);
       value.set(false);
       await settle();
       expect(value.get()).toBe(false);
