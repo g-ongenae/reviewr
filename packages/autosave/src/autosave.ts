@@ -50,6 +50,13 @@ export interface AutosaveOptions {
   /** Delay before the `attempt`-th retry after a failure (1 for the first), in milliseconds. Defaults to 1s, 2s, 4s… up to 30s. */
   retryDelayMs?: (attempt: number) => number;
   timers?: Timers;
+  /**
+   * Whether `save` still has work to do even when the local text is the base (versions queued while the server was
+   * unreachable, for instance): while it answers true, the machine is never `saved`, and it keeps calling `save`, with
+   * the same retries, until it answers false. Read on every decision; the machine is not told when it changes, so it
+   * should only turn true while a save is pending, failed or scheduled. Defaults to false.
+   */
+  mustSave?: () => boolean;
 }
 
 interface CommonState {
@@ -157,7 +164,13 @@ const sameState = (a: AutosaveState, b: AutosaveState): boolean => {
 };
 
 export const createAutosave = (options: AutosaveOptions): Autosave => {
-  const { save, debounceMs = 1000, retryDelayMs = defaultRetryDelayMs, timers = globalTimers } = options;
+  const {
+    save,
+    debounceMs = 1000,
+    retryDelayMs = defaultRetryDelayMs,
+    timers = globalTimers,
+    mustSave = () => false,
+  } = options;
 
   let base = options.base;
   let content = base.content;
@@ -198,7 +211,7 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
   const listeners = new Set<() => void>();
 
   /** Whether the local text still has to be sent for the server to hold it. */
-  const needsSave = () => uncertain || content !== base.content;
+  const needsSave = () => uncertain || content !== base.content || mustSave();
 
   const computeState = (): AutosaveState => {
     const common = { content, base };
@@ -328,8 +341,9 @@ export const createAutosave = (options: AutosaveOptions): Autosave => {
         lastError = undefined;
         // A read kept meanwhile may hold the text sent (when the server saved another one): it is this machine's.
         reconcile(sent.content);
-        // Another text saved than the one sent: the edits it carried are not saved yet.
-        if (server === undefined && saved === sent.content) {
+        // Another text saved than the one sent: the edits it carried are not saved yet. Nor are they while `save` still
+        // has work: a flush waits for it.
+        if (server === undefined && saved === sent.content && !mustSave()) {
           savedSeq = Math.max(savedSeq, seq);
           settleFlushes('saved', false);
         }

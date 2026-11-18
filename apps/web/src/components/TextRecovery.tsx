@@ -4,7 +4,8 @@ import type { ReactNode } from 'react';
 import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import type { Autosave, AutosaveState } from '../autosave/autosave';
-import { discardAutosave, useKeptCopies } from '../autosave/useAutosave';
+import { discardAutosave, entryOf, useKeptCopies } from '../autosave/useAutosave';
+import type { QueuedVersion, VersionQueueState } from '../autosave/versionQueue';
 import { existingSession, type SessionState, type Side } from '../reconcile/session';
 
 /** How a text a merge holds is labelled, after the side it came from. */
@@ -46,11 +47,15 @@ export const HeldText = ({ label, text, children }: HeldTextProps) => {
 };
 
 const noSession: SessionState = { running: false, texts: [] };
+const noVersions: VersionQueueState = { pending: [], held: [] };
+
+/** How a version saved while the server was unreachable, and not created, is labelled. */
+export const versionNotSavedLabel = 'A version not saved';
 
 /**
  * Every text this tab holds for a document its server no longer has: the local text when the writer edited it or it is
- * not saved, the merged text of a stopped merge, the other device's text of a conflict, every text a merge was given, and
- * the copies closed tabs left on this device. The first label wins for a text held twice; blank texts hold nothing to
+ * not saved, the merged text of a stopped merge, the other device's text of a conflict, every text a merge was given,
+ * the copies closed tabs left on this device, and the versions saved while the server was unreachable. The first label wins for a text held twice; blank texts hold nothing to
  * recover.
  */
 export const recoverableTexts = (
@@ -58,6 +63,7 @@ export const recoverableTexts = (
   session: SessionState,
   edited: boolean,
   copies: readonly string[] = [],
+  versions: readonly QueuedVersion[] = [],
 ): { label: string; text: string }[] => {
   const texts: { label: string; text: string }[] = [];
   const add = (text: string, label: string) => {
@@ -69,6 +75,7 @@ export const recoverableTexts = (
   if (machine.status === 'conflict') add(machine.server.content, 'The other device’s text');
   for (const { text, side } of session.texts) add(text, earlierTextLabel(side));
   for (const copy of copies) add(copy, keptCopyLabel);
+  for (const { text } of versions) add(text, versionNotSavedLabel);
   return texts;
 };
 
@@ -122,7 +129,12 @@ export const DeletedDocument = ({
   });
 
   const copies = useKeptCopies(id);
-  const texts = recoverableTexts(machine, sessionState, edited, copies);
+  const queue = entryOf(queryClient, id)?.versions;
+  const queued = useSyncExternalStore(
+    useCallback((listener: () => void) => queue?.subscribe(listener) ?? (() => {}), [queue]),
+    useCallback(() => queue?.getSnapshot() ?? noVersions, [queue]),
+  );
+  const texts = recoverableTexts(machine, sessionState, edited, copies, [...queued.held, ...queued.pending]);
   if (texts.length === 0) return notFound;
 
   const discard = () => {

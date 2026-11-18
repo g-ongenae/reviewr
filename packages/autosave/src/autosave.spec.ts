@@ -835,6 +835,63 @@ describe('createAutosave', () => {
     });
   });
 
+  describe('mustSave', () => {
+    it('is never saved while save still has work, and keeps calling it, with retries, until it has none', async () => {
+      let owed = false;
+      start({ retryDelayMs: () => 1000, mustSave: () => owed });
+      autosave.edit('Once upon');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().answer({ kind: 'failed', error: new Error('503') });
+      // Queued while the request failed, as versions saved while the server is unreachable are.
+      owed = true;
+      const flushed = autosave.flush();
+      await server.current().answer({ kind: 'failed', error: new Error('503') });
+      await expect(flushed).resolves.toBe('failed');
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(server.calls).toHaveLength(3);
+      const finished = autosave.flush();
+      // The text is saved, the work is not done: the machine calls save again at once.
+      await server.current().answer({ kind: 'saved', draftVersion: 2 });
+      expect(status()).toBe('saving');
+      expect(server.calls.at(-1)).toEqual({ content: 'Once upon', draftVersion: 2 });
+
+      owed = false;
+      await server.current().answer({ kind: 'saved', draftVersion: 3 });
+      await expect(finished).resolves.toBe('saved');
+      expect(autosave.getSnapshot()).toEqual({
+        status: 'saved',
+        content: 'Once upon',
+        base: { content: 'Once upon', draftVersion: 3 },
+      });
+      expect(server.calls).toHaveLength(4);
+    });
+
+    it('still sends after a read confirmed the local text, while save has work', async () => {
+      let owed = false;
+      start({ retryDelayMs: () => 60_000, mustSave: () => owed });
+      autosave.edit('Once upon');
+      await vi.advanceTimersByTimeAsync(500);
+      await server.current().reject(new TypeError('Failed to fetch'));
+      owed = true;
+
+      // The lost write did land: a read says so. Without work left, that would make the machine saved.
+      autosave.refresh({ content: 'Once upon', draftVersion: 2 });
+      expect(autosave.getSnapshot()).toMatchObject({
+        status: 'unsaved',
+        base: { content: 'Once upon', draftVersion: 2 },
+      });
+      // On the retry already scheduled.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(server.calls).toHaveLength(2);
+      expect(server.calls.at(-1)).toEqual({ content: 'Once upon', draftVersion: 2 });
+
+      owed = false;
+      await server.current().answer({ kind: 'saved', draftVersion: 3 });
+      expect(status()).toBe('saved');
+    });
+  });
+
   describe('dispose', () => {
     it('during a request, ignores the response and sends nothing more', async () => {
       start();

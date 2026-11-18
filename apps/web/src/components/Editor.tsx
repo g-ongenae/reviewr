@@ -28,6 +28,7 @@ import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
+import { HeldVersions, queuedStatus, useVersionQueue } from './QueuedVersions';
 import { RevisionHistory } from './RevisionHistory';
 import { earlierTextLabel, HeldText, keptCopyLabel } from './TextRecovery';
 import { ChevronIcon, HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
@@ -106,7 +107,9 @@ const stopText = (stop: Stop): string => {
 
 export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbarStart }: Props) => {
   const queryClient = useQueryClient();
-  const { autosave, state, discard, pendingTitle, keepTitle } = useAutosave(document, isNew);
+  const { autosave, state, discard, pendingTitle, keepTitle, versions } = useAutosave(document, isNew);
+  /** The versions saved while the server was unreachable: they wait for it, or are held for the writer. */
+  const { pending: queuedVersions } = useVersionQueue(versions);
   /**
    * The title as typed (empty when untitled), saved on its own by a rename. Every edit of the field is numbered, and
    * the field is saved only once the server confirmed a rename sent at its latest edit: an edit back to an earlier
@@ -178,12 +181,15 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
 
   /**
    * Saves a version: the draft first, then the server's draft of the counter the machine holds as confirmed becomes a
-   * revision. Text typed meanwhile is not part of it: the autosave saves it as a draft. When the draft cannot be
-   * saved, nothing more happens: the status says why.
+   * revision. Text typed meanwhile is not part of it: the autosave saves it as a draft. When the draft cannot be saved
+   * for now (the server unreachable), the version is queued with the text on screen, and the machine creates it once the
+   * server is back, before the latest text; otherwise (a conflict, a refusal) nothing more happens: the status says why.
    */
   const save = useMutation({
     mutationFn: async ({ name, text }: VersionRequest): Promise<Document | undefined> => {
-      if ((await autosave.flush()) !== 'saved') return undefined;
+      const flushed = await autosave.flush();
+      if (flushed === 'failed') versions.enqueue({ text, name });
+      if (flushed !== 'saved') return undefined;
       // The flush may end on a later text, typed after the click and sent along with it: that one is not the version.
       const { draftVersion, content: confirmed } = autosave.getSnapshot().base;
       if (confirmed !== text) throw textMoved;
@@ -339,16 +345,18 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   /** The text's state first; then the title's, while it is not saved. */
   const status = save.isPending
     ? 'Saving version…'
-    : isNew && state.status === 'saved'
-      ? // The blank page: nothing typed yet, or only a title, saved with the text once there is one.
-        titleDirty
-        ? 'Unsaved changes'
-        : ''
-      : state.status !== 'saved' || !titleDirty
-        ? statusText(state, document.revision, changedSinceVersion)
-        : titleRetry
-          ? `Title not saved${titleWaits ? '' : ' · retrying'}`
-          : 'Saving title…';
+    : queuedVersions.length > 0
+      ? queuedStatus(queuedVersions)
+      : isNew && state.status === 'saved'
+        ? // The blank page: nothing typed yet, or only a title, saved with the text once there is one.
+          titleDirty
+          ? 'Unsaved changes'
+          : ''
+        : state.status !== 'saved' || !titleDirty
+          ? statusText(state, document.revision, changedSinceVersion)
+          : titleRetry
+            ? `Title not saved${titleWaits ? '' : ' · retrying'}`
+            : 'Saving title…';
   const statusTooltip =
     state.status === 'retrying' ? describeError(state.error) : titleRetry ? describeError(rename.error) : status;
 
@@ -358,7 +366,11 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
         <div className="toolbar">
           {toolbarStart}
           <span
-            className={state.status === 'saved' && !save.isPending && !titleDirty ? 'status' : 'status dirty'}
+            className={
+              state.status === 'saved' && !save.isPending && !titleDirty && queuedVersions.length === 0
+                ? 'status'
+                : 'status dirty'
+            }
             role="status"
             title={statusTooltip}
           >
@@ -504,6 +516,8 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
             </div>
           )
         )}
+
+        <HeldVersions queue={versions} />
 
         {hidden.length > 0 && (
           <div className="held-texts">

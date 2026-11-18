@@ -5,7 +5,14 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { api, isNotFound, queryKeys, reachability } from '../api';
 import { hasUnsavedChanges } from '../unsavedChanges';
-import { createAutosave, type Autosave, type AutosaveState, type Draft, type SaveResult } from './autosave';
+import {
+  createAutosave,
+  type Autosave,
+  type AutosaveState,
+  type Draft,
+  type SaveDraft,
+  type SaveResult,
+} from './autosave';
 import {
   adoptLeftTexts,
   dropLeftText,
@@ -20,6 +27,7 @@ import {
   type LeftText,
 } from './deviceBuffer';
 import type { BufferPage } from './localBuffer';
+import { createVersionQueue, type VersionQueue } from './versionQueue';
 
 /**
  * The draft an editor opens on. The API always sends it; documents without one (fixtures written before drafts
@@ -117,6 +125,23 @@ export const cacheDocument = (queryClient: QueryClient, document: Document) => {
   if (!isGone(queryClient, document.id)) queryClient.setQueryData(queryKeys.document(document.id), document);
 };
 
+/**
+ * A version was created: it goes in the cache, unless the cache holds a newer head; a newer draft and the title stay
+ * (only renames and reads write the title, as for "Save version" in the editor).
+ */
+const cacheRevision = (queryClient: QueryClient, saved: Document) => {
+  if (!isGone(queryClient, saved.id)) {
+    queryClient.setQueryData<Document>(queryKeys.document(saved.id), (cached) => {
+      if (cached === undefined) return saved;
+      if (cached.revision > saved.revision) return cached;
+      const newerDraft = (cached.draft?.draftVersion ?? 0) > (saved.draft?.draftVersion ?? 0);
+      return { ...saved, title: cached.title, draft: newerDraft ? cached.draft : saved.draft };
+    });
+  }
+  void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });
+};
+
 /** A draft was just saved: it goes in the cache, and the document moves up the list, without a request. */
 const cacheSavedDraft = (queryClient: QueryClient, id: string, draft: DocumentDraft) => {
   if (isGone(queryClient, id)) return;
@@ -134,6 +159,8 @@ const cacheSavedDraft = (queryClient: QueryClient, id: string, draft: DocumentDr
 
 interface Entry {
   autosave: Autosave;
+  /** The versions saved while the draft could not be saved, sent by the machine before its text (in memory only). */
+  versions: VersionQueue;
   /** Editors showing this machine. */
   users: number;
   /** Whether the writer edited the text in this tab. */
@@ -316,20 +343,38 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
     notifyPages(queryClient);
     return { kind: 'rejected', error, permanent: true };
   };
-  const machine = createAutosave({
-    base: draft,
-    save: async (draft) => {
-      if (creating) return createDocument(draft);
+  const saveDraft: SaveDraft = async (draft) => {
+    if (creating) return createDocument(draft);
+    try {
+      const saved = await api.saveDraft(id, draft);
+      reachability.reportSuccess();
+      cacheSavedDraft(queryClient, id, saved);
+      return { kind: 'saved', draftVersion: saved.draftVersion };
+    } catch (error) {
+      reachability.reportError(error);
+      return toSaveResult(error);
+    }
+  };
+  const versions = createVersionQueue({
+    createRevision: async (input) => {
       try {
-        const saved = await api.saveDraft(id, draft);
+        const saved = await api.createRevision(id, input);
         reachability.reportSuccess();
-        cacheSavedDraft(queryClient, id, saved);
-        return { kind: 'saved', draftVersion: saved.draftVersion };
+        return saved;
       } catch (error) {
         reachability.reportError(error);
-        return toSaveResult(error);
+        throw error;
       }
     },
+    head: () => queryClient.getQueryData<Document>(queryKeys.document(id))?.revision ?? 0,
+    toSaveResult,
+    onRevision: (saved) => cacheRevision(queryClient, saved),
+  });
+  const machine = createAutosave({
+    base: draft,
+    // The versions queued while the server was unreachable go first, in order, then the text.
+    save: (draft) => versions.send(draft, saveDraft, () => creating),
+    mustSave: versions.hasPending,
   });
   const entry: Entry = {
     // Every edit goes through here: the entry remembers that the writer typed in this document.
@@ -340,6 +385,7 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
         machine.edit(content);
       },
     },
+    versions,
     users: 0,
     edited: false,
     deleted: false,
@@ -867,8 +913,9 @@ const release = (queryClient: QueryClient, id: string, entry: Entry) => {
 };
 
 /**
- * No editor shows the machine: it saves now, and is dropped once its text is saved. It stays after a conflict or a
- * rejection, for a text of a deleted document, and while it has copies, so reopening the document shows them again.
+ * No editor shows the machine: it saves now (queued versions first), and is dropped once its text is saved. It stays
+ * after a conflict or a rejection, for a text of a deleted document, and while it has copies or versions that were not
+ * created, so reopening the document shows them again.
  */
 const saveInBackground = (queryClient: QueryClient, id: string, entry: Entry) => {
   if (entry.users > 0) return;
@@ -881,7 +928,8 @@ const saveInBackground = (queryClient: QueryClient, id: string, entry: Entry) =>
       status === 'conflict' ||
       status === 'rejected' ||
       orphaned(entry) ||
-      copiesOf(entry).length > 0
+      copiesOf(entry).length > 0 ||
+      entry.versions.getSnapshot().held.length > 0
     ) {
       unsubscribe();
     } else if (status === 'saved') {
@@ -903,6 +951,8 @@ export interface UseAutosave {
   pendingTitle: string | undefined;
   /** Keeps the title typed on a page whose document is not created yet. */
   keepTitle: (title: string) => void;
+  /** The versions saved while the draft could not be saved (see `versionQueue`). */
+  versions: VersionQueue;
 }
 
 /**
@@ -932,7 +982,7 @@ export const useAutosave = (document: Document, create = false): UseAutosave => 
 
   const keepTitle = (title: string) => keepPendingTitle(queryClient, document.id, title);
 
-  return { autosave, state, discard, pendingTitle: entry.title, keepTitle };
+  return { autosave, state, discard, pendingTitle: entry.title, keepTitle, versions: entry.versions };
 };
 
 /**
@@ -969,7 +1019,11 @@ export const useAutosaveGuard = () => {
         // Texts other tabs left that the server does not hold yet: held copies, and restores waiting for the server.
         waitingOf(queryClient).size > 0 ||
         entries().some(
-          (entry) => entry.autosave.getSnapshot().status !== 'saved' || orphaned(entry) || entry.held.length > 0,
+          (entry) =>
+            entry.autosave.getSnapshot().status !== 'saved' ||
+            orphaned(entry) ||
+            entry.held.length > 0 ||
+            entry.versions.getSnapshot().held.length > 0,
         )
       ) {
         event.preventDefault();

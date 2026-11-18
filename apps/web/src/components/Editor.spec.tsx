@@ -825,7 +825,7 @@ describe('Editor autosave', () => {
       expect(versions()).toEqual([['Draft two', 'The end.']]);
     });
 
-    it('Ctrl+S creates no version when the draft cannot be saved', async () => {
+    it('Ctrl+S creates no version while the draft cannot be saved: the version waits for the server', async () => {
       open();
       intercept = (call) => (call.path.endsWith('/draft') ? reply(503) : undefined);
       type('The end.');
@@ -833,7 +833,7 @@ describe('Editor autosave', () => {
       await elapse();
 
       expect(calls.map((call) => call.path)).toEqual(['/documents/doc-1/draft']);
-      expect(status()).toBe('Not saved · retrying');
+      expect(status()).toBe('Version waiting for the server');
     });
 
     it('keeps text typed while the version is being saved, and saves it as a draft, not in the version', async () => {
