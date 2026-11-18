@@ -106,6 +106,9 @@ const versionError = (error: unknown, draft: AutosaveState): string => {
   return `The version could not be saved${detail ? ` (${detail})` : ''}. Your text is saved as a draft: try again.`;
 };
 
+/** The delete was not sent: the text on screen could not be saved first, so what the server holds is unknown. */
+const notDeleted = new Error('Not deleted: your text could not be saved first. Delete again once it is saved.');
+
 /** What happened to a merged text that was not applied. */
 const stopText = (stop: Stop): string => {
   switch (stop.reason) {
@@ -314,8 +317,29 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   const otherPages = usePagesNotCreated(document.id);
   const pages = isNew ? otherPages : [];
 
+  /**
+   * Deletes the document as this editor saw it: the head revision it shows and the draft the server last confirmed to
+   * this tab. A save in flight or waiting is sent first, so the delete never runs into this tab's own save; when that
+   * save fails, nothing is deleted. If the document changed elsewhere since, the server deletes nothing (409).
+   */
   const remove = useMutation({
-    mutationFn: () => api.deleteDocument(document.id),
+    mutationFn: async () => {
+      const flushed = await autosave.flush();
+      if (flushed === 'failed' || flushed === 'disposed') throw notDeleted;
+      const { draftVersion } = autosave.getSnapshot().base;
+      // Read now, not at the click: the flush may have taken a while, and a read may have brought a newer head.
+      const revision = queryClient.getQueryData<Document>(queryKeys.document(document.id))?.revision;
+      await api.deleteDocument(document.id, { revision: revision ?? document.revision, draftVersion });
+    },
+    onError: async (error) => {
+      if (conflictOf(error)?.code !== 'document_changed') return;
+      // Read it again through the normal path: a newer draft reaches the autosave, which never replaces unsaved text.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.document(document.id), exact: true }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.revisions(document.id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),
+      ]);
+    },
     onSuccess: async () => {
       discard();
       setUnsavedChanges(false);
@@ -403,7 +427,8 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
           </button>
           <button
             className="toolbar-action danger"
-            disabled={isNew || remove.isPending}
+            // A version being saved moves the head: the delete waits for it, so it never refuses this tab's own version.
+            disabled={isNew || remove.isPending || save.isPending}
             onClick={() => window.confirm('Delete this document and its whole history?') && remove.mutate()}
             aria-label="Delete"
             title="Delete"

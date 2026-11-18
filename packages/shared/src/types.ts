@@ -119,9 +119,32 @@ export interface StaleRevisionBody extends ApiErrorBody {
 }
 
 /**
+ * What a client last saw of a document, sent with `DELETE /documents/:id` so that a delete made from a stale view
+ * never destroys text saved since on another device.
+ */
+export interface DeleteDocumentInput {
+  /** Head revision the client last saw (0 for a document without a revision yet). */
+  revision: number;
+  /** `draftVersion` of the draft the client last saw. */
+  draftVersion: number;
+}
+
+/**
+ * 409 of `DELETE /documents/:id` with a `DeleteDocumentInput`: the head or the draft moved since the client read
+ * them, and nothing was deleted. Carries what the server holds now.
+ */
+export interface DocumentChangedBody extends ApiErrorBody {
+  code: 'document_changed';
+  /** Current head revision of the document (0 without a revision yet). */
+  revision: number;
+  /** Current draft of the document. */
+  draft: DocumentDraft;
+}
+
+/**
  * Structured body of a 409 Conflict, discriminated by `code`.
  */
-export type ConflictBody = DraftConflictBody | StaleRevisionBody;
+export type ConflictBody = DraftConflictBody | StaleRevisionBody | DocumentChangedBody;
 
 /**
  * Payload of `POST /documents/:id/revisions`: save the server's draft as a new version.

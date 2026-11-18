@@ -8,6 +8,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
+import { changedElsewhere, deleteAsSeen } from '@/lib/deleteAsSeen';
 import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
 import { countWords } from '@/lib/format';
 import type { TitleState } from '@/lib/title';
@@ -112,7 +113,14 @@ const Editor = ({ document }: { document: Document }) => {
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
   const remove = useMutation({
-    mutationFn: () => api.deleteDocument(document.id),
+    mutationFn: () =>
+      deleteAsSeen({
+        autosave,
+        // The head shown now: the text's save may have taken a while, and a read may have brought a newer one.
+        revision: () => queryClient.getQueryData<Document>(queryKeys.document(document.id))?.revision ?? document.revision,
+        savingVersion: saveVersion.isPending,
+        deleteDocument: (seen) => api.deleteDocument(document.id, seen),
+      }),
     onSuccess: async () => {
       drafts.discard(document.id);
       queryClient.removeQueries({ queryKey: queryKeys.document(document.id) });
@@ -122,6 +130,12 @@ const Editor = ({ document }: { document: Document }) => {
     onError: (error) => {
       const message = inlineError(error);
       if (message !== undefined) Alert.alert('Could not delete', message);
+      // Read it again: a newer draft goes to the autosave, which never replaces unsaved text with it.
+      if (changedElsewhere(error)) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.document(document.id), exact: true });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(document.id) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
+      }
     },
   });
 
