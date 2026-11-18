@@ -153,7 +153,7 @@ describe('"Save version" when the draft cannot be saved first', () => {
     expect(notice()).toBe(unreachableNotice);
   });
 
-  it('keeps the name field open with its name, so the next try saves the version with it', async () => {
+  it('says so for a named version too, whose field closes as when it is saved', async () => {
     open();
     down();
     type('Once upon a tide. The keeper woke.');
@@ -162,13 +162,40 @@ describe('"Save version" when the draft cannot be saved first', () => {
     fireEvent.submit(screen.getByRole('textbox', { name: 'Version name' }));
     await elapse();
     expect(notice()).toBe(unreachableNotice);
-    expect(screen.getByRole<HTMLInputElement>('textbox', { name: 'Version name' }).value).toBe('Dawn');
-
-    back();
-    fireEvent.submit(screen.getByRole('textbox', { name: 'Version name' }));
-    await elapse();
-    expect(versions).toEqual([['Dawn', 'Once upon a tide. The keeper woke.']]);
+    expect(versions).toEqual([]);
+    // No name is kept for a later text: the next version is named, or not, when it is saved.
     expect(screen.queryByRole('textbox', { name: 'Version name' })).toBeNull();
+  });
+
+  it('says to save again, no longer to wait, once the draft is saved', async () => {
+    open();
+    down();
+    type('Once upon a tide. The keeper woke.');
+    fireEvent.click(saveButton());
+    await elapse();
+    expect(notice()).toBe(unreachableNotice);
+
+    // The autosave's retry gets through.
+    back();
+    await elapse(60_000);
+    expect(screen.getAllByRole('status')[0]?.textContent).not.toContain('retrying');
+    expect(notice()).toBe('Version not saved: your text could not be saved at that moment. Save the version again.');
+    expect(versions).toEqual([]);
+  });
+
+  it('gives way to a conflict, which has its own banner', async () => {
+    open();
+    down();
+    type('Mine.');
+    fireEvent.click(saveButton());
+    await elapse();
+    expect(notice()).toBe(unreachableNotice);
+
+    // Back, with a draft changed elsewhere.
+    document = { ...document, draft: { content: 'Theirs.', draftVersion: 4, baseRevision: 2 } };
+    back();
+    await elapse(60_000);
+    expect(screen.getByRole('alert').textContent).toContain('This text was also changed on another device.');
     expect(notice()).toBeUndefined();
   });
 
