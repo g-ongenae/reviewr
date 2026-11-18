@@ -14,8 +14,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, isConflict, isNotFound, queryKeys } from '../api';
-import type { AutosaveState, DeleteCapture } from '../autosave/autosave';
-import { captureDelete, deleteAsSeen } from '../autosave/autosave';
+import type { AutosaveState } from '../autosave/autosave';
+import { deleteAsSeen } from '../autosave/autosave';
 import {
   cacheDocument,
   discardAutosave,
@@ -271,6 +271,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   const saveVersion = (name?: string) => {
     const trimmed = name?.trim().slice(0, revisionNameMaxLength);
     remove.reset();
+    setDeleteRefused(undefined);
     save.mutate({ name: trimmed === '' ? undefined : trimmed, text: content });
     if (versionName !== undefined) {
       setVersionName(undefined);
@@ -317,12 +318,11 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   const pages = isNew ? otherPages : [];
 
   /**
-   * Deletes the document as the writer saw it at the confirmation (see `deleteAsSeen`). Until the answer, the editor is
-   * frozen: no edit, version, restore or merge, so nothing of this tab can move the document or be lost by the delete.
+   * Deletes the document with the pair this screen showed when the confirmation opened (see `deleteAsSeen`). Until the
+   * answer, this editor is frozen: no edit, version, restore or merge.
    */
   const remove = useMutation({
-    mutationFn: (capture: DeleteCapture) =>
-      deleteAsSeen(autosave, capture, (seen) => api.deleteDocument(document.id, seen)),
+    mutationFn: (seen: { revision: number; draftVersion: number }) => api.deleteDocument(document.id, seen),
     onError: async (error) => {
       if (conflictOf(error)?.code !== 'document_changed') return;
       // Read it again through the normal path: a newer draft reaches the autosave, which never replaces unsaved text.
@@ -344,11 +344,20 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   /** A delete is waiting for its answer: this editor writes nothing meanwhile. */
   const frozen = remove.isPending;
   /** Asks, then deletes what the screen shows now: its head, its text, and whether another write of this editor runs. */
+  /** Why the last delete was not asked: the screen was not in a state to delete from. */
+  const [deleteRefused, setDeleteRefused] = useState<string | undefined>(undefined);
+  /** Takes the pair this render shows, then asks: whatever arrives while the dialog is open, the delete carries it. */
   const confirmDelete = () => {
-    if (!window.confirm('Delete this document and its whole history?')) return;
-    const otherWrite = save.isPending || session.getSnapshot().running || restores.restoring !== undefined;
+    const decision = deleteAsSeen({
+      state,
+      revision: document.revision,
+      writing: save.isPending || sessionState.running || restores.restoring !== undefined,
+    });
+    remove.reset();
+    setDeleteRefused('refused' in decision ? decision.refused : undefined);
+    if ('refused' in decision || !window.confirm('Delete this document and its whole history?')) return;
     save.reset();
-    remove.mutate(captureDelete(autosave, document.revision, otherWrite));
+    remove.mutate(decision.seen);
   };
 
   const canSave =
@@ -384,7 +393,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
   // An unreachable server is reported by the notification; the text stays here, and the autosave keeps trying.
   const actionError = save.isError ? versionError(save.error, state) : undefined;
   /** Why the last delete deleted nothing: shown above any other notice, until the writer does something else. */
-  const deleteError = inlineError(remove.error);
+  const deleteError = deleteRefused ?? inlineError(remove.error);
   const { result: pendingResult, stop } = sessionState;
   /** The view replaces the text only while there is a conflict: once it is resolved, the text comes back. */
   const showReconciliation = reconciling && state.status === 'conflict';

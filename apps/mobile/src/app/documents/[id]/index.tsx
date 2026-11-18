@@ -1,4 +1,4 @@
-import type { AutosaveState, DeleteCapture } from '@reviewr/autosave';
+import type { AutosaveState } from '@reviewr/autosave';
 import type { Stop } from '@reviewr/reconcile';
 import type { Document } from '@reviewr/shared';
 import { conflictOf, contentMaxLength, describeError, displayTitle, titleMaxLength } from '@reviewr/shared';
@@ -8,6 +8,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument } from '@/lib/appDrafts';
+import { askToDelete, type SeenPair } from '@/lib/askToDelete';
 import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
 import { countWords } from '@/lib/format';
 import type { TitleState } from '@/lib/title';
@@ -112,13 +113,11 @@ const Editor = ({ document }: { document: Document }) => {
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
   /**
-   * Deletes the document as the writer saw it when confirming (see `deleteAsSeen` of `@reviewr/autosave`): the head
-   * this screen rendered, and the draft version of the text on it. Until the answer, the text, the title and "Save
-   * version" are frozen, so nothing typed after the confirmation can be lost, and no write of this app causes a 409.
+   * Deletes the document with the pair this screen showed when the confirmation opened (see `askToDelete`). Until the
+   * answer, the text, the title and "Save version" are frozen.
    */
   const remove = useMutation({
-    mutationFn: (capture: DeleteCapture) =>
-      drafts.deleteAsSeen(document.id, capture, (seen) => api.deleteDocument(document.id, seen)),
+    mutationFn: (seen: SeenPair) => api.deleteDocument(document.id, seen),
     onSuccess: async () => {
       drafts.discard(document.id);
       queryClient.removeQueries({ queryKey: queryKeys.document(document.id) });
@@ -139,15 +138,16 @@ const Editor = ({ document }: { document: Document }) => {
   const frozen = remove.isPending;
 
   const confirmDelete = () =>
-    Alert.alert('Delete document?', 'This also deletes its whole history.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        // Captured when the writer confirms: the head this screen showed, never one read later.
-        onPress: () => remove.mutate(drafts.captureDelete(document.id, document.revision)),
-      },
-    ]);
+    askToDelete(
+      { state, revision: document.revision, writing: saveVersion.isPending || busy },
+      (onConfirm) =>
+        Alert.alert('Delete document?', 'This also deletes its whole history.', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Delete', style: 'destructive', onPress: onConfirm },
+        ]),
+      (seen) => remove.mutate(seen),
+      (message) => Alert.alert('Could not delete', message),
+    );
 
   const canSave =
     !frozen &&
