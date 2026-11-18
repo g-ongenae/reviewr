@@ -83,9 +83,7 @@ const serve = (onName?: (revision: number, name: string | null) => Response | Pr
   return { calls, revisions, hold, held, release };
 };
 
-const renderHistory = (
-  onRestore: (revision: Revision) => Promise<string | undefined> | undefined = () => undefined,
-) => {
+const renderHistory = (onRestore: (revision: Revision) => void = () => {}) => {
   const queryClient = createQueryClient();
   queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false } });
   render(

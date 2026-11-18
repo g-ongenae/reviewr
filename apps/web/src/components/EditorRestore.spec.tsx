@@ -34,6 +34,8 @@ let calls: Call[];
 let intercept: (call: Call) => Response | undefined;
 /** Requests matching `hold` wait until `releaseHeld`, then get the API's answer at that time. */
 let hold: (call: Call) => boolean;
+/** Requests matching `delay` are answered by the API at once, but the answer arrives only at `releaseHeld`. */
+let delay: (call: Call) => boolean;
 let held: (() => void)[];
 
 const server = (): Document => {
@@ -103,9 +105,13 @@ const open = () =>
     </QueryClientProvider>,
   );
 
+/** The cached document, which the editor shows. */
+const cached = () => queryClient.getQueryData<Document>(queryKeys.document('doc-1'));
+
 const elapse = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
 const releaseHeld = async () => {
   hold = () => false;
+  delay = () => false;
   for (const answer of held.splice(0)) answer();
   await elapse();
 };
@@ -157,6 +163,7 @@ beforeEach(() => {
   calls = [];
   intercept = () => undefined;
   hold = () => false;
+  delay = () => false;
   held = [];
   queryClient = createQueryClient();
   queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false, staleTime: Infinity } });
@@ -174,6 +181,10 @@ beforeEach(() => {
     calls.push(call);
     const answer = () => intercept(call) ?? fakeApi(call);
     if (hold(call)) return new Promise<Response>((resolve) => held.push(() => resolve(answer())));
+    if (delay(call)) {
+      const response = answer();
+      return new Promise<Response>((resolve) => held.push(() => resolve(response)));
+    }
     return Promise.resolve(answer());
   });
 });
@@ -277,7 +288,7 @@ describe('Restore into editor', () => {
     expect(textarea().value).toBe('A draft never saved as a version. And a new line.');
     expect(titleField().value).toBe('The lighthouse keeper');
     expect(screen.getByRole('alert').textContent).toBe(
-      'Not restored: your text changed during the restore. It is kept as it is: restore again to replace it.',
+      'Not restored: your text or title changed during the restore. It is kept as it is: restore again to replace it.',
     );
     await elapse(1000);
     expect(server().draft?.content).toBe('A draft never saved as a version. And a new line.');
@@ -325,5 +336,142 @@ describe('Restore into editor', () => {
     ).toBeTruthy();
     expect(textarea().value).toBe('A last text.');
     expect(versionsMade()).toEqual([]);
+  });
+
+  it('never replaces a title typed during the restore, which is then saved', async () => {
+    open();
+    type('A draft never saved as a version.');
+    await openRevision1();
+    hold = (call) => call.method === 'POST';
+    fireEvent.click(restoreButton());
+    await elapse();
+    fireEvent.change(titleField(), { target: { value: 'A new title' } });
+    await releaseHeld();
+
+    expect(titleField().value).toBe('A new title');
+    expect(textarea().value).toBe('A draft never saved as a version.');
+    expect(screen.getByRole('alert').textContent).toContain('your text or title changed during the restore');
+    // The text was kept all the same, and the new title is saved.
+    expect(revisions.at(-1)?.content).toBe('A draft never saved as a version.');
+    await elapse(1000);
+    expect(server().title).toBe('A new title');
+    expect(server().draft?.content).toBe('A draft never saved as a version.');
+  });
+
+  it('keeps an empty draft first when the editor’s head is a stale revision 0', async () => {
+    // The editor opened a draft-only document; another device then saved its text as revision 1.
+    const draftOnly: Document = {
+      ...server(),
+      revision: 0,
+      content: '',
+      draft: { content: 'Once upon a tide.', draftVersion: 3, baseRevision: null },
+    };
+    queryClient.setQueryData(queryKeys.document('doc-1'), draftOnly);
+    revisions.splice(1);
+    revisions[0] = { ...revisions[0]!, content: 'Once upon a tide.' };
+    document = { ...server(), revision: 1, content: 'Once upon a tide.' };
+    open();
+    type('');
+    await elapse(1000);
+    expect(server().draft?.content).toBe('');
+    await openRevision1();
+    fireEvent.click(restoreButton());
+    await elapse();
+
+    expect(revisions.at(-1)).toMatchObject({ revision: 2, content: '', name: beforeRestoreName(new Date()) });
+    expect(textarea().value).toBe('Once upon a tide.');
+  });
+
+  it('runs one restore at a time, even when the history is hidden and shown again', async () => {
+    open();
+    type('A draft never saved as a version.');
+    await openRevision1();
+    hold = (call) => call.method === 'POST';
+    fireEvent.click(restoreButton());
+    await elapse();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide history' }));
+    await openRevision1();
+    expect(restoreButton().textContent).toBe('Restoring…');
+    expect(restoreButton()).toHaveProperty('disabled', true);
+    fireEvent.click(restoreButton());
+    await releaseHeld();
+
+    expect(versionsMade()).toHaveLength(1);
+    expect(textarea().value).toBe('An old text.');
+  });
+
+  it('restores nothing into a document left and opened again during the restore, and still keeps the version', async () => {
+    const view = open();
+    type('A draft never saved as a version.');
+    await openRevision1();
+    hold = (call) => call.method === 'POST';
+    fireEvent.click(restoreButton());
+    await elapse();
+    // The writer leaves the document and opens it again at once: the new editor shows the same autosave.
+    view.rerender(<QueryClientProvider client={queryClient}>{null}</QueryClientProvider>);
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <DocumentView id="doc-1" onDeleted={() => {}} onGoBack={() => {}} onOpen={() => {}} />
+      </QueryClientProvider>,
+    );
+    await releaseHeld();
+    await elapse(5000);
+
+    // The old editor's restore applies nothing, to the new editor or in the background, and says nothing.
+    expect(textarea().value).toBe('A draft never saved as a version.');
+    expect(titleField().value).toBe('The lighthouse keeper');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(server().draft?.content).toBe('A draft never saved as a version.');
+    expect(server().title).toBe('The lighthouse keeper');
+    // The version it kept is published all the same.
+    expect(revisions.at(-1)?.content).toBe('A draft never saved as a version.');
+    expect(cached()?.revision).toBe(3);
+  });
+
+  it('is not undone by a read of the document sent before the version was kept', async () => {
+    open();
+    type('A draft never saved as a version.');
+    await elapse(1000);
+    await openRevision1();
+    // A read of revision 2 is answered now, but arrives only after the version is kept.
+    let first = true;
+    delay = (call) => {
+      const match = first && call.method === 'GET' && call.path === '/documents/doc-1';
+      if (match) first = false;
+      return match;
+    };
+    act(() => void queryClient.invalidateQueries({ queryKey: queryKeys.document('doc-1'), exact: true }));
+    await elapse();
+    expect(held).toHaveLength(1);
+    fireEvent.click(restoreButton());
+    await elapse();
+    expect(textarea().value).toBe('An old text.');
+    await releaseHeld();
+
+    expect(cached()?.revision).toBe(3);
+    expect(cached()?.content).toBe('A draft never saved as a version.');
+    expect(screen.getAllByRole('status')[0]?.textContent).toBe('Unsaved changes');
+    await elapse(1000);
+    expect(screen.getAllByRole('status')[0]?.textContent).toBe('Draft saved · changed since revision 3');
+  });
+
+  it('shows why a restore failed under the revision it was asked for only', async () => {
+    open();
+    type('A draft never saved as a version.');
+    await openRevision1();
+    hold = (call) => call.method === 'POST';
+    intercept = (call) => (call.method === 'POST' ? reply(500, { statusCode: 500, message: 'Boom' }) : undefined);
+    fireEvent.click(restoreButton());
+    await elapse();
+    // Another revision is selected while the restore waits.
+    fireEvent.click(screen.getByRole('button', { name: /Revision 2/ }));
+    await elapse();
+    await releaseHeld();
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Revision 1/ }));
+    await elapse();
+    expect(screen.getByRole('alert').textContent).toContain('could not be kept as a version first (Boom)');
+    expect(textarea().value).toBe('A draft never saved as a version.');
   });
 });

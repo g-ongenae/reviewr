@@ -22,6 +22,8 @@ const fakeServer = (revision = 1, head = 'the head') => {
     versions: [] as { name: string | null | undefined; content: string }[],
     /** Thrown by every request while set. */
     failing: undefined as Error | undefined,
+    /** How many version requests reached the server. */
+    revisionRequests: 0,
     /** Called before a request is answered: another device, or the writer typing. */
     before: undefined as (() => void) | undefined,
     saveDraft(input: { content: string; draftVersion: number }) {
@@ -34,6 +36,7 @@ const fakeServer = (revision = 1, head = 'the head') => {
       return server.document.draft;
     },
     createRevision(input: CreateRevisionInput): Document {
+      server.revisionRequests++;
       server.before?.();
       if (server.failing !== undefined) throw server.failing;
       const { draft, revision: current, content } = server.document;
@@ -83,6 +86,8 @@ const setup = (revision = 1, head = 'the head') => {
       await Promise.resolve();
       return server.createRevision(input);
     },
+    titleEdits: () => 0,
+    active: () => true,
     onKept: (saved) => autosave.refresh(draftOf(saved)),
     apply,
     now: () => new Date('2026-11-18T10:00:00Z'),
@@ -182,6 +187,64 @@ describe('restore', () => {
     expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'mine' });
   });
 
+  it('keeps an empty draft when the head it knows is at revision 0: another device may have saved a version', async () => {
+    const { server, autosave, apply, options } = setup(1, 'saved elsewhere as revision 1');
+    autosave.edit('');
+    expect(await restore(options({ head: { revision: 0, content: '' } }))).toEqual({ kind: 'restored' });
+    expect(server.versions).toEqual([{ name: 'Before restore — 18 Nov', content: '' }]);
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it('restores over an empty draft of a document with no version at all: the keep is a no-op, nothing is lost', async () => {
+    const { server, apply, options } = setup(0, '');
+    expect(await restore(options())).toEqual({ kind: 'restored' });
+    expect(server.revisionRequests).toBe(1);
+    expect(server.document.revision).toBe(0);
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it('restores nothing when the editor is gone during the keep, which is still published', async () => {
+    const { server, autosave, apply, options } = setup();
+    autosave.edit('mine');
+    let active = true;
+    const onKept = vi.fn();
+    const outcome = await restore(
+      options({
+        active: () => active,
+        onKept,
+        createRevision: async (input) => {
+          active = false;
+          await Promise.resolve();
+          return server.createRevision(input);
+        },
+      }),
+    );
+    expect(outcome).toEqual({ kind: 'abandoned' });
+    expect(restoreMessage(outcome)).toBeUndefined();
+    expect(onKept).toHaveBeenCalledOnce();
+    expect(server.versions.map((version) => version.content)).toEqual(['mine']);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('restores nothing when the title was edited during the keep', async () => {
+    const { server, autosave, apply, options } = setup();
+    autosave.edit('mine');
+    let titleEdits = 4;
+    const outcome = await restore(
+      options({
+        titleEdits: () => titleEdits,
+        createRevision: async (input) => {
+          titleEdits++;
+          await Promise.resolve();
+          return server.createRevision(input);
+        },
+      }),
+    );
+    expect(outcome).toEqual({ kind: 'failed', error: textMoved });
+    expect(apply).not.toHaveBeenCalled();
+    expect(server.versions.map((version) => version.content)).toEqual(['mine']);
+  });
+
   describe('text typed during the restore', () => {
     it('while the draft is being saved: nothing is restored, and the typed text is kept', async () => {
       const { server, autosave, apply, options } = setup();
@@ -192,8 +255,10 @@ describe('restore', () => {
       };
       const outcome = await restore(options());
       expect(outcome).toEqual({ kind: 'failed', error: textMoved });
-      expect(restoreMessage(outcome)).toContain('your text changed during the restore');
+      expect(restoreMessage(outcome)).toContain('your text or title changed during the restore');
       expect(apply).not.toHaveBeenCalled();
+      // The draft saved is not the text asked for: no version is even asked for.
+      expect(server.revisionRequests).toBe(0);
       await autosave.flush();
       expect(server.document.draft.content).toBe('mine, and more');
     });

@@ -8,11 +8,12 @@
 import type { CreateRevisionInput, Document } from '@reviewr/shared';
 import { conflictOf } from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { inlineError, queryKeys } from './api';
 import type { Autosave, AutosaveState } from './autosave/autosave';
 import { draftOf, isGone } from './autosave/useAutosave';
 
-/** The text on screen changed while it was being kept: the version would not hold the text the restore replaces. */
+/** The text or the title on screen changed during the restore: replacing them would lose what was typed. */
 export const textMoved = new Error('The text changed during the restore');
 
 /** Why a restore is not even tried: a conflict, a merge being saved, or a deleted document holds the text. */
@@ -22,7 +23,9 @@ export type RestoreOutcome =
   | { kind: 'restored' }
   | { kind: 'refused'; reason: RestoreRefusal }
   /** The text on screen could not be kept as a version: nothing was restored. */
-  | { kind: 'failed'; error: unknown };
+  | { kind: 'failed'; error: unknown }
+  /** The editor that asked for it is gone: nothing was restored, and nobody is told. */
+  | { kind: 'abandoned' };
 
 export interface RestoreOptions {
   autosave: Autosave;
@@ -33,9 +36,19 @@ export interface RestoreOptions {
   /** Whether the document is known to be deleted. */
   gone: () => boolean;
   createRevision: (input: CreateRevisionInput) => Promise<Document>;
-  /** The version that keeps the text on screen was saved: called with the server's answer, before the restore. */
-  onKept: (saved: Document) => void;
-  /** Puts the old version's title and text in the editor; called only once the text on screen is safe. */
+  /**
+   * How many times the writer edited the title: it is read when the restore starts and before it applies, so that a
+   * title typed meanwhile is never replaced.
+   */
+  titleEdits: () => number;
+  /** Whether the editor that asked for the restore still shows the document, and this restore is still its own. */
+  active: () => boolean;
+  /**
+   * The version that keeps the text on screen was saved: called with the server's answer, before the restore, even when
+   * the editor is gone meanwhile.
+   */
+  onKept: (saved: Document) => void | Promise<void>;
+  /** Puts the old version's title and text in the editor; called only once both are safe to replace. */
   apply: () => void;
   now?: () => Date;
 }
@@ -71,9 +84,11 @@ const keep = async (options: RestoreOptions, text: string): Promise<RestoreOutco
       error: state.status === 'retrying' || state.status === 'rejected' ? state.error : undefined,
     };
   }
-  // The flush may end on a later text, typed during the restore and sent along with it.
-  const { draftVersion, content: confirmed } = autosave.getSnapshot().base;
-  if (confirmed !== text) return { kind: 'failed', error: textMoved };
+  // The flush may end on a later text, typed during the restore and sent along with it, or a later text may wait to be
+  // sent: either way nothing will be restored over it, so no version is asked for.
+  const { base, content } = autosave.getSnapshot();
+  if (base.content !== text || content !== text) return { kind: 'failed', error: textMoved };
+  const { draftVersion } = base;
   let baseRevision = head.revision;
   // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
   for (let attempt = 1; ; attempt++) {
@@ -83,7 +98,7 @@ const keep = async (options: RestoreOptions, text: string): Promise<RestoreOutco
         draftVersion,
         baseRevision: baseRevision === 0 ? null : baseRevision,
       });
-      options.onKept(saved);
+      await options.onKept(saved);
       return undefined;
     } catch (error) {
       const conflict = conflictOf(error);
@@ -104,22 +119,31 @@ const keep = async (options: RestoreOptions, text: string): Promise<RestoreOutco
 
 /**
  * Restores an old version into the editor (`apply`). When the text on screen is the head's, it is replaced at once,
- * before this returns its promise; otherwise it is first kept as a version, and replaced only if that worked and the
- * text did not change meanwhile.
+ * before this returns its promise; otherwise it is first kept as a version, and replaced only if that worked, the text
+ * and the title were not edited meanwhile, and the editor that asked for it is still there.
+ *
+ * The shortcut needs a head with a revision: a head at revision 0 may be stale (another device saved a first version
+ * since), and its empty text says nothing about the text on screen. The keep of an empty draft on a document that
+ * really has no version is a no-op on the server: nothing is lost, and the restore goes on.
  */
 export const restore = async (options: RestoreOptions): Promise<RestoreOutcome> => {
   const { autosave, head } = options;
   const refusal = refusalOf(options);
   if (refusal !== undefined) return { kind: 'refused', reason: refusal };
   const text = autosave.getSnapshot().content;
-  if (text !== head.content) {
+  const titleEdits = options.titleEdits();
+  if (head.revision <= 0 || text !== head.content) {
     const stopped = await keep(options, text);
+    if (!options.active()) return { kind: 'abandoned' };
     if (stopped !== undefined) return stopped;
     const after = refusalOf(options);
     if (after !== undefined) return { kind: 'refused', reason: after };
     // Typed after the version was saved: that text is in no version, and is never replaced silently.
     if (autosave.getSnapshot().content !== text) return { kind: 'failed', error: textMoved };
   }
+  if (!options.active()) return { kind: 'abandoned' };
+  // A title typed during the restore may not be saved yet, nor in any version.
+  if (options.titleEdits() !== titleEdits) return { kind: 'failed', error: textMoved };
   options.apply();
   return { kind: 'restored' };
 };
@@ -128,6 +152,7 @@ export const restore = async (options: RestoreOptions): Promise<RestoreOutcome> 
 export const restoreMessage = (outcome: RestoreOutcome): string | undefined => {
   switch (outcome.kind) {
     case 'restored':
+    case 'abandoned':
       return undefined;
     case 'refused':
       switch (outcome.reason) {
@@ -141,7 +166,7 @@ export const restoreMessage = (outcome: RestoreOutcome): string | undefined => {
       break;
     case 'failed': {
       if (outcome.error === textMoved) {
-        return 'Not restored: your text changed during the restore. It is kept as it is: restore again to replace it.';
+        return 'Not restored: your text or title changed during the restore. It is kept as it is: restore again to replace it.';
       }
       const detail = inlineError(outcome.error) ?? 'the server is unreachable';
       return `Not restored: your current text could not be kept as a version first (${detail}). It is still in the editor.`;
@@ -154,16 +179,64 @@ export const restoreMessage = (outcome: RestoreOutcome): string | undefined => {
  * The answer may be older than a draft saved or a rename confirmed since: those stay, and the title is never taken
  * from it.
  */
-export const cacheKeptVersion = (queryClient: QueryClient, autosave: Autosave, saved: Document) => {
+export const cacheKeptVersion = async (queryClient: QueryClient, autosave: Autosave, saved: Document) => {
+  autosave.refresh(draftOf(saved));
+  const key = queryKeys.document(saved.id);
+  // A read sent before this answer may still hold the older head, draft or title: drop it, then read again.
+  const reading = queryClient.isFetching({ queryKey: key, exact: true }) > 0;
+  if (reading) await queryClient.cancelQueries({ queryKey: key, exact: true });
   if (!isGone(queryClient, saved.id)) {
-    queryClient.setQueryData<Document>(queryKeys.document(saved.id), (cached) => {
+    queryClient.setQueryData<Document>(key, (cached) => {
       if (cached === undefined) return saved;
       if (cached.revision > saved.revision) return cached;
       const newerDraft = (cached.draft?.draftVersion ?? 0) > (saved.draft?.draftVersion ?? 0);
       return { ...saved, title: cached.title, draft: newerDraft ? cached.draft : saved.draft };
     });
   }
-  autosave.refresh(draftOf(saved));
+  if (reading) void queryClient.invalidateQueries({ queryKey: key, exact: true });
   void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
   void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });
+};
+
+/** A restore that did not restore: the revision it was asked for, and why, shown under that revision only. */
+export interface NotRestored {
+  revision: number;
+  message: string;
+}
+
+/**
+ * The restores of one editor: one at a time, whether the history panel is open or not, and only while the editor is
+ * mounted. `start` runs `run` with the check `restore` needs as `active`; it does nothing while a restore runs.
+ */
+export const useRestore = () => {
+  /** The revision being restored. */
+  const [restoring, setRestoring] = useState<number | undefined>(undefined);
+  const [notRestored, setNotRestored] = useState<NotRestored | undefined>(undefined);
+  const current = useRef<object | undefined>(undefined);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const start = useCallback((revision: number, run: (active: () => boolean) => Promise<RestoreOutcome>) => {
+    if (current.current !== undefined) return;
+    const token = {};
+    current.current = token;
+    const active = () => mounted.current && current.current === token;
+    setRestoring(revision);
+    setNotRestored(undefined);
+    const settle = (outcome: RestoreOutcome) => {
+      if (current.current === token) current.current = undefined;
+      if (!mounted.current) return;
+      setRestoring(undefined);
+      const message = restoreMessage(outcome);
+      if (message !== undefined) setNotRestored({ revision, message });
+    };
+    run(active).then(settle, (error: unknown) => settle({ kind: 'failed', error }));
+  }, []);
+
+  return { restoring, notRestored, start };
 };

@@ -3,35 +3,24 @@ import { displayTitle, revisionNameMaxLength } from '@reviewr/shared';
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
 import { api, inlineError, queryKeys } from '../api';
+import type { NotRestored } from '../restore';
 import { formatDate } from '../format';
 import './RevisionHistory.css';
 
 interface Props {
   document: Document;
-  /**
-   * Restores a revision into the editor. It may take a while (the text on screen is first kept as a version): its
-   * promise holds the message to show when nothing was restored.
-   */
-  onRestore: (revision: Revision) => Promise<string | undefined> | undefined;
+  onRestore: (revision: Revision) => void;
   /** Restoring is not possible now (a merge is being saved). */
   restoreDisabled?: boolean;
+  /** The revision a restore is running for: no other restore starts meanwhile (the text is first kept as a version). */
+  restoring?: number;
+  /** Why the last restore restored nothing, shown under the revision it was asked for. */
+  notRestored?: NotRestored;
 }
 
 /** Lists past revisions; selecting one previews it and offers to restore it into the editor. */
-export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }: Props) => {
+export const RevisionHistory = ({ document, onRestore, restoreDisabled = false, restoring, notRestored }: Props) => {
   const [selected, setSelected] = useState<number | undefined>(undefined);
-  const [restoring, setRestoring] = useState(false);
-  /** Why the last restore restored nothing. */
-  const [notRestored, setNotRestored] = useState<string | undefined>(undefined);
-  const restore = async (revision: Revision) => {
-    setRestoring(true);
-    setNotRestored(undefined);
-    try {
-      setNotRestored(await onRestore(revision));
-    } finally {
-      setRestoring(false);
-    }
-  };
   const revisions = useQuery({
     queryKey: queryKeys.revisions(document.id),
     queryFn: () => api.listRevisions(document.id),
@@ -58,10 +47,7 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
             revision={revision}
             current={revision.revision === document.revision}
             selected={revision.revision === selected}
-            onSelect={() => {
-              setSelected(revision.revision === selected ? undefined : revision.revision);
-              setNotRestored(undefined);
-            }}
+            onSelect={() => setSelected(revision.revision === selected ? undefined : revision.revision)}
           />
         ))}
       </ul>
@@ -77,15 +63,15 @@ export const RevisionHistory = ({ document, onRestore, restoreDisabled = false }
               {preview.data.revision !== document.revision && (
                 <button
                   className="primary"
-                  disabled={restoreDisabled || restoring}
-                  onClick={() => preview.data && void restore(preview.data)}
+                  disabled={restoreDisabled || restoring !== undefined}
+                  onClick={() => preview.data && onRestore(preview.data)}
                 >
-                  {restoring ? 'Restoring…' : 'Restore into editor'}
+                  {restoring === preview.data.revision ? 'Restoring…' : 'Restore into editor'}
                 </button>
               )}
-              {notRestored && (
+              {notRestored?.revision === preview.data.revision && (
                 <p className="error small restore-error" role="alert">
-                  {notRestored}
+                  {notRestored.message}
                 </p>
               )}
             </>
