@@ -1,6 +1,9 @@
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
 import { createDrafts, type Drafts, type DraftsOptions } from './drafts';
+import { createKeptTexts, type KeptTexts } from './keptTexts';
+import type { LocalBuffer } from './localBuffer';
+import { createLocalCopy, type LocalCopy } from './localCopy';
 import { queryKeys } from './queryKeys';
 
 /** The newest draft and head revision the app has seen confirmed for a document. */
@@ -11,8 +14,15 @@ interface Newest {
 
 export interface AppDrafts {
   drafts: Drafts;
-  /** The query function of a document: the server's answer, settled against what the app has seen confirmed. */
+  /**
+   * The query function of a document: the server's answer, settled against what the app has seen confirmed. It first
+   * waits for the restore of a text the phone kept for it, and fails while that text waits (see `KeptTexts`).
+   */
   fetchDocument: (id: string) => Promise<Document>;
+  /** The phone's copy of the texts, with a buffer: the notice reads its failure. */
+  copy?: LocalCopy;
+  /** The texts kept when the app was last stopped, with a buffer. */
+  kept?: KeptTexts;
 }
 
 /**
@@ -24,8 +34,10 @@ export interface AppDrafts {
  */
 export const createAppDrafts = (
   queryClient: QueryClient,
-  options: Omit<DraftsOptions, 'onDraft' | 'onDocument'>,
+  options: Omit<DraftsOptions, 'onDraft' | 'onDocument' | 'copy'> & { buffer?: LocalBuffer },
 ): AppDrafts => {
+  const { buffer, ...draftsOptions } = options;
+  const copy = buffer === undefined ? undefined : createLocalCopy(buffer);
   // One draft and one head per document opened since the app started: the price of telling a late answer apart.
   const newest = new Map<string, Newest>();
   /**
@@ -62,7 +74,8 @@ export const createAppDrafts = (
     });
 
   const drafts = createDrafts({
-    ...options,
+    ...draftsOptions,
+    copy,
     onDraft: (id, draft) => {
       see(id, draft);
       write(id, (cached) => cached && { ...cached, draft });
@@ -82,12 +95,23 @@ export const createAppDrafts = (
     },
   });
 
+  // Not reported to the "Server unreachable" notification, as on the web: its return starts these reads again.
+  const kept =
+    copy === undefined
+      ? undefined
+      : createKeptTexts({ copy, drafts, getDocument: async (id) => settle(await options.api.getDocument(id)) });
+
   const fetchDocument = async (id: string): Promise<Document> => {
+    if (kept !== undefined) {
+      await kept.restore(id);
+      const waiting = kept.blocking(id);
+      if (waiting !== undefined) throw waiting;
+    }
     const started = ++requests;
     const document = settle(await options.api.getDocument(id));
     const rename = renamed.get(id);
     return rename !== undefined && rename.at > started ? { ...document, title: rename.title } : document;
   };
 
-  return { drafts, fetchDocument };
+  return { drafts, fetchDocument, copy, kept };
 };

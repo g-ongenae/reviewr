@@ -10,9 +10,10 @@ import { ToolbarActions, ToolbarButton } from '@/components/ToolbarButton';
 import { HistoryIcon, SaveIcon, StatsIcon, TrashIcon } from '@/components/ToolbarIcons';
 import { WritingStatsPanel } from '@/components/WritingStats';
 import { api, inlineError, queryKeys } from '@/lib/api';
-import { draftsOf, fetchDocument } from '@/lib/appDrafts';
+import { draftsOf, fetchDocument, localCopyOf } from '@/lib/appDrafts';
 import { askToDelete, type SeenPair } from '@/lib/askToDelete';
 import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
+import type { LocalCopy } from '@/lib/localCopy';
 import type { TitleState } from '@/lib/title';
 import { useTheme } from '@/lib/theme';
 import { useWritingBaselines } from '@/lib/writingBaselines';
@@ -95,6 +96,19 @@ const stopText = (stop: Stop): string => {
   }
 };
 
+const noCopy = { subscribe: () => () => undefined, failure: () => undefined, dismissed: () => true };
+
+/**
+ * Whether to tell the writer, once, that the phone is not keeping a copy of the text (its storage is full, or stopped
+ * answering, or this build cannot open it). Nothing else changes: typing goes on, and the text is still saved to the
+ * server.
+ */
+const useLocalCopyNotice = (copy: Pick<LocalCopy, 'subscribe' | 'failure' | 'dismissed'> = noCopy) => {
+  const failure = useSyncExternalStore(copy.subscribe, copy.failure);
+  const dismissed = useSyncExternalStore(copy.subscribe, copy.dismissed);
+  return dismissed ? undefined : failure;
+};
+
 const Editor = ({ document }: { document: Document }) => {
   const theme = useTheme();
   const queryClient = useQueryClient();
@@ -115,6 +129,8 @@ const Editor = ({ document }: { document: Document }) => {
   const hidden = heldTexts({ session, autosave });
   const [showStats, toggleStats] = useWritingStatsPanel();
   const baselines = useWritingBaselines(document, showStats);
+  const copy = localCopyOf(queryClient);
+  const copyFailure = useLocalCopyNotice(copy);
 
   const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
 
@@ -231,6 +247,18 @@ const Editor = ({ document }: { document: Document }) => {
       <View style={[styles.statusBar, { borderColor: theme.border }]}>
         <Text style={{ color: saved ? theme.muted : theme.accent }}>{status}</Text>
       </View>
+      {copyFailure !== undefined && (
+        <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: theme.warning }]}>
+          <Text style={[styles.noticeTitle, { color: theme.text }]}>No copy kept on this phone</Text>
+          <Text style={{ color: theme.text }}>
+            {copyFailure === 'quota' ? 'The phone’s storage is full. ' : ''}Your text is still saved to the server as
+            you write, but if the app is closed before the server has it, it is lost.
+          </Text>
+          <Pressable style={[styles.noticeButton, { backgroundColor: theme.accent }]} onPress={() => copy?.dismiss()}>
+            <Text style={styles.noticeButtonLabel}>OK</Text>
+          </Pressable>
+        </View>
+      )}
       {showStats === true && (
         <WritingStatsPanel
           content={content}
@@ -314,6 +342,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   notice: { paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
+  noticeTitle: { fontWeight: '600' },
   noticeButton: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6 },
   noticeButtonLabel: { color: '#fff', fontWeight: '600' },
   scroll: { padding: 16, flexGrow: 1 },

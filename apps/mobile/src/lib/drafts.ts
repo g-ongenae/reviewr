@@ -2,6 +2,7 @@ import { createAutosave, type Autosave, type Draft, type SaveResult } from '@rev
 import { createReconcileSession, type ReconcileSession, type SessionApi, type Side } from '@reviewr/reconcile';
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import { ApiError, conflictOf } from '@reviewr/shared';
+import type { LocalCopy } from './localCopy';
 import { createTitleSaver, type TitleSaver } from './title';
 
 /** The draft an editor opens on: the document's draft, or its saved content when it has none. */
@@ -51,8 +52,16 @@ export interface DraftsOptions {
   onDraft: (id: string, draft: DocumentDraft) => void;
   /** A document the server answered with: its text and revision (a version, a reconciliation), or its title. */
   onDocument: (document: Document, part: 'text' | 'title') => void;
+  /** The copy of each text kept on the phone until the server confirmed it (see `localCopy.ts`); none if absent. */
+  copy?: LocalCopy;
   debounceMs?: number;
   now?: () => Date;
+}
+
+/** A text the phone kept in its local buffer, with the server draft it was written from. */
+export interface KeptText {
+  content: string;
+  base: Draft;
 }
 
 /** How a restore ended: `refused` while a conflict or a deletion holds the text, `failed` when it could not be kept. */
@@ -99,8 +108,15 @@ export interface Drafts {
     version: { title: string | null; content: string },
     head: { revision: number; content: string },
   ): Promise<RestoreOutcome>;
-  /** Drops a deleted document's entry without saving. */
+  /** Drops a deleted document's entry without saving; the phone's copy of its text goes too. */
   discard(id: string): void;
+  /**
+   * Opens the entry of a document on a text the phone kept, as the local text on the base it was written from, and
+   * reconciles it with the document's draft read just now: saved if the server holds it, sent on the base if the server
+   * is still there, a conflict if the server moved to another text, never a silent replacement either way. It is then
+   * saved in the background, as a document no screen shows. `false`, and nothing done, if the document has an entry.
+   */
+  recover(document: Document, kept: KeptText): boolean;
 }
 
 const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
@@ -143,7 +159,7 @@ export const shownDocument = (drafts: Drafts, id: string, read: Document | undef
   read ?? drafts.get(id)?.document;
 
 export const createDrafts = (options: DraftsOptions): Drafts => {
-  const { report, onDraft, onDocument, debounceMs, now = () => new Date() } = options;
+  const { report, onDraft, onDocument, copy, debounceMs, now = () => new Date() } = options;
   const entries = new Map<string, Entry>();
 
   const reported = async <T>(request: () => Promise<T>): Promise<T> => {
@@ -163,10 +179,10 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
     renameDocument: (id, title) => reported(() => options.api.renameDocument(id, title)),
   };
 
-  const create = (document: Document): Entry => {
+  const create = (document: Document, base: Draft = draftOf(document)): Entry => {
     const { id } = document;
     const autosave = createAutosave({
-      base: draftOf(document),
+      base,
       debounceMs,
       save: async (draft) => {
         try {
@@ -178,6 +194,8 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
         }
       },
     });
+    // The phone's copy follows every state of the machine, before anything else hears it.
+    if (copy !== undefined) autosave.subscribe(() => copy.mirror(id, autosave.getSnapshot()));
     const session = createReconcileSession({
       id,
       autosave,
@@ -351,6 +369,20 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
     discard(id) {
       const entry = entries.get(id);
       if (entry !== undefined) drop(id, entry);
+      copy?.forget(id);
+    },
+
+    recover(document, kept) {
+      const { id } = document;
+      if (entries.has(id)) return false;
+      const entry = create(document, kept.base);
+      entries.set(id, entry);
+      copy?.adopt(id);
+      entry.autosave.edit(kept.content);
+      // Kept, never taken as the text: a draft holding another text than the kept one and its base is a conflict.
+      entry.autosave.refresh(draftOf(document), true);
+      release(id, entry);
+      return true;
     },
   };
 };
