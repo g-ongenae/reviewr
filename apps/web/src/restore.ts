@@ -11,7 +11,7 @@ import type { QueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { inlineError, queryKeys } from './api';
 import type { Autosave, AutosaveState } from './autosave/autosave';
-import { draftOf, isGone } from './autosave/useAutosave';
+import { cacheDocument, draftOf } from './autosave/useAutosave';
 
 /** The text or the title on screen changed during the restore: replacing them would lose what was typed. */
 export const textMoved = new Error('The text changed during the restore');
@@ -185,14 +185,7 @@ export const cacheKeptVersion = async (queryClient: QueryClient, autosave: Autos
   // A read sent before this answer may still hold the older head, draft or title: drop it, then read again.
   const reading = queryClient.isFetching({ queryKey: key, exact: true }) > 0;
   if (reading) await queryClient.cancelQueries({ queryKey: key, exact: true });
-  if (!isGone(queryClient, saved.id)) {
-    queryClient.setQueryData<Document>(key, (cached) => {
-      if (cached === undefined) return saved;
-      if (cached.revision > saved.revision) return cached;
-      const newerDraft = (cached.draft?.draftVersion ?? 0) > (saved.draft?.draftVersion ?? 0);
-      return { ...saved, title: cached.title, draft: newerDraft ? cached.draft : saved.draft };
-    });
-  }
+  cacheDocument(queryClient, saved);
   if (reading) void queryClient.invalidateQueries({ queryKey: key, exact: true });
   void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
   void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });

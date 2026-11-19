@@ -26,6 +26,7 @@ import {
   useKeptCopies,
   usePagesNotCreated,
 } from '../autosave/useAutosave';
+import { cacheRename } from '../documentCache';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { cacheKeptVersion, restore, useRestore } from '../restore';
@@ -176,10 +177,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
       // A read sent before this answer may still hold the old title: drop it, then read again.
       const reading = queryClient.isFetching({ queryKey: key, exact: true }) > 0;
       if (reading) await queryClient.cancelQueries({ queryKey: key, exact: true });
-      // Only the title: the answer's draft may be older than one saved since.
-      if (!isGone(queryClient, saved.id)) {
-        queryClient.setQueryData<Document>(key, (cached) => cached && { ...cached, title: saved.title });
-      }
+      if (!isGone(queryClient, saved.id)) cacheRename(queryClient, saved);
       if (reading) void queryClient.invalidateQueries({ queryKey: key, exact: true });
       void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
     },
@@ -230,21 +228,8 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
     },
     onSuccess: async (saved) => {
       if (saved === undefined) return;
-      // The answer may be older than a draft saved or a rename confirmed since the request started: those stay. The
-      // title never comes from this answer: it cannot tell a title older than the cached one from a newer one (the
-      // title may have changed and changed back meanwhile), so only renames and reads of the document write it.
-      if (!isGone(queryClient, saved.id)) {
-        queryClient.setQueryData<Document>(queryKeys.document(saved.id), (cached) => {
-          if (cached === undefined) return saved;
-          if (cached.revision > saved.revision) return cached;
-          const newerDraft = (cached.draft?.draftVersion ?? 0) > (saved.draft?.draftVersion ?? 0);
-          return {
-            ...saved,
-            title: cached.title,
-            draft: newerDraft ? cached.draft : saved.draft,
-          };
-        });
-      }
+      // The answer may be older than a draft saved or a rename confirmed since the request started: those stay.
+      cacheDocument(queryClient, saved);
       autosave.refresh(draftOf(saved));
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true }),

@@ -4,6 +4,7 @@ import type { QueryClient, QueryState } from '@tanstack/react-query';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { api, isNotFound, queryKeys, reachability } from '../api';
+import { readDocument, seeDraft, writeDocument } from '../documentCache';
 import { hasUnsavedChanges } from '../unsavedChanges';
 import { createAutosave, type Autosave, type AutosaveState, type Draft, type SaveResult } from './autosave';
 import {
@@ -112,20 +113,25 @@ const goneState = (state: QueryState | undefined): boolean => state?.status === 
 export const isGone = (queryClient: QueryClient, id: string): boolean =>
   registryOf(queryClient).get(id)?.deleted ?? goneState(queryClient.getQueryState(queryKeys.document(id)));
 
-/** Puts a document a write answered with in the cache, unless the document is known to be gone. */
-export const cacheDocument = (queryClient: QueryClient, document: Document) => {
-  if (!isGone(queryClient, document.id)) queryClient.setQueryData(queryKeys.document(document.id), document);
+/**
+ * Puts a document in the cache, unless it is known to be gone; never under a draft or a head this tab saw confirmed
+ * since (see `writeDocument`). The title comes from renames and reads only (`read`): a write's answer cannot tell an
+ * older title from a newer one (it may have changed and changed back meanwhile), so the cached one stays.
+ */
+export const cacheDocument = (queryClient: QueryClient, document: Document, read = false) => {
+  if (isGone(queryClient, document.id)) return;
+  writeDocument(queryClient, document.id, (cached) =>
+    read || cached === undefined ? document : { ...document, title: cached.title },
+  );
 };
 
 /** A draft was just saved: it goes in the cache, and the document moves up the list, without a request. */
 const cacheSavedDraft = (queryClient: QueryClient, id: string, draft: DocumentDraft) => {
+  seeDraft(queryClient, id, draft);
   if (isGone(queryClient, id)) return;
   const updatedAt = new Date().toISOString();
-  queryClient.setQueryData<Document>(queryKeys.document(id), (document) => {
-    // A slow answer must not move the cached draft back under a newer one read since.
-    if (document === undefined || (document.draft?.draftVersion ?? 0) > draft.draftVersion) return document;
-    return { ...document, draft, updatedAt };
-  });
+  // A slow answer does not move the cached draft back under a newer one read since (see `writeDocument`).
+  writeDocument(queryClient, id, (document) => document && { ...document, draft, updatedAt });
   queryClient.setQueryData<DocumentSummary[]>(queryKeys.documents, (list) => {
     const summary = list?.find((item) => item.id === id);
     return summary === undefined ? list : [{ ...summary, updatedAt }, ...(list ?? []).filter((item) => item.id !== id)];
@@ -270,6 +276,7 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
       }
     }
     let document: Document;
+    let read = false;
     try {
       document = await api.createDocument(creation);
       reachability.reportSuccess();
@@ -288,7 +295,8 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
       if (status !== 422) return { kind: 'failed', error };
       // Rule 2: the id holds another first text; the page most likely is that document.
       try {
-        document = await api.getDocument(id);
+        document = await readDocument(queryClient, id);
+        read = true;
         reachability.reportSuccess();
       } catch (readError) {
         if (isNotFound(readError)) return deletedElsewhere(error);
@@ -300,7 +308,7 @@ const entryFor = (queryClient: QueryClient, id: string, draft: Draft, create = f
     createdIn(queryClient).add(id);
     // Not announced: the blank page must take its address before the app looks for another page (readers skip it).
     entry.listed = false;
-    cacheDocument(queryClient, document);
+    cacheDocument(queryClient, document, read);
     void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
     // The document as it is now: it holds the creation's text, unless its draft moved since or another text created
     // it (then the machine reconciles it with its own texts, and never overwrites another one).
@@ -438,9 +446,9 @@ const restore = async (queryClient: QueryClient, id: string, left: readonly Left
   let server: Draft | undefined;
   if (registry.get(id) === undefined) {
     try {
-      const document = await api.getDocument(id);
+      const document = await readDocument(queryClient, id);
       reachability.reportSuccess();
-      cacheDocument(queryClient, document);
+      cacheDocument(queryClient, document, true);
       server = draftOf(document);
     } catch (error) {
       // Not reported to `reachability`: its return triggers this restore again, which would loop while only this
