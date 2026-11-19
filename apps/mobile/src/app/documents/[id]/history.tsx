@@ -77,6 +77,11 @@ export default function HistoryScreen() {
     <FlatList
       data={revisions.data}
       keyExtractor={(revision) => String(revision.revision)}
+      ListEmptyComponent={
+        <Text style={[styles.message, { color: theme.muted }]}>
+          No version yet. Your text is saved as a draft; “Save version” in the editor keeps it as the first version.
+        </Text>
+      }
       ItemSeparatorComponent={() => <View style={[styles.separator, { backgroundColor: theme.border }]} />}
       renderItem={({ item }) => {
         const isSelected = item.revision === selected;

@@ -1,11 +1,16 @@
 import { displayTitle } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { randomUUID } from 'expo-crypto';
 import { router, Stack } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { ToolbarButton } from '@/components/ToolbarButton';
 import { api, apiUrl, inlineError, queryKeys } from '@/lib/api';
 import { formatDate } from '@/lib/format';
+import { createNewDocument } from '@/lib/newDocument';
 import { useTheme } from '@/lib/theme';
+
+/** "New": an empty document with no version yet, whose creation is sent again on the same id if its answer is lost. */
+const newDocument = createNewDocument({ api, newId: randomUUID });
 
 export default function DocumentListScreen() {
   const theme = useTheme();
@@ -13,7 +18,7 @@ export default function DocumentListScreen() {
   const documents = useQuery({ queryKey: queryKeys.documents, queryFn: () => api.listDocuments() });
 
   const create = useMutation({
-    mutationFn: () => api.createDocument({ content: '' }),
+    mutationFn: newDocument,
     onSuccess: async (document) => {
       queryClient.setQueryData(queryKeys.document(document.id), document);
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });

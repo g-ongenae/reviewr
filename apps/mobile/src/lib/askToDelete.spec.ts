@@ -7,8 +7,7 @@ import { FakeApi } from './fakeApi';
 const debounceMs = 1000;
 
 /** The editor screen around `askToDelete`: the drafts registry, the fake server, an alert held open. */
-const setup = () => {
-  const server = new FakeApi('morning');
+const setup = (server = new FakeApi('morning')) => {
   const drafts = createDrafts({
     api: server,
     report: { reportSuccess: vi.fn(), reportError: vi.fn() },
@@ -66,6 +65,16 @@ describe('askToDelete on the editor screen', () => {
 
     expect(await sent()).toBeUndefined();
     expect(server.log).toEqual(['deleteDocument 1 1']);
+    expect(server.gone).toBe(true);
+  });
+
+  it('deletes a document with no version yet with revision 0 and its draft version', async () => {
+    const { server, tapDelete, pressDelete, sent } = setup(FakeApi.draftOnly('first words'));
+    tapDelete();
+    pressDelete();
+
+    expect(await sent()).toBeUndefined();
+    expect(server.log).toEqual(['deleteDocument 0 1']);
     expect(server.gone).toBe(true);
   });
 

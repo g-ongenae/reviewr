@@ -6,8 +6,7 @@ import { FakeApi } from './fakeApi';
 
 const debounceMs = 1000;
 
-const setup = (content = 'base') => {
-  const server = new FakeApi(content);
+const setup = (content = 'base', server = new FakeApi(content)) => {
   const report = { reportSuccess: vi.fn(), reportError: vi.fn() };
   const documents: Document[] = [];
   const drafts = createDrafts({
@@ -499,6 +498,49 @@ describe('createDrafts', () => {
       server.otherDevice('theirs');
       drafts.read(server.read());
       expect(state()).toMatchObject({ status: 'saved', content: 'theirs' });
+    });
+  });
+
+  describe('a document with no version yet (revision 0)', () => {
+    const draftOnly = () => setup('', FakeApi.draftOnly());
+
+    it('opens on its empty draft, and autosaves the text without making a version', async () => {
+      const { server, entry, state } = draftOnly();
+      expect(state()).toMatchObject({ status: 'saved', content: '' });
+      entry.autosave.edit('first words');
+      await wait(debounceMs);
+      expect(state()).toMatchObject({ status: 'saved', content: 'first words' });
+      expect(server.document).toMatchObject({
+        revision: 0,
+        content: '',
+        draft: { content: 'first words', draftVersion: 2, baseRevision: null },
+      });
+      expect(server.revisions).toEqual([]);
+    });
+
+    it('"Save version" makes nothing of an empty draft, then makes revision 1 on no base', async () => {
+      const { server, drafts, entry, state } = draftOnly();
+      const createRevision = vi.spyOn(server, 'createRevision');
+      expect(await drafts.saveVersion('doc', 0)).toMatchObject({ revision: 0, content: '' });
+      expect(server.revisions).toEqual([]);
+
+      entry.autosave.edit('first words');
+      const saved = await drafts.saveVersion('doc', 0);
+      expect(saved).toMatchObject({ revision: 1, content: 'first words', draft: { baseRevision: 1 } });
+      expect(server.revisions).toEqual([{ revision: 1, content: 'first words', name: undefined }]);
+      expect(createRevision.mock.calls.map(([, input]) => input.baseRevision)).toEqual([null, null]);
+      expect(state()).toMatchObject({ status: 'saved', content: 'first words' });
+    });
+
+    it('"Keep mine" keeps the other device\'s text as revision 1, then saves mine', async () => {
+      const context = draftOnly();
+      await conflict(context);
+      await context.drafts.keepMine('doc');
+      await wait();
+      expect(context.server.revisions.map((revision) => revision.content)).toEqual(['theirs']);
+      expect(context.server.overwritten).toEqual([{ text: 'theirs', kept: true }]);
+      expect(context.state()).toMatchObject({ status: 'saved', content: 'mine' });
+      expect(context.server.draft.content).toBe('mine');
     });
   });
 });
