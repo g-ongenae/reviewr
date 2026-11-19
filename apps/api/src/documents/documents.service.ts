@@ -321,13 +321,17 @@ export class DocumentsService {
    * On a document without a revision yet, the base is null or 0, and the version saved is revision 1. An empty
    * draft there is the (empty) head, so it is a no-op: no empty first version.
    *
-   * With an `idempotencyKey`, the key is looked up first, under the row lock. Known for the same request: the
-   * document as it is now, with the revision recorded in `savedRevision`, and none of the checks above (the draft
-   * and the head may have moved since; the revision recorded exists, the foreign key sees to it). Known for another
-   * request: 422. Unknown: the checks above decide, and a success records the key with the revision that holds the
-   * draft text, the one created or the head of a no-op. A refusal rolls back and records nothing, so the same key is
-   * decided again by the same checks, which can only refuse again or find the draft is the head. The empty no-op
-   * of a document without a revision has no revision to record: `savedRevision` is null and the key stays unknown.
+   * With an `idempotencyKey`, the key is looked up first, under the row lock (it is a `uuid` column, so any letter
+   * case of the same key finds it). Known for the same request: the document as it is now, with the revision
+   * recorded in `savedRevision`, and none of the checks above (the draft and the head may have moved since; the
+   * revision recorded exists, the foreign key sees to it). Known for another request: 422. Unknown: the checks above
+   * decide, and a success records the key with the revision that holds the draft text, the one created or the head
+   * of a no-op. A refusal rolls back and records nothing, so the same request sent again is decided again by the same
+   * checks. For counters the client had seen, these can only refuse again or find that the draft text of
+   * `draftVersion` became the head (counters only grow, and a draft text that changes bumps `draftVersion`). A
+   * request carrying a `draftVersion` the server had not reached yet can succeed later as a normal save of the draft
+   * text at that version, recorded then. The empty no-op of a document without a revision has no revision to
+   * record: `savedRevision` is null and the key stays unknown, so the same request sent again is decided again.
    */
   public async createRevision(id: string, input: CreateRevisionDto): Promise<SavedVersion> {
     return this.db.transaction(async (tx) => {
@@ -338,7 +342,8 @@ export class DocumentsService {
       if (key === undefined) {
         return toDocument(await saveDraftAsRevision(tx, current, input));
       }
-      const requestHash: string = revisionRequestHash(id, input);
+      // The locked row's id, not the route's: PostgreSQL finds the document whatever the letter case of its UUID.
+      const requestHash: string = revisionRequestHash(current.id, input);
       const recorded: number | undefined = await recordedRevision(tx, key, requestHash);
       if (recorded !== undefined) {
         return { ...toDocument(current), savedRevision: recorded };

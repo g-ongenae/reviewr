@@ -25,21 +25,6 @@ export interface TestDatabase {
 }
 
 /**
- * Create and migrate a database named `<prefix>_<pid>_<time>`.
- */
-export const openTestDatabase = async (prefix: string): Promise<TestDatabase> => {
-  const name: string = `${prefix}_${process.pid}_${Date.now()}`;
-  const admin: pg.Client = new pg.Client({ connectionString: serverUrl });
-  await admin.connect();
-  await admin.query(`CREATE DATABASE "${name}"`);
-  const url: URL = new URL(serverUrl ?? '');
-  url.pathname = `/${name}`;
-  await runMigrations(url.toString());
-
-  return { name, admin, pool: new pg.Pool({ connectionString: url.toString(), max: 10 }) };
-};
-
-/**
  * Close the pool and drop the database.
  *
  * `pool.end()` resolves before the server has closed every session. Dropping the database by force at that moment
@@ -47,8 +32,12 @@ export const openTestDatabase = async (prefix: string): Promise<TestDatabase> =>
  * So wait until the sessions are gone, then drop without force: if one is still there after 10 s, the drop fails and
  * names the database, which is left for a manual cleanup.
  */
-export const closeTestDatabase = async ({ name, admin, pool }: TestDatabase): Promise<void> => {
-  await pool.end();
+export const closeTestDatabase = async ({
+  name,
+  admin,
+  pool,
+}: Omit<TestDatabase, 'pool'> & { pool: pg.Pool | undefined }): Promise<void> => {
+  await pool?.end();
   for (let attempt: number = 0; attempt < 400; attempt += 1) {
     const { rows } = await admin.query<{ n: number }>(
       'SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1',
@@ -64,4 +53,31 @@ export const closeTestDatabase = async ({ name, admin, pool }: TestDatabase): Pr
   } finally {
     await admin.end();
   }
+};
+
+/**
+ * Create and migrate a database named `<prefix>_<pid>_<time>`. If a step fails after the database was created, the
+ * database is dropped and the admin connection closed before the error is thrown: the caller gets nothing to clean.
+ */
+export const openTestDatabase = async (prefix: string): Promise<TestDatabase> => {
+  const name: string = `${prefix}_${process.pid}_${Date.now()}`;
+  const admin: pg.Client = new pg.Client({ connectionString: serverUrl });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE "${name}"`);
+  } catch (error) {
+    await admin.end();
+    throw error;
+  }
+  const url: URL = new URL(serverUrl ?? '');
+  url.pathname = `/${name}`;
+  try {
+    await runMigrations(url.toString());
+  } catch (error) {
+    // `runMigrations` ends its own pool; the drop waits for its sessions like `closeTestDatabase`.
+    await closeTestDatabase({ name, admin, pool: undefined });
+    throw error;
+  }
+
+  return { name, admin, pool: new pg.Pool({ connectionString: url.toString(), max: 10 }) };
 };

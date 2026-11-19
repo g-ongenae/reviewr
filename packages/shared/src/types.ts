@@ -171,7 +171,9 @@ export interface CreateRevisionInput {
    * saved, a rename), and creates nothing. The same key with another request (another document, `draftVersion`,
    * `baseRevision` or name) is refused with 422, and nothing is created. A refusal (409, 404, 400) records nothing:
    * the same request sent again is decided again, by the same checks. A record goes with its document: once the
-   * document is deleted, the same request is answered 404.
+   * document is deleted, the same request is answered 404. The empty draft of a document without a revision is the
+   * exception: there is nothing to save (`savedRevision` null), no key is recorded, and the same request sent again
+   * is decided again, so it may be refused if the draft moved meanwhile.
    */
   idempotencyKey?: string;
 }

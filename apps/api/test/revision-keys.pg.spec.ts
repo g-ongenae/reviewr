@@ -71,23 +71,72 @@ describe.skipIf(serverUrl === undefined)('Idempotency keys of versions on Postgr
     }
   });
 
-  it('one key sent concurrently on two documents: one version is saved, the other request refused', async () => {
-    for (let round: number = 0; round < rounds; round += 1) {
+  /** Wait until `count` sessions of the test database are blocked on a lock. */
+  const waitForBlocked = async (count: number): Promise<void> => {
+    for (let attempt: number = 0; attempt < 200; attempt += 1) {
+      const { rows } = await database.admin.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND wait_event_type = 'Lock'`,
+        [database.name],
+      );
+      if (rows[0]?.n === count) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`expected ${count} session(s) waiting on a lock`);
+  };
+
+  it('one key on two documents, both past their lookup: one version is saved, the other rolled back', async () => {
+    for (let round: number = 0; round < 5; round += 1) {
       const docs: Document[] = await Promise.all([create('a1'), create('b1')]);
       for (const doc of docs) {
         await service.saveDraft(doc.id, { content: 'v2', draftVersion: 1 });
       }
-      const input = { draftVersion: 2, baseRevision: 1, idempotencyKey: randomUUID() };
-      const results = await Promise.allSettled(
-        docs.map(async (doc) => service.createRevision(doc.id, { ...input, name: null })),
-      );
+      const input = { name: null, draftVersion: 2, baseRevision: 1, idempotencyKey: randomUUID() };
 
-      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-      const refused: unknown[] = results.flatMap((r) => (r.status === 'rejected' ? [r.reason as unknown] : []));
-      expect(refused).toHaveLength(1);
-      expect(refused[0]).toBeInstanceOf(UnprocessableEntityException);
-      const counts: number[] = await Promise.all(docs.map(async (doc) => (await revisionsOf(doc.id)).length));
-      expect([...counts].sort()).toEqual([1, 2]);
+      // SHARE lets the lookups (plain selects) through and stops the inserts into the table. Both requests blocked
+      // there have looked the key up, missed it, and appended their revision: they meet at the insert conflict.
+      const holder: pg.PoolClient = await pool.connect();
+      let failure: Error | undefined;
+      let pending: Promise<PromiseSettledResult<unknown>[]> | undefined;
+      try {
+        await holder.query('BEGIN');
+        await holder.query('LOCK TABLE revision_requests IN SHARE MODE');
+        pending = Promise.allSettled(docs.map(async (doc) => service.createRevision(doc.id, input)));
+        await waitForBlocked(2);
+        await holder.query('COMMIT');
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
+        throw error;
+      } finally {
+        holder.release(failure);
+        await pending?.catch(() => undefined);
+      }
+      const results: PromiseSettledResult<unknown>[] = await pending;
+
+      const winners: number[] = results.flatMap((r, index) => (r.status === 'fulfilled' ? [index] : []));
+      expect(winners).toHaveLength(1);
+      const winner: Document = docs[winners[0] ?? 0] as Document;
+      const loser: Document = docs[1 - (winners[0] ?? 0)] as Document;
+      const refused = results.find((r) => r.status === 'rejected');
+      expect(refused?.reason).toBeInstanceOf(UnprocessableEntityException);
+
+      expect(await revisionsOf(winner.id)).toEqual([
+        { revision: 1, content: winner.content },
+        { revision: 2, content: 'v2' },
+      ]);
+      // The loser's revision, head and draft were rolled back with the refused insert.
+      expect(await revisionsOf(loser.id)).toEqual([{ revision: 1, content: loser.content }]);
+      expect(await service.get(loser.id)).toMatchObject({
+        revision: 1,
+        content: loser.content,
+        draft: { content: 'v2', draftVersion: 2, baseRevision: 1 },
+      });
+      const { rows } = await pool.query<{ documentId: string; revision: number }>(
+        'SELECT document_id AS "documentId", revision FROM revision_requests WHERE idempotency_key = $1',
+        [input.idempotencyKey],
+      );
+      expect(rows).toEqual([{ documentId: winner.id, revision: 2 }]);
     }
   });
 });
