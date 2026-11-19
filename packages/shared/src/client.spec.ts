@@ -341,11 +341,11 @@ describe('ReviewrClient time limit', () => {
     return outcome;
   };
 
-  it('fails as unreachable after 30 s without an answer, and aborts the request', async () => {
+  it('fails as unreachable after 15 s without an answer, and aborts the request', async () => {
     const fetchFn = silentFetch();
     const outcome = settled(new ReviewrClient('http://api.test', fetchFn).listDocuments());
 
-    await vi.advanceTimersByTimeAsync(29_999);
+    await vi.advanceTimersByTimeAsync(14_999);
     expect(outcome.done).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(outcome.error).toBeInstanceOf(NetworkError);
@@ -375,7 +375,7 @@ describe('ReviewrClient time limit', () => {
     const fetchFn = vi.fn(async () => new Response(endless, { status: 200 }));
     const outcome = settled(new ReviewrClient('http://api.test', fetchFn).getDocument('id'));
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(15_000);
     expect(isServerUnreachable(outcome.error)).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -402,9 +402,9 @@ describe('ReviewrClient time limit', () => {
 
     await vi.advanceTimersByTimeAsync(5000);
     expect(isServerUnreachable(health.error)).toBe(true);
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(15_000);
     expect(save.done).toBe(false);
-    await vi.advanceTimersByTimeAsync(6000);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(isServerUnreachable(save.error)).toBe(true);
   });
 });

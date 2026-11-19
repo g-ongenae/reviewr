@@ -21,7 +21,7 @@ import { NetworkError } from './network-error.js';
 const httpNoContent: number = 204;
 
 /** Default limit for a request to end, answer included: see {@link ClientOptions.timeoutMs}. */
-const defaultTimeoutMs: number = 30_000;
+const defaultTimeoutMs: number = 15_000;
 
 /** Default limit for the health check: see {@link ClientOptions.healthTimeoutMs}. */
 const defaultHealthTimeoutMs: number = 5000;
@@ -38,7 +38,7 @@ const msPerSecond: number = 1000;
 export interface ClientOptions {
   /**
    * Limit of a request, in milliseconds, plus one second per 16 KiB of body it sends (a draft can be long, and is
-   * answered with its text). Default: 30 s, for a home server reached through a VPN from a slow mobile network.
+   * answered with its text). Default: 15 s, for a home server reached through a VPN from a slow mobile network.
    */
   timeoutMs?: number;
   /** Limit of the health check, in milliseconds. Default: 5 s, the interval at which the apps poll it. */
