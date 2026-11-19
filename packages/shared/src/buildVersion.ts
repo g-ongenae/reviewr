@@ -27,6 +27,9 @@ export const readBuildVersion = (git: RunGit, now: Date = new Date()): BuildVers
   }
 };
 
+/** Length of an ISO 8601 date up to its minutes: "2026-11-19T22:10". */
+const isoMinuteLength: number = 16;
+
 /** Options of {@link formatBuildVersion}; tests set them, the apps use the defaults. */
 export interface FormatBuildVersionOptions {
   /** IANA time zone the build date is read in. Defaults to the device's. */
@@ -61,19 +64,24 @@ export const formatBuildVersion = (compiled: string | undefined, options: Format
   if (version === undefined) {
     return 'unknown';
   }
-  const builtAt: Date = new Date(version.builtAt);
-  const day: string = new Intl.DateTimeFormat('en-GB', {
-    day: 'numeric',
-    month: 'short',
-    timeZone: options.timeZone,
-  }).format(builtAt);
-  const time: string = new Intl.DateTimeFormat('en-GB', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-    timeZone: options.timeZone,
-  }).format(builtAt);
   const commit: string = version.commit === undefined ? 'unknown' : `${version.commit}${version.dirty ? '+' : ''}`;
+  const builtAt: Date = new Date(version.builtAt);
+  try {
+    const day: string = new Intl.DateTimeFormat('en-GB', {
+      day: 'numeric',
+      month: 'short',
+      timeZone: options.timeZone,
+    }).format(builtAt);
+    const time: string = new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+      timeZone: options.timeZone,
+    }).format(builtAt);
 
-  return `${commit} · ${day} ${time}`;
+    return `${commit} · ${day} ${time}`;
+  } catch {
+    // An engine that cannot format the date must not take the screen down: the date as recorded, in UTC.
+    return `${commit} · ${builtAt.toISOString().slice(0, isoMinuteLength).replace('T', ' ')} UTC`;
+  }
 };

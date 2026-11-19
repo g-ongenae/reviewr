@@ -51,6 +51,11 @@ describe('formatBuildVersion', () => {
     );
   });
 
+  it('falls back to the recorded date when the engine cannot format it', () => {
+    const version: string = compiled({ commit: 'eae0529', dirty: false, builtAt: '2026-11-19T22:10:00.000Z' });
+    expect(formatBuildVersion(version, { timeZone: 'Not/AZone' })).toBe('eae0529 · 2026-11-19 22:10 UTC');
+  });
+
   it('says "unknown" when the bundle holds no version', () => {
     expect(formatBuildVersion(undefined)).toBe('unknown');
     expect(formatBuildVersion('')).toBe('unknown');
