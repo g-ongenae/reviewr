@@ -211,6 +211,63 @@ describe('the local buffer, from the editor', () => {
     expect(server.log.filter((request) => request.startsWith('saveDraft'))).toEqual([]);
   });
 
+  /** A restart after an undo back to `A`: nothing comes back, and nothing is sent. */
+  const restartsOnA = async (server: FakeApi) => {
+    const second = start(server);
+    const { state } = await second.show();
+    await wait(debounceMs);
+    expect(state()).toMatchObject({ status: 'saved', content: 'A' });
+    expect(server.log.filter((request) => request.startsWith('saveDraft'))).toEqual([]);
+  };
+
+  it('tries a failed clean-up again on its own after an undo, without another edit', async () => {
+    const server = new FakeApi('A');
+    const first = start(server);
+    const { entry, state } = await first.show();
+    entry.autosave.edit('A and B');
+    await first.copy.settled();
+    let failures = 1;
+    first.control.before = (sql) => {
+      if (/^\s*DELETE/.test(sql) && failures-- > 0) throw new Error('disk I/O error');
+    };
+    entry.autosave.edit('A');
+    expect(state().status).toBe('saved');
+    await first.copy.settled();
+    expect(stored()?.content).toBe('A and B');
+    // Nothing else changes in the editor: the clean-up runs again after its backoff.
+    await wait(1000);
+    await first.copy.settled();
+    expect(stored()).toBeUndefined();
+    await first.kill();
+    await restartsOnA(server);
+  });
+
+  it('deletes a text whose put timed out and committed after the undo', async () => {
+    const server = new FakeApi('A');
+    const first = start(server);
+    const { entry, state } = await first.show();
+    const insert = hold();
+    first.control.before = (sql) => (/^\s*INSERT/.test(sql) ? insert.held : undefined);
+    entry.autosave.edit('A and B');
+    await wait();
+    // Undone while SQLite still runs the INSERT: saved without a request.
+    entry.autosave.edit('A');
+    expect(state().status).toBe('saved');
+    // The put answers `stalled` after 10 s; the clean-up meets the hung statement and answers `stalled` too.
+    await wait(10_000);
+    expect(first.copy.failure()).toBe('stalled');
+    // The INSERT commits late.
+    insert.release();
+    await wait();
+    expect(stored()?.content).toBe('A and B');
+    // The clean-up runs again, and deletes the row holding exactly the text whose put timed out.
+    await wait(1000);
+    await first.copy.settled();
+    expect(stored()).toBeUndefined();
+    await first.kill();
+    await restartsOnA(server);
+  });
+
   it('brings back a text typed offline after the app was killed, and saves it once the server is back', async () => {
     const server = new FakeApi('A');
     const first = start(server);

@@ -20,7 +20,10 @@ import type { BufferBase, BufferFailureReason, LocalBuffer } from './localBuffer
  *    newer build, damaged) is never deleted by this build.
  * 3. **A confirmation deletes the owned row whatever it holds.** The server holds the machine's text, and every text
  *    this run put before it is one the writer moved on from (typed over, undone). Calls run in order, so that delete
- *    never removes a text put after it.
+ *    never removes a text put after it. A put that timed out may still commit (its outcome is unknown until the buffer
+ *    answers again): a row not owned is then deleted only if it holds exactly one of those texts, which only this run
+ *    can have written. A clean-up that fails is tried again on its own, with a backoff, until it lands or a newer put
+ *    makes it needless: the machine may stay `saved` with no other change until the app exits.
  *
  * **What a kill can lose.** A text is kept once its put answered `ok`. Until then it is in memory only: the newest
  * text waits behind the put in progress, and puts not started yet are coalesced, so a kill brings back the last text
@@ -58,13 +61,26 @@ type Op = { kind: 'put'; content: string; base: BufferBase } | { kind: 'delete' 
 interface Mirror {
   queue: Op[];
   running: boolean;
-  /** The last operation queued, to skip repeats; cleared when a write fails, so that the next one is not skipped. */
+  /**
+   * The last operation queued, to skip repeats. Cleared when a put fails, so that the next one is not skipped; a failed
+   * clean-up stays, and is tried again while it is the last (`retryLater`).
+   */
   last?: Op;
   /** Whether a put was queued since the last delete: only then is a confirmation worth a delete. */
   dirty: boolean;
   /** Whether the row is this run's to delete (rule 2). */
   owned: boolean;
+  /**
+   * The texts of puts that timed out since the last write that landed: each may still commit. Bounded by the edits made
+   * while one statement hangs, and cleared once a write lands (the hung statement settled before it).
+   */
+  unknown: Set<string>;
+  /** How many times in a row the clean-up failed, for its backoff. */
+  retries: number;
 }
+
+/** Delay before the `attempt`-th new try of a failed clean-up: 1 s, 2 s, 4 s… up to 30 s. */
+const retryDelayMs = (attempt: number) => Math.min(1000 * 2 ** (attempt - 1), 30_000);
 
 const sameOp = (a: Op | undefined, b: Op): boolean => {
   if (a === undefined || a.kind !== b.kind) return false;
@@ -107,6 +123,44 @@ export const createLocalCopy = (buffer: LocalBuffer): LocalCopy => {
     return result.ok;
   });
 
+  /**
+   * Deletes what this run wrote in the row (rule 3): the owned row, or a row holding exactly a text whose put timed out.
+   * `true` once nothing this run wrote can be left there.
+   */
+  const cleanUp = async (id: string, mirror: Mirror): Promise<boolean> => {
+    if (mirror.owned) {
+      const result = await buffer.delete(id);
+      if (!result.ok) {
+        report(result.reason);
+        return false;
+      }
+      mirror.owned = false;
+      mirror.unknown.clear();
+      return true;
+    }
+    for (const content of [...mirror.unknown]) {
+      // An unreadable row answers `unreadable` and is never removed; a row holding another text is not touched.
+      const result = await buffer.delete(id, { ifContent: content });
+      if (!result.ok) {
+        report(result.reason);
+        return false;
+      }
+      // Answered: the hung statement settled before, so the row cannot take this text any more.
+      mirror.unknown.delete(content);
+    }
+    return true;
+  };
+
+  /** Tries a failed clean-up again later, unless a newer write replaced it meanwhile. */
+  const retryLater = (id: string, mirror: Mirror, op: Op) => {
+    mirror.retries++;
+    setTimeout(() => {
+      if (mirror.last !== op) return;
+      mirror.queue.push(op);
+      void drain(id, mirror);
+    }, retryDelayMs(mirror.retries));
+  };
+
   const drain = async (id: string, mirror: Mirror) => {
     if (mirror.running) return;
     mirror.running = true;
@@ -118,20 +172,17 @@ export const createLocalCopy = (buffer: LocalBuffer): LocalCopy => {
         const result = await buffer.put(id, { content: op.content, base: op.base });
         if (result.ok) {
           mirror.owned = true;
+          mirror.unknown.clear();
+          mirror.retries = 0;
         } else {
           report(result.reason);
+          if (result.reason === 'stalled') mirror.unknown.add(op.content);
           if (mirror.queue.length === 0) mirror.last = undefined;
         }
-      } else if (mirror.owned) {
-        const result = await buffer.delete(id);
-        if (result.ok) {
-          mirror.owned = false;
-        } else {
-          report(result.reason);
-          // The row may still hold a text: the next confirmation tries again.
-          mirror.dirty = true;
-          if (mirror.queue.length === 0) mirror.last = undefined;
-        }
+      } else if (!(await cleanUp(id, mirror))) {
+        retryLater(id, mirror, op);
+      } else {
+        mirror.retries = 0;
       }
     }
     mirror.running = false;
@@ -141,7 +192,7 @@ export const createLocalCopy = (buffer: LocalBuffer): LocalCopy => {
   const mirrorOf = (id: string): Mirror => {
     let mirror = mirrors.get(id);
     if (mirror === undefined) {
-      mirror = { queue: [], running: false, dirty: false, owned: false };
+      mirror = { queue: [], running: false, dirty: false, owned: false, unknown: new Set(), retries: 0 };
       mirrors.set(id, mirror);
     }
     return mirror;
