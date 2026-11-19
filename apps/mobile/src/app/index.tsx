@@ -1,4 +1,4 @@
-import { displayTitle } from '@reviewr/shared';
+import { displayTitle, type Document } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { randomUUID } from 'expo-crypto';
 import { router, Stack } from 'expo-router';
@@ -20,7 +20,8 @@ export default function DocumentListScreen() {
   const create = useMutation({
     mutationFn: newDocument,
     onSuccess: async (document) => {
-      queryClient.setQueryData(queryKeys.document(document.id), document);
+      // A creation sent again answers a document that may be open already: what the app holds for it is never older.
+      queryClient.setQueryData<Document>(queryKeys.document(document.id), (cached) => cached ?? document);
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       router.push({ pathname: '/documents/[id]', params: { id: document.id } });
     },

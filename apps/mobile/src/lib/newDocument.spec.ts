@@ -1,4 +1,4 @@
-import { ApiError, NetworkError } from '@reviewr/shared';
+import { ApiError, NetworkError, type CreateDraftDocumentInput } from '@reviewr/shared';
 import { describe, expect, it } from 'vitest';
 import { FakeApi } from './fakeApi';
 import { createNewDocument } from './newDocument';
@@ -23,6 +23,22 @@ describe('createNewDocument', () => {
     });
     expect(server.revisions).toEqual([]);
     expect((await create()).id).toBe('id-2');
+  });
+
+  it('sends the draft-only form of the creation, with an empty text', async () => {
+    const server = FakeApi.draftOnly('', 'unused');
+    const sent: CreateDraftDocumentInput[] = [];
+    const create = createNewDocument({
+      api: {
+        createDocument: (input) => {
+          sent.push(input);
+          return server.createDocument(input);
+        },
+      },
+      newId: () => 'id-1',
+    });
+    await create();
+    expect(sent).toEqual([{ id: 'id-1', content: '', draftOnly: true }]);
   });
 
   it('sends a creation whose answer was lost again on the same id: the one document opens, no second one', async () => {
