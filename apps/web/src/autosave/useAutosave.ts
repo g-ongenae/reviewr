@@ -115,13 +115,14 @@ export const isGone = (queryClient: QueryClient, id: string): boolean =>
 
 /**
  * Puts a document in the cache, unless it is known to be gone; never under a draft or a head this tab saw confirmed
- * since (see `writeDocument`). The title comes from renames and reads only (`read`): a write's answer cannot tell an
- * older title from a newer one (it may have changed and changed back meanwhile), so the cached one stays.
+ * since (see `writeDocument`). The title comes from the answer only with `withTitle` (a read, or a merge, which may
+ * have read the document): a write's answer cannot tell an older title from a newer one (it may have changed and
+ * changed back meanwhile), so the cached one stays.
  */
-export const cacheDocument = (queryClient: QueryClient, document: Document, read = false) => {
+export const cacheDocument = (queryClient: QueryClient, document: Document, withTitle = false) => {
   if (isGone(queryClient, document.id)) return;
   writeDocument(queryClient, document.id, (cached) =>
-    read || cached === undefined ? document : { ...document, title: cached.title },
+    withTitle || cached === undefined ? document : { ...document, title: cached.title },
   );
 };
 

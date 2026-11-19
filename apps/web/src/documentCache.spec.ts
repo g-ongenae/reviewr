@@ -83,6 +83,54 @@ describe('documentCache: no cache write goes back', () => {
     expect((await readDocument(queryClient, 'doc')).title).toBe('Renamed elsewhere');
   });
 
+  it('a version made from an unchanged draft moves its base, at the same draft counter', async () => {
+    server = { ...opened, revision: 2, draft: { ...opened.draft!, baseRevision: 2 } };
+    expect((await readDocument(queryClient, 'doc')).draft).toMatchObject({ draftVersion: 1, baseRevision: 2 });
+    writeDocument(queryClient, 'doc', () => opened);
+    expect(queryClient.getQueryData<Document>(key)?.draft).toMatchObject({ draftVersion: 1, baseRevision: 2 });
+  });
+
+  describe('a document created again under the same id', () => {
+    const replacement: Document = {
+      ...opened,
+      title: 'Another',
+      content: 'B',
+      createdAt: '2026-11-03T10:00:00.000Z',
+      draft: { content: 'B', draftVersion: 1, baseRevision: 1 },
+    };
+
+    it('is read as it is, with the same counters and no 404 seen in between', async () => {
+      await readDocument(queryClient, 'doc');
+      server = replacement;
+      expect(await readDocument(queryClient, 'doc')).toEqual(replacement);
+    });
+
+    it('keeps its text against a late read of the deleted one', async () => {
+      server = { ...opened, draft: { content: 'A2', draftVersion: 2, baseRevision: 1 } };
+      const reading = lateRead();
+      server = replacement;
+      await readDocument(queryClient, 'doc');
+      release();
+      expect(await reading).toMatchObject({ content: 'B', draft: { content: 'B', draftVersion: 1 } });
+    });
+
+    it('starts over once a read answered 404', async () => {
+      server = { ...opened, revision: 3, content: 'A3', draft: { content: 'A3', draftVersion: 5, baseRevision: 3 } };
+      await readDocument(queryClient, 'doc');
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ statusCode: 404, message: 'Not found' }),
+        } as unknown as Response),
+      );
+      await expect(readDocument(queryClient, 'doc')).rejects.toThrow();
+      // Even with its `createdAt` (a clock gone back), the document read next is taken as it is.
+      server = { ...opened, content: 'B', draft: { content: 'B', draftVersion: 1, baseRevision: 1 } };
+      expect(await readDocument(queryClient, 'doc')).toMatchObject({ revision: 1, draft: { content: 'B' } });
+    });
+  });
+
   it('a rename to no title stays against a late read', async () => {
     const reading = lateRead();
     server = { ...server, title: null };

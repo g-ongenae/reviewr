@@ -26,7 +26,7 @@ import {
   useKeptCopies,
   usePagesNotCreated,
 } from '../autosave/useAutosave';
-import { cacheRename } from '../documentCache';
+import { cacheRename, forgetDocumentSeen } from '../documentCache';
 import { ReconciliationView } from '../reconcile/ReconciliationView';
 import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { cacheKeptVersion, restore, useRestore } from '../restore';
@@ -283,7 +283,8 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
     isConflict,
     onDocument: (saved) => {
       // The machine takes the draft from the cache, as from any read: after a stop, the view shows the newest text.
-      cacheDocument(queryClient, saved);
+      // The title from the merge's answer, as before: it may come from the merge's own read of a rename made elsewhere.
+      cacheDocument(queryClient, saved, true);
       void queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       void queryClient.invalidateQueries({ queryKey: queryKeys.revisions(saved.id) });
     },
@@ -321,6 +322,7 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
       discard();
       setUnsavedChanges(false);
       queryClient.removeQueries({ queryKey: queryKeys.document(document.id) });
+      forgetDocumentSeen(queryClient, document.id);
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       onDeleted();
     },
