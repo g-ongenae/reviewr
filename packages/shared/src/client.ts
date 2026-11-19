@@ -12,6 +12,7 @@ import type {
   Revision,
   RevisionSummary,
   SaveDraftInput,
+  SavedVersion,
   UpdateDocumentInput,
 } from './types.js';
 import { ApiError } from './api-error.js';
@@ -92,11 +93,18 @@ export class ReviewrClient {
    * (read it with `conflictOf`): `draft_conflict` if the draft moved since `draftVersion`; otherwise
    * `stale_revision` if the head moved since `baseRevision`, unless the draft already is the head.
    *
-   * A success means that the draft text of `draftVersion` is the head (`content`, `revision`). It does not mean
+   * A success without a key, or the first success with one, means that the draft text of `draftVersion` is the head
+   * (`content`, `revision`). It does not mean
    * that this call created the revision, nor that `name` was applied: when the draft already was the head,
    * nothing is created and the name is ignored. Read the revision (`getRevision`, `listRevisions`) for its name.
+   *
+   * With an `idempotencyKey`, the same call can be sent again after a lost answer: once the first one succeeded, it
+   * answers success with the revision saved (`savedRevision`) whatever happened to the draft and the head since, and
+   * creates nothing: the head may then be a later revision, and `savedRevision` is the one holding the text sent.
+   * The same key with another input rejects with a 422 `ApiError`. One exception: an empty draft on a document
+   * without a revision saves nothing (`savedRevision` null) and records no key, so sending it again is decided again.
    */
-  public async createRevision(id: string, input: CreateRevisionInput): Promise<Document> {
+  public async createRevision(id: string, input: CreateRevisionInput): Promise<SavedVersion> {
     return this.request('POST', `${documentPath(id)}/revisions`, input);
   }
 

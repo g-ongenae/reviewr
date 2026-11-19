@@ -1,7 +1,5 @@
-import { createHash } from 'node:crypto';
 import {
   ConflictException,
-  GoneException,
   HttpStatus,
   Inject,
   Injectable,
@@ -16,10 +14,11 @@ import type {
   DocumentSummary,
   Revision,
   RevisionSummary,
+  SavedVersion,
 } from '@reviewr/shared';
 import { and, desc, eq } from 'drizzle-orm';
-import { databaseToken, type Database } from '../database/database.js';
-import { documentCreations, DocumentRow, documents, RevisionRow, revisions } from '../database/schema.js';
+import { databaseToken, type Database, type Transaction } from '../database/database.js';
+import { DocumentRow, documents, RevisionRow, revisions } from '../database/schema.js';
 import {
   DocumentSummaryRow,
   RevisionSummaryRow,
@@ -35,6 +34,7 @@ import { NameRevisionDto } from './dto/name-revision.dto.js';
 import { RenameDocumentDto } from './dto/rename-document.dto.js';
 import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
+import { claimCreation, creationHash, recordedRevision, recordRevision, revisionRequestHash } from './idempotency.js';
 
 /** Revision number of the first save of a document. */
 const firstRevision: number = 1;
@@ -69,49 +69,6 @@ const assertFound = <T>(row: T | undefined, id: string): T => {
   }
 
   return row;
-};
-
-/** Transaction handle of the database. */
-type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
-
-/**
- * Fingerprint of a creation body as validated (a blank title is already null), to tell a creation sent again
- * from another one that reuses its id.
- */
-const creationHash = (input: CreateDocumentBodyDto): string =>
-  createHash('sha256')
-    .update(JSON.stringify([input.title, input.content, input.draftOnly === true]))
-    .digest('hex');
-
-/**
- * Record the creation of the document `id` with a client-generated id. Answers undefined when this is the first
- * creation with this id, or the document as it is now when the same creation was already made.
- *
- * The insert of the record waits for a concurrent creation with the same id to commit or roll back, then either
- * inserts (the other one rolled back) or skips; the select after it, a new statement, sees the committed record.
- * Fails with 422 if the id was used with another body, and 410 if its document was deleted since: sending a
- * creation again never brings a deleted document back.
- */
-const claimCreation = async (tx: Transaction, id: string, requestHash: string): Promise<Document | undefined> => {
-  const claimed: unknown[] = await tx
-    .insert(documentCreations)
-    .values({ documentId: id, requestHash })
-    .onConflictDoNothing()
-    .returning({ documentId: documentCreations.documentId });
-  if (claimed.length > 0) {
-    return undefined;
-  }
-
-  const [creation] = await tx.select().from(documentCreations).where(eq(documentCreations.documentId, id));
-  if (creation?.requestHash !== requestHash) {
-    throw new UnprocessableEntityException(`Document ${id} was already created with another body`);
-  }
-  const [row] = await tx.select().from(documents).where(eq(documents.id, id));
-  if (row === undefined) {
-    throw new GoneException(`Document ${id} was deleted`);
-  }
-
-  return toDocument(row);
 };
 
 /**
@@ -150,6 +107,33 @@ const appendRevision = async (
   });
 
   return updated;
+};
+
+/**
+ * The checks and the save of `createRevision` on a locked document (see there): answers the document after the
+ * save, unchanged when the draft already was the head.
+ */
+const saveDraftAsRevision = async (
+  tx: Transaction,
+  current: DocumentRow,
+  input: CreateRevisionDto,
+): Promise<DocumentRow> => {
+  if (current.draftVersion !== input.draftVersion) {
+    throw conflict({
+      code: 'draft_conflict',
+      message: `Draft was modified elsewhere: it is at version ${current.draftVersion}, the version is based on draft version ${input.draftVersion}`,
+      draft: toDocumentDraft(current),
+    });
+  }
+  if (current.draftContent === current.content) {
+    return current;
+  }
+  const baseRevision: number = input.baseRevision ?? noRevision;
+  if (current.revision !== baseRevision) {
+    throw conflict(staleRevision(current.revision, baseRevision));
+  }
+
+  return appendRevision(tx, current, current.title, current.draftContent, input.name);
 };
 
 /**
@@ -336,28 +320,42 @@ export class DocumentsService {
    *
    * On a document without a revision yet, the base is null or 0, and the version saved is revision 1. An empty
    * draft there is the (empty) head, so it is a no-op: no empty first version.
+   *
+   * With an `idempotencyKey`, the key is looked up first, under the row lock (it is a `uuid` column, so any letter
+   * case of the same key finds it). Known for the same request: the document as it is now, with the revision
+   * recorded in `savedRevision`, and none of the checks above (the draft and the head may have moved since; the
+   * revision recorded exists, the foreign key sees to it). Known for another request: 422. Unknown: the checks above
+   * decide, and a success records the key with the revision that holds the draft text, the one created or the head
+   * of a no-op. A refusal rolls back and records nothing, so the same request sent again is decided again by the same
+   * checks. For counters the client had seen, these can only refuse again or find that the draft text of
+   * `draftVersion` became the head (counters only grow, and a draft text that changes bumps `draftVersion`). A
+   * request carrying a `draftVersion` the server had not reached yet can succeed later as a normal save of the draft
+   * text at that version, recorded then. The empty no-op of a document without a revision has no revision to
+   * record: `savedRevision` is null and the key stays unknown, so the same request sent again is decided again.
    */
-  public async createRevision(id: string, input: CreateRevisionDto): Promise<Document> {
+  public async createRevision(id: string, input: CreateRevisionDto): Promise<SavedVersion> {
     return this.db.transaction(async (tx) => {
       const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
       const current: DocumentRow = assertFound(locked, id);
 
-      if (current.draftVersion !== input.draftVersion) {
-        throw conflict({
-          code: 'draft_conflict',
-          message: `Draft was modified elsewhere: it is at version ${current.draftVersion}, the version is based on draft version ${input.draftVersion}`,
-          draft: toDocumentDraft(current),
-        });
+      const key: string | undefined = input.idempotencyKey;
+      if (key === undefined) {
+        return toDocument(await saveDraftAsRevision(tx, current, input));
       }
-      if (current.draftContent === current.content) {
-        return toDocument(current);
+      // The locked row's id, not the route's: PostgreSQL finds the document whatever the letter case of its UUID.
+      const requestHash: string = revisionRequestHash(current.id, input);
+      const recorded: number | undefined = await recordedRevision(tx, key, requestHash);
+      if (recorded !== undefined) {
+        return { ...toDocument(current), savedRevision: recorded };
       }
-      const baseRevision: number = input.baseRevision ?? noRevision;
-      if (current.revision !== baseRevision) {
-        throw conflict(staleRevision(current.revision, baseRevision));
+      const saved: DocumentRow = await saveDraftAsRevision(tx, current, input);
+      if (saved.revision === noRevision) {
+        // eslint-disable-next-line no-null/no-null -- nothing was saved: an empty draft on a document without revision
+        return { ...toDocument(saved), savedRevision: null };
       }
+      await recordRevision(tx, key, requestHash, id, saved.revision);
 
-      return toDocument(await appendRevision(tx, current, current.title, current.draftContent, input.name));
+      return { ...toDocument(saved), savedRevision: saved.revision };
     });
   }
 

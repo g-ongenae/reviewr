@@ -160,6 +160,36 @@ export interface CreateRevisionInput {
    * For a document without a revision yet, null (the draft's `baseRevision`) or 0 (the document's `revision`).
    */
   baseRevision: number | null;
+  /**
+   * Key chosen by the client, a UUID (e.g. `crypto.randomUUID()`), that makes the request safe to send again after
+   * a lost answer: keep it with the request, and use a new one for every other version. Optional: without it, the
+   * request is decided on the draft and the head as they are when it arrives (see above).
+   *
+   * The first success with a key records it with the revision that holds the draft text of `draftVersion` (the one
+   * created, or the head when the draft already was the head). The same request sent again, with the same key,
+   * answers success and that revision in `savedRevision`, whatever happened since (text autosaved, other versions
+   * saved, a rename), and creates nothing. The same key with another request (another document, `draftVersion`,
+   * `baseRevision` or name) is refused with 422, and nothing is created. A refusal (409, 404, 400) records nothing:
+   * the same request sent again is decided again, by the same checks. A record goes with its document: once the
+   * document is deleted, the same request is answered 404. The empty draft of a document without a revision is the
+   * exception: there is nothing to save (`savedRevision` null), no key is recorded, and the same request sent again
+   * is decided again, so it may be refused if the draft moved meanwhile.
+   */
+  idempotencyKey?: string;
+}
+
+/**
+ * Answer of `POST /documents/:id/revisions`: the document as it is now (head and draft), and, when the request carried
+ * an `idempotencyKey`, the revision that holds the text it asked to save.
+ */
+export interface SavedVersion extends Document {
+  /**
+   * Present only when the request carried an `idempotencyKey`. The number of the revision that holds the draft text
+   * of the request's `draftVersion`: it exists, although the head may have moved past it since. Null only when
+   * there was nothing to save: an empty draft on a document without a revision (no revision is created then, and
+   * the key is not recorded).
+   */
+  savedRevision?: number | null;
 }
 
 /**

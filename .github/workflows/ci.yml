@@ -11,7 +11,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     services:
-      # Real PostgreSQL for apps/api/test/concurrency.pg.spec.ts (the other tests run on PGlite).
+      # Real PostgreSQL for apps/api/test/*.pg.spec.ts (the other tests run on PGlite).
       postgres:
         image: postgres:18
         env:

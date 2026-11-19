@@ -13,7 +13,14 @@ import {
   Put,
   Query,
 } from '@nestjs/common';
-import type { Document, DocumentDraft, DocumentSummary, Revision, RevisionSummary } from '@reviewr/shared';
+import type {
+  Document,
+  DocumentDraft,
+  DocumentSummary,
+  Revision,
+  RevisionSummary,
+  SavedVersion,
+} from '@reviewr/shared';
 import { DocumentsService } from './documents.service.js';
 import { CreateDocumentBodyDto } from './dto/create-document-body.dto.js';
 import { CreateRevisionDto } from './dto/create-revision.dto.js';
@@ -106,13 +113,15 @@ export class DocumentsController {
   /**
    * POST /documents/:id/revisions: save the draft as a version. Answers 200 with the document, whether a
    * revision was created or the draft already was the head, so a retry gets the same answer as the first call.
+   * With an `idempotencyKey`, also the revision saved (`savedRevision`), and the same request sent again answers it
+   * whatever happened since; the key with another request is a 422.
    */
   @Post(':id/revisions')
   @HttpCode(HttpStatus.OK)
   public async createRevision(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: CreateRevisionDto,
-  ): Promise<Document> {
+  ): Promise<SavedVersion> {
     return this.documentsService.createRevision(id, body);
   }
 
