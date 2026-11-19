@@ -1,10 +1,10 @@
-import type { Document } from '@reviewr/shared';
+import type { CreateDraftDocumentInput, Document } from '@reviewr/shared';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import type { Autosave, AutosaveState } from '../autosave/autosave';
-import { discardAutosave, useKeptCopies } from '../autosave/useAutosave';
+import { discardAutosave, newDocumentId, useKeptCopies } from '../autosave/useAutosave';
 import { writeDocument } from '../documentCache';
 import { existingSession, type SessionState, type Side } from '../reconcile/session';
 
@@ -113,8 +113,17 @@ export const DeletedDocument = ({
     useCallback(() => session?.getSnapshot() ?? noSession, [session]),
   );
 
+  /** One creation per text, sent again as it was: a click after an answer that never came opens the same document. */
+  const creations = useRef(new Map<string, CreateDraftDocumentInput>());
   const create = useMutation({
-    mutationFn: (content: string) => api.createDocument({ title: title ?? null, content }),
+    mutationFn: (content: string) => {
+      let input = creations.current.get(content);
+      if (input === undefined) {
+        input = { id: newDocumentId(), title: title ?? null, content, draftOnly: true };
+        creations.current.set(content, input);
+      }
+      return api.createDocument(input);
+    },
     onSuccess: async (document) => {
       writeDocument(queryClient, document.id, () => document);
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
