@@ -8,3 +8,4 @@ export * from './reachability.js';
 export * from './title.js';
 export * from './features.js';
 export * from './writingBaseline.js';
+export * from './buildVersion.js';

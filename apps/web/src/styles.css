@@ -93,6 +93,14 @@ button.danger {
   display: none;
 }
 
+.build-version {
+  margin-top: auto;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
 .icon-button {
   display: inline-grid;
   place-items: center;
@@ -802,5 +810,10 @@ button.danger {
 
   .toast {
     max-width: none;
+  }
+
+  /* The document list fills the screen: keep its version line, at the bottom, readable. */
+  .layout:not(.sidebar-collapsed) .toast-region {
+    bottom: 2.5rem;
   }
 }

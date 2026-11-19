@@ -1,3 +1,4 @@
+import { formatBuildVersion } from '@reviewr/shared';
 import { useAutosaveGuard, useBlankPage } from './autosave/useAutosave';
 import { DocumentList } from './components/DocumentList';
 import { DocumentView } from './components/DocumentView';
@@ -42,6 +43,9 @@ export const App = () => {
           + New document
         </button>
         <DocumentList selectedId={selectedId} onSelect={navigate} />
+        <footer className="build-version" title="Version of this page">
+          {formatBuildVersion(import.meta.env.VITE_BUILD_VERSION)}
+        </footer>
       </aside>
       <main className="content">
         {/* The same element before and after the blank page is created: the writer keeps typing in it. */}
