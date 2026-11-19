@@ -6,6 +6,7 @@ import type {
   Document,
   DocumentDraft,
   SaveDraftInput,
+  SavedVersion,
 } from '@reviewr/shared';
 import { ApiError, NetworkError } from '@reviewr/shared';
 import type { DraftsApi } from './drafts';
@@ -34,6 +35,10 @@ export class FakeApi implements DraftsApi {
   creations = new Map<string, string>();
   /** How many of the next creations the server makes, but whose answer is lost on the way back. */
   lostAnswers = 0;
+  /** How many of the next versions the server makes, but whose answer is lost on the way back. */
+  lostVersionAnswers = 0;
+  /** Each idempotency key of a version the server made: the request it came with, and the revision holding its text. */
+  versionKeys = new Map<string, { request: string; savedRevision: number }>();
   private waiting: (() => void)[] = [];
   private waitingReads: (() => void)[] = [];
 
@@ -113,17 +118,36 @@ export class FakeApi implements DraftsApi {
     return { ...this.draft };
   }
 
-  async createRevision(_id: string, { name, draftVersion, baseRevision }: CreateRevisionInput): Promise<Document> {
+  async createRevision(_id: string, input: CreateRevisionInput): Promise<SavedVersion> {
     await this.gate(`createRevision ${this.draft.content}`);
-    if (draftVersion !== this.draft.draftVersion) throw this.conflict({ code: 'draft_conflict', draft: this.draft });
-    if (this.draft.content === this.document.content) return this.read();
-    if ((baseRevision ?? 0) !== this.document.revision) {
-      throw this.conflict({ code: 'stale_revision', revision: this.document.revision });
+    const { name, draftVersion, baseRevision, idempotencyKey } = input;
+    const request = JSON.stringify([draftVersion, baseRevision ?? 0, name?.trim() || null]);
+    const recorded = idempotencyKey === undefined ? undefined : this.versionKeys.get(idempotencyKey);
+    if (recorded !== undefined) {
+      if (recorded.request !== request) {
+        throw new ApiError(422, { statusCode: 422, message: 'Another request used this idempotency key' });
+      }
+      return { ...this.read(), savedRevision: recorded.savedRevision };
     }
-    this.otherVersion(this.draft.content);
-    this.revisions[this.revisions.length - 1]!.name = name;
-    this.document.draft = { ...this.draft, baseRevision: this.document.revision };
-    return this.read();
+    // A refusal records nothing.
+    if (draftVersion !== this.draft.draftVersion) throw this.conflict({ code: 'draft_conflict', draft: this.draft });
+    if (this.draft.content !== this.document.content) {
+      if ((baseRevision ?? 0) !== this.document.revision) {
+        throw this.conflict({ code: 'stale_revision', revision: this.document.revision });
+      }
+      this.otherVersion(this.draft.content);
+      this.revisions[this.revisions.length - 1]!.name = name;
+      this.document.draft = { ...this.draft, baseRevision: this.document.revision };
+    }
+    // The empty draft of a document without a version saves nothing, and records no key.
+    if (idempotencyKey === undefined || this.document.revision === 0) return this.read();
+    const savedRevision = this.document.revision;
+    this.versionKeys.set(idempotencyKey, { request, savedRevision });
+    if (this.lostVersionAnswers > 0) {
+      this.lostVersionAnswers--;
+      throw new NetworkError(new TypeError('Network request failed'));
+    }
+    return { ...this.read(), savedRevision };
   }
 
   /**
@@ -159,7 +183,10 @@ export class FakeApi implements DraftsApi {
   /** Deletes the document, only if it is still as `seen` when given (`document_changed` otherwise). */
   async deleteDocument(_id: string, seen?: DeleteDocumentInput): Promise<void> {
     await this.gate(seen === undefined ? 'deleteDocument' : `deleteDocument ${seen.revision} ${seen.draftVersion}`);
-    if (seen !== undefined && (seen.revision !== this.document.revision || seen.draftVersion !== this.draft.draftVersion)) {
+    if (
+      seen !== undefined &&
+      (seen.revision !== this.document.revision || seen.draftVersion !== this.draft.draftVersion)
+    ) {
       throw this.conflict({ code: 'document_changed', revision: this.document.revision, draft: this.draft });
     }
     this.gone = true;

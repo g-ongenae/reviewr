@@ -1,4 +1,5 @@
 import type { QueryClient } from '@tanstack/react-query';
+import { randomUUID } from 'expo-crypto';
 import { api, reachability } from './api';
 import { deviceLocalBuffer } from './deviceLocalBuffer';
 import { createAppDrafts, type AppDrafts } from './documentCache';
@@ -13,7 +14,12 @@ const registries = new WeakMap<QueryClient, AppDrafts>();
 const appDraftsOf = (queryClient: QueryClient): AppDrafts => {
   let app = registries.get(queryClient);
   if (app === undefined) {
-    app = createAppDrafts(queryClient, { api, report: reachability, buffer: deviceLocalBuffer() });
+    app = createAppDrafts(queryClient, {
+      api,
+      report: reachability,
+      buffer: deviceLocalBuffer(),
+      newId: randomUUID,
+    });
     registries.set(queryClient, app);
   }
   return app;

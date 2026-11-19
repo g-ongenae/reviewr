@@ -1,3 +1,4 @@
+import { randomUUID as newId } from 'node:crypto';
 import { conflictOf } from '@reviewr/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { askToDelete, type SeenPair } from './askToDelete';
@@ -14,6 +15,7 @@ const setup = (server = new FakeApi('morning')) => {
     onDraft: () => undefined,
     onDocument: () => undefined,
     debounceMs,
+    newId,
   });
   const shown = server.read();
   const { autosave } = drafts.open(shown);
