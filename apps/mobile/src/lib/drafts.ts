@@ -113,8 +113,9 @@ export interface Drafts {
   /**
    * Opens the entry of a document on a text the phone kept, as the local text on the base it was written from, and
    * reconciles it with the document's draft read just now: saved if the server holds it, sent on the base if the server
-   * is still there, a conflict if the server moved to another text, never a silent replacement either way. It is then
-   * saved in the background, as a document no screen shows. `false`, and nothing done, if the document has an entry.
+   * is still there, a conflict if the server moved to another text, never a silent replacement either way. The entry
+   * waits for the screen that read the document, as one `open` made. `false`, and nothing done, if the document has an
+   * entry.
    */
   recover(document: Document, kept: KeptText): boolean;
 }
@@ -377,11 +378,12 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
       if (entries.has(id)) return false;
       const entry = create(document, kept.base);
       entries.set(id, entry);
-      copy?.adopt(id);
       entry.autosave.edit(kept.content);
       // Kept, never taken as the text: a draft holding another text than the kept one and its base is a conflict.
       entry.autosave.refresh(draftOf(document), true);
-      release(id, entry);
+      // Restored on the read of a screen that opens it next: kept for that screen (see `release`), and saved meanwhile
+      // as any edit.
+      entry.opening = true;
       return true;
     },
   };

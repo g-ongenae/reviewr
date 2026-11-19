@@ -1,7 +1,6 @@
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
-import { createDrafts, type Drafts, type DraftsOptions } from './drafts';
-import { createKeptTexts, type KeptTexts } from './keptTexts';
+import { createDrafts, draftOf, type Drafts, type DraftsOptions } from './drafts';
 import type { LocalBuffer } from './localBuffer';
 import { createLocalCopy, type LocalCopy } from './localCopy';
 import { queryKeys } from './queryKeys';
@@ -15,14 +14,12 @@ interface Newest {
 export interface AppDrafts {
   drafts: Drafts;
   /**
-   * The query function of a document: the server's answer, settled against what the app has seen confirmed. It first
-   * waits for the restore of a text the phone kept for it, and fails while that text waits (see `KeptTexts`).
+   * The query function of a document: the server's answer, settled against what the app has seen confirmed. It
+   * first restores a text the phone kept for it (see `fetchDocument`).
    */
   fetchDocument: (id: string) => Promise<Document>;
   /** The phone's copy of the texts, with a buffer: the notice reads its failure. */
   copy?: LocalCopy;
-  /** The texts kept when the app was last stopped, with a buffer. */
-  kept?: KeptTexts;
 }
 
 /**
@@ -95,23 +92,29 @@ export const createAppDrafts = (
     },
   });
 
-  // Not reported to the "Server unreachable" notification, as on the web: its return starts these reads again.
-  const kept =
-    copy === undefined
-      ? undefined
-      : createKeptTexts({ copy, drafts, getDocument: async (id) => settle(await options.api.getDocument(id)) });
+  /**
+   * A text the phone kept for the document when the app was last stopped comes back on the document's own read, before
+   * any screen gets it: dropped if the server holds it, else reopened as the local text on the base it was written
+   * from (see `Drafts.recover`). Each document decides once, on its own read: a read that fails leaves the text in the
+   * buffer for the next one (opening the document again, or the server's return), and never holds back another
+   * document. Only the wait for the scan of the buffer, a local read, comes first.
+   */
+  const restoreKept = async (id: string, read: () => Promise<Document>): Promise<Document> => {
+    if (copy === undefined) return read();
+    const kept = await copy.kept(id);
+    const document = await read();
+    if (kept === undefined || drafts.get(id) !== undefined || !copy.claim(id)) return document;
+    if (kept.content === draftOf(document).content) copy.forget(id);
+    else drafts.recover(document, kept);
+    return document;
+  };
 
   const fetchDocument = async (id: string): Promise<Document> => {
-    if (kept !== undefined) {
-      await kept.restore(id);
-      const waiting = kept.blocking(id);
-      if (waiting !== undefined) throw waiting;
-    }
     const started = ++requests;
-    const document = settle(await options.api.getDocument(id));
+    const document = await restoreKept(id, async () => settle(await options.api.getDocument(id)));
     const rename = renamed.get(id);
     return rename !== undefined && rename.at > started ? { ...document, title: rename.title } : document;
   };
 
-  return { drafts, fetchDocument, copy, kept };
+  return { drafts, fetchDocument, copy };
 };

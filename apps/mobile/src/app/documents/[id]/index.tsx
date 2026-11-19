@@ -99,8 +99,8 @@ const stopText = (stop: Stop): string => {
 const noCopy = { subscribe: () => () => undefined, failure: () => undefined, dismissed: () => true };
 
 /**
- * Whether to tell the writer, once, that the phone is not keeping a copy of the text (its storage is full, or stopped
- * answering, or this build cannot open it). Nothing else changes: typing goes on, and the text is still saved to the
+ * Whether to tell the writer, once, that the phone could not confirm a copy of the latest changes (its storage is full,
+ * or stopped answering, or this build cannot open it). Nothing else changes: typing goes on, and the text is still saved to the
  * server.
  */
 const useLocalCopyNotice = (copy: Pick<LocalCopy, 'subscribe' | 'failure' | 'dismissed'> = noCopy) => {
@@ -249,10 +249,11 @@ const Editor = ({ document }: { document: Document }) => {
       </View>
       {copyFailure !== undefined && (
         <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: theme.warning }]}>
-          <Text style={[styles.noticeTitle, { color: theme.text }]}>No copy kept on this phone</Text>
+          <Text style={[styles.noticeTitle, { color: theme.text }]}>Copy on this phone not confirmed</Text>
           <Text style={{ color: theme.text }}>
-            {copyFailure === 'quota' ? 'The phone’s storage is full. ' : ''}Your text is still saved to the server as
-            you write, but if the app is closed before the server has it, it is lost.
+            {copyFailure === 'quota' ? 'The phone’s storage is full. ' : ''}This phone could not confirm a copy of your
+            latest changes. They are still being saved to the server, but could be lost if the app closes before the
+            server has them.
           </Text>
           <Pressable style={[styles.noticeButton, { backgroundColor: theme.accent }]} onPress={() => copy?.dismiss()}>
             <Text style={styles.noticeButtonLabel}>OK</Text>
