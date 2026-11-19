@@ -32,6 +32,7 @@ import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { cacheKeptVersion, restore, useRestore } from '../restore';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
+import { settleVersionRequest, versionRequest } from '../versionRequest';
 import { RevisionHistory } from './RevisionHistory';
 import { earlierTextLabel, HeldText, keptCopyLabel } from './TextRecovery';
 import { ChevronIcon, HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
@@ -213,19 +214,26 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
       let baseRevision = document.revision;
       // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
       for (let attempt = 1; ; attempt++) {
+        // A request whose answer was lost is sent again as it was: the version may exist (see `versionRequest`).
+        const input = versionRequest(queryClient, document.id, {
+          name,
+          draftVersion,
+          baseRevision: baseRevision === 0 ? null : baseRevision,
+        });
         try {
-          return await api.createRevision(document.id, {
-            name,
-            draftVersion,
-            baseRevision: baseRevision === 0 ? null : baseRevision,
-          });
+          const saved = await api.createRevision(document.id, input);
+          settleVersionRequest(queryClient, document.id, input);
+          return saved;
         } catch (error) {
+          settleVersionRequest(queryClient, document.id, input, error);
           const conflict = conflictOf(error);
           if (conflict?.code !== 'stale_revision' || attempt === 3) throw error;
           baseRevision = conflict.revision;
         }
       }
     },
+    // A request sent again answers the document as it is now: the head may be past the version, and the draft may
+    // have moved. Both are taken as from any read: a newer draft never replaces unsaved text.
     onSuccess: async (saved) => {
       if (saved === undefined) return;
       // The answer may be older than a draft saved or a rename confirmed since the request started: those stay.

@@ -120,6 +120,13 @@ const otherDraft = (content: string, id = 'doc-1') => {
 };
 
 let calls: Call[];
+
+/** The body of a "Save version" request without its idempotency key, which every one carries. */
+const versionBody = (call: Call | undefined) => {
+  const { idempotencyKey, ...request } = call?.body as CreateRevisionInput;
+  expect(idempotencyKey).toBeTypeOf('string');
+  return request;
+};
 /** Answers a request instead of the fake API, when it returns a response. */
 let intercept: (call: Call) => Response | undefined;
 /** Requests matching `hold` wait until `releaseHeld`, then get the API's answer at that time. */
@@ -772,7 +779,7 @@ describe('Editor autosave', () => {
       await elapse();
 
       expect(requests()).toEqual(['PUT /documents/doc-1/draft', 'POST /documents/doc-1/revisions']);
-      expect(calls[1]?.body).toEqual({ draftVersion: 4, baseRevision: 2 });
+      expect(versionBody(calls[1])).toEqual({ draftVersion: 4, baseRevision: 2 });
       expect(versions()).toEqual([[null, 'The end.']]);
       expect(status()).toBe('Saved · revision 3');
       expect(saveButton()).toHaveProperty('disabled', true);
@@ -803,7 +810,7 @@ describe('Editor autosave', () => {
       fireEvent.submit(name);
       await elapse();
 
-      expect(calls[1]?.body).toEqual({ name: 'First ending', draftVersion: 4, baseRevision: 2 });
+      expect(versionBody(calls[1])).toEqual({ name: 'First ending', draftVersion: 4, baseRevision: 2 });
       expect(versions()).toEqual([['First ending', 'The end.']]);
       expect(screen.queryByRole('textbox', { name: 'Version name' })).toBeNull();
     });
@@ -1001,7 +1008,7 @@ describe('Editor autosave', () => {
       calls = [];
       fireEvent.click(saveButton());
       await elapse();
-      expect(calls.map((call) => call.body)).toEqual([
+      expect(calls.map(versionBody)).toEqual([
         { draftVersion: 4, baseRevision: 2 },
         { draftVersion: 4, baseRevision: 3 },
       ]);
@@ -1076,7 +1083,7 @@ describe('Editor autosave', () => {
 
       fireEvent.click(saveButton());
       await elapse();
-      expect(calls.map((call) => call.body)).toEqual([{ draftVersion: 1, baseRevision: null }]);
+      expect(calls.map(versionBody)).toEqual([{ draftVersion: 1, baseRevision: null }]);
       expect(versions()).toEqual([[null, 'A first line.']]);
       expect(status()).toBe('Saved · revision 1');
     });

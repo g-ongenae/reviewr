@@ -415,7 +415,9 @@ describe('The blank page', () => {
 
     const { id } = only(creates()).body as CreateDraftDocumentInput;
     const version = only(calls.filter((call) => call.path === `/documents/${id}/revisions` && call.method === 'POST'));
-    expect(version.body).toEqual({ draftVersion: 1, baseRevision: null });
+    const { idempotencyKey, ...request } = version.body as CreateRevisionInput;
+    expect(request).toEqual({ draftVersion: 1, baseRevision: null });
+    expect(idempotencyKey).toBeTypeOf('string');
     expect(db.get(id)).toMatchObject({ revision: 1, content: 'Il était une fois.' });
     expect(status()).toBe('Saved · revision 1');
   });
