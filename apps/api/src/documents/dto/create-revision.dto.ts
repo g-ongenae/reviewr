@@ -1,6 +1,6 @@
 import { CreateRevisionInput, revisionNameMaxLength } from '@reviewr/shared';
 import { Transform } from 'class-transformer';
-import { IsInt, IsOptional, IsString, MaxLength, Min, ValidateIf } from 'class-validator';
+import { IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateIf } from 'class-validator';
 
 /**
  * Body of `POST /documents/:id/revisions`.
@@ -32,4 +32,12 @@ export class CreateRevisionDto implements CreateRevisionInput {
   @IsInt()
   @Min(0)
   public baseRevision: number | null;
+
+  /**
+   * Makes the request safe to send again (see `CreateRevisionInput`). Optional means absent, as for the id of a
+   * creation: an explicit null is refused, since the builds already installed send no key at all.
+   */
+  @ValidateIf((dto: CreateRevisionDto) => dto.idempotencyKey !== undefined)
+  @IsUUID('all')
+  public idempotencyKey?: string;
 }

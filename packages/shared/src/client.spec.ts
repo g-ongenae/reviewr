@@ -10,6 +10,7 @@ import type {
   DocumentDraft,
   DraftConflictBody,
   RevisionSummary,
+  SavedVersion,
 } from './types.js';
 
 const jsonResponse = (status: number, body: unknown): Response =>
@@ -69,6 +70,32 @@ describe('ReviewrClient.createRevision', () => {
     await expect(client.createRevision('a/b', input)).resolves.toEqual(document);
     expect(fetchFn).toHaveBeenCalledWith(
       'http://api.test/documents/a%2Fb/revisions',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(input) }),
+    );
+  });
+
+  it('sends the idempotency key with the version and returns the revision saved', async () => {
+    const saved: SavedVersion = {
+      id: 'a',
+      title: 'Chapitre',
+      revision: 3,
+      content: 'v3',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-02T00:00:00.000Z',
+      draft: { content: 'v4', draftVersion: 5, baseRevision: 3 },
+      savedRevision: 2,
+    };
+    const fetchFn = vi.fn(async () => jsonResponse(200, saved));
+    const client: ReviewrClient = new ReviewrClient('http://api.test', fetchFn);
+    const input: CreateRevisionInput = {
+      draftVersion: 3,
+      baseRevision: 1,
+      idempotencyKey: '6f1c0f43-6f39-4b8a-9d3e-1f0a2b3c4d5e',
+    };
+
+    await expect(client.createRevision('a', input)).resolves.toEqual(saved);
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://api.test/documents/a/revisions',
       expect.objectContaining({ method: 'POST', body: JSON.stringify(input) }),
     );
   });

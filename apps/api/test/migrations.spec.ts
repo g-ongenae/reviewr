@@ -335,3 +335,93 @@ describe('Migration 0003 (document creations) on a populated database', () => {
     expect(rows).toEqual([{ type: 'PRIMARY KEY' }]);
   });
 });
+
+describe('Migration 0004 (revision requests) on a populated database', () => {
+  let pglite: PGlite;
+  let oldFolder: string;
+  const columns: string = `id, title, content, revision, draft_content AS "draftContent", draft_version AS "draftVersion",
+    draft_base_revision AS "draftBaseRevision", created_at AS "createdAt", updated_at AS "updatedAt"`;
+  let before: unknown[];
+  let revisionsBefore: unknown[];
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    const db = drizzle(pglite);
+    oldFolder = await migrationsUpTo(4);
+    await migrate(db, { migrationsFolder: oldFolder });
+
+    // Rows as the code before this migration wrote them, one of them untitled with a draft ahead of its head.
+    for (const doc of titledDocuments) {
+      const latest = doc.revisions.length;
+      const draft = draftOf(doc);
+      await pglite.query(
+        `INSERT INTO documents (id, title, content, revision, draft_content, draft_version, draft_base_revision)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          doc.id,
+          migratedTitle(doc.title),
+          doc.revisions[latest - 1],
+          latest,
+          draft.content,
+          draft.version,
+          draft.baseRevision,
+        ],
+      );
+      for (const [index, content] of doc.revisions.entries()) {
+        await pglite.query('INSERT INTO revisions (document_id, revision, content) VALUES ($1, $2, $3)', [
+          doc.id,
+          index + 1,
+          content,
+        ]);
+      }
+    }
+    before = (await pglite.query(`SELECT ${columns} FROM documents ORDER BY id`)).rows;
+    revisionsBefore = (await pglite.query('SELECT * FROM revisions ORDER BY document_id, revision')).rows;
+
+    await migrate(db, { migrationsFolder });
+  });
+
+  afterAll(async () => {
+    await pglite.close();
+    await rm(oldFolder, { recursive: true, force: true });
+  });
+
+  it('leaves the documents, their drafts and their revisions as they were', async () => {
+    expect(before).toHaveLength(titledDocuments.length);
+    expect((await pglite.query(`SELECT ${columns} FROM documents ORDER BY id`)).rows).toEqual(before);
+    expect((await pglite.query('SELECT * FROM revisions ORDER BY document_id, revision')).rows).toEqual(
+      revisionsBefore,
+    );
+  });
+
+  it('adds an empty table of version requests, keyed by idempotency key, tied to the revisions', async () => {
+    expect((await pglite.query('SELECT * FROM revision_requests')).rows).toEqual([]);
+    const { rows } = await pglite.query<{ type: string }>(
+      `SELECT constraint_type AS type FROM information_schema.table_constraints
+       WHERE table_name = 'revision_requests' AND constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
+       ORDER BY constraint_type`,
+    );
+    expect(rows).toEqual([{ type: 'FOREIGN KEY' }, { type: 'PRIMARY KEY' }]);
+  });
+
+  it('deletes the records of a document with it', async () => {
+    const [doc] = titledDocuments;
+    await pglite.query(
+      `INSERT INTO revision_requests (idempotency_key, document_id, revision, request_hash)
+       VALUES ('6f1c0f43-6f39-4b8a-9d3e-1f0a2b3c4d5e', $1, 1, 'hash')`,
+      [doc?.id],
+    );
+    await pglite.query('DELETE FROM documents WHERE id = $1', [doc?.id]);
+    expect((await pglite.query('SELECT * FROM revision_requests')).rows).toEqual([]);
+  });
+
+  it('refuses a record without its revision', async () => {
+    await expect(
+      pglite.query(
+        `INSERT INTO revision_requests (idempotency_key, document_id, revision, request_hash)
+         VALUES ('7f1c0f43-6f39-4b8a-9d3e-1f0a2b3c4d5e', $1, 99, 'hash')`,
+        [titledDocuments[1]?.id],
+      ),
+    ).rejects.toThrow(/foreign key/);
+  });
+});

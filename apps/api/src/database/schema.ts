@@ -1,4 +1,4 @@
-import { integer, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { foreignKey, index, integer, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 /**
  * Current state of each document. `content`/`title` mirror the latest revision so
@@ -51,6 +51,33 @@ export const documentCreations = pgTable('document_creations', {
   requestHash: text('request_hash').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * One row per version saved with an idempotency key (`POST /documents/:id/revisions` with `idempotencyKey`): the
+ * revision that holds the text the request asked to save, so that the same request sent again answers that
+ * revision instead of creating a second one. The foreign key to the revision makes a record impossible without
+ * its revision: deleting the document deletes its revisions and these records with them.
+ */
+export const revisionRequests = pgTable(
+  'revision_requests',
+  {
+    idempotencyKey: uuid('idempotency_key').primaryKey(),
+    documentId: uuid('document_id').notNull(),
+    revision: integer('revision').notNull(),
+    /** SHA-256 (hex) of the request as validated: document id, `draftVersion`, `baseRevision` and name. */
+    requestHash: text('request_hash').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: 'revision_requests_revision_fk',
+      columns: [table.documentId, table.revision],
+      foreignColumns: [revisions.documentId, revisions.revision],
+    }).onDelete('cascade'),
+    // The cascade looks the records of each deleted revision up.
+    index('revision_requests_revision_idx').on(table.documentId, table.revision),
+  ],
+);
 
 export type DocumentRow = typeof documents.$inferSelect;
 export type RevisionRow = typeof revisions.$inferSelect;

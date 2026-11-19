@@ -6,23 +6,14 @@ import type { ConflictBody, Document, DocumentDraft } from '@reviewr/shared';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { runMigrations } from '../src/database/migrate.js';
 import * as schema from '../src/database/schema.js';
 import { DocumentsService } from '../src/documents/documents.service.js';
+import { closeTestDatabase, openTestDatabase, serverUrl, setupTimeout, type TestDatabase } from './pg-database.js';
 
 /**
  * Row-lock tests of `saveDraft`, `update` and `createRevision`, and of creations sent again with the same id
- * (the unique key of their record), on a real PostgreSQL, with several
- * connections (the e2e tests run on PGlite, which runs one transaction at a time).
- *
- * `TEST_DATABASE_URL` points at a server where the user may create databases; the file creates its own
- * database, migrates it and drops it at the end. Without the variable the file is skipped, unless
- * `REQUIRE_TEST_DATABASE` is set (the CI), where a missing variable is an error.
+ * (the unique key of their record), on a real PostgreSQL, with several connections (see `pg-database.ts`).
  */
-const serverUrl: string | undefined = process.env.TEST_DATABASE_URL;
-if (serverUrl === undefined && process.env.REQUIRE_TEST_DATABASE !== undefined) {
-  throw new Error('REQUIRE_TEST_DATABASE is set but TEST_DATABASE_URL is not: the PostgreSQL tests would be skipped');
-}
 
 /** Rounds of each race: enough to see both orders, few enough to stay fast. */
 const rounds: number = 20;
@@ -30,8 +21,6 @@ const rounds: number = 20;
 const racers: number = 6;
 /** Each race runs `rounds` times; a loaded machine with a slow disk needs more than the default 30 s. */
 const raceTimeout: number = 180_000;
-/** Creating and migrating the database, or waiting for its sessions to close, on the same kind of machine. */
-const setupTimeout: number = 120_000;
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; conflict: ConflictBody };
 
@@ -48,45 +37,20 @@ const settle = async <T>(call: Promise<T>): Promise<Outcome<T>> => {
 };
 
 describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () => {
-  const databaseName: string = `reviewr_concurrency_${process.pid}_${Date.now()}`;
+  let database: TestDatabase;
   let admin: pg.Client;
   let pool: pg.Pool;
   let service: DocumentsService;
 
   beforeAll(async () => {
-    admin = new pg.Client({ connectionString: serverUrl });
-    await admin.connect();
-    await admin.query(`CREATE DATABASE "${databaseName}"`);
-    const url: URL = new URL(serverUrl ?? '');
-    url.pathname = `/${databaseName}`;
-    await runMigrations(url.toString());
-    pool = new pg.Pool({ connectionString: url.toString(), max: 10 });
+    database = await openTestDatabase('reviewr_concurrency');
+    ({ admin, pool } = database);
     service = new DocumentsService(drizzle(pool, { schema }));
   }, setupTimeout);
 
   afterAll(async () => {
-    await pool?.end();
-    if (admin === undefined) {
-      return;
-    }
-    // `pool.end()` resolves before the server has closed every session. Dropping the database by force at that
-    // moment terminates them, and the clients, already detached from the pool, report it as unhandled errors
-    // that fail the run. So wait until the sessions are gone, then drop without force: if one is still there
-    // after 10 s, the drop fails and names the database, which is left for a manual cleanup.
-    for (let attempt: number = 0; attempt < 400; attempt += 1) {
-      const { rows } = await admin.query<{ n: number }>(
-        'SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1',
-        [databaseName],
-      );
-      if (rows[0]?.n === 0) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    try {
-      await admin.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
-    } finally {
-      await admin.end();
+    if (database !== undefined) {
+      await closeTestDatabase(database);
     }
   }, setupTimeout);
 
@@ -95,7 +59,7 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
     for (let attempt: number = 0; attempt < 200; attempt += 1) {
       const { rows } = await admin.query<{ n: number }>(
         `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND wait_event_type = 'Lock'`,
-        [databaseName],
+        [database.name],
       );
       if (rows[0]?.n === count) {
         return;
