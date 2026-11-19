@@ -1,3 +1,4 @@
+import { randomUUID as newId } from 'node:crypto';
 import type { Document } from '@reviewr/shared';
 import { QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,7 +15,7 @@ const setup = async (through: (server: FakeApi) => DraftsApi = (server) => serve
   const server = new FakeApi('A');
   const queryClient = new QueryClient();
   const report = { reportSuccess: () => undefined, reportError: () => undefined };
-  const { drafts, fetchDocument } = createAppDrafts(queryClient, { api: through(server), report, debounceMs });
+  const { drafts, fetchDocument } = createAppDrafts(queryClient, { api: through(server), report, debounceMs, newId });
   const fetch = () => queryClient.fetchQuery({ queryKey: key, queryFn: () => fetchDocument('doc'), staleTime: 0 });
   const entry = drafts.open(await fetch());
   const leave = drafts.hold('doc');
@@ -62,6 +63,21 @@ describe('createAppDrafts: the cache never goes back', () => {
     server.releaseReads();
     await reading;
     expect(cached()).toMatchObject({ revision: 2, content: 'B', draft: { content: 'B' } });
+  });
+
+  it('a version sent again after a lost answer shows the document as it is now, and a late read does not undo it', async () => {
+    const { server, drafts, entry, cached, lateRead } = await setup();
+    entry.autosave.edit('B');
+    server.lostVersionAnswers = 1;
+    await expect(drafts.saveVersion('doc', 1)).rejects.toThrow();
+    const reading = lateRead();
+    server.otherDevice('C');
+    server.otherVersion('C');
+    await drafts.saveVersion('doc', 1);
+    server.releaseReads();
+    await reading;
+    expect(server.revisions.map((revision) => revision.content)).toEqual(['A', 'B', 'C']);
+    expect(cached()).toMatchObject({ revision: 3, content: 'C', draft: { content: 'C', draftVersion: 3 } });
   });
 
   it('a late read does not take back the draft "Keep mine" saved', async () => {

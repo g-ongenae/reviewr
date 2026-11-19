@@ -1,3 +1,4 @@
+import { randomUUID as newId } from 'node:crypto';
 /// <reference types="node" />
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -114,7 +115,7 @@ const start = (server: DraftsApi, connection = controlled()) => {
   opened.push(buffer);
   const queryClient = new QueryClient();
   const report = { reportSuccess: () => undefined, reportError: () => undefined };
-  const app = createAppDrafts(queryClient, { api: server, report, debounceMs, buffer });
+  const app = createAppDrafts(queryClient, { api: server, report, debounceMs, buffer, newId });
   const fetch = (id = 'doc') =>
     queryClient.fetchQuery({
       queryKey: queryKeys.document(id),
@@ -553,6 +554,7 @@ describe('the local buffer, from the editor', () => {
       report: { reportSuccess: () => undefined, reportError: () => undefined },
       debounceMs,
       buffer,
+      newId,
     });
     const entry = app.drafts.open(await app.fetchDocument('doc'));
     expect(app.copy?.failure()).toBe('unavailable');

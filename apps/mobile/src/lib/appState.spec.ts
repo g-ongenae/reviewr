@@ -1,3 +1,4 @@
+import { randomUUID as newId } from 'node:crypto';
 import { focusManager, QueryClient, QueryObserver } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { onAppStateChange } from './appState';
@@ -17,7 +18,7 @@ describe('onAppStateChange', () => {
     // As `QueryClientProvider` does: the client listens to the focus manager.
     queryClient.mount();
     const report = { reportSuccess: () => undefined, reportError: () => undefined };
-    const drafts = createDrafts({ api: server, report, onDraft: () => undefined, onDocument: () => undefined });
+    const drafts = createDrafts({ api: server, report, onDraft: () => undefined, onDocument: () => undefined, newId });
     const change = onAppStateChange(drafts);
     // The editor's query, as `useQuery` observes it.
     const observer = new QueryObserver(queryClient, {

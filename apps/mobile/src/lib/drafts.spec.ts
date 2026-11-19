@@ -1,5 +1,6 @@
+import { randomUUID as newId } from 'node:crypto';
 import type { Document } from '@reviewr/shared';
-import { NetworkError } from '@reviewr/shared';
+import { isServerUnreachable, NetworkError } from '@reviewr/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDrafts, heldTexts, shownDocument } from './drafts';
 import { FakeApi } from './fakeApi';
@@ -16,6 +17,7 @@ const setup = (content = 'base', server = new FakeApi(content)) => {
     onDocument: (document) => documents.push(document),
     debounceMs,
     now: () => new Date('2026-11-16T10:00:00Z'),
+    newId,
   });
   const entry = drafts.open(server.read());
   const leave = drafts.hold('doc');
@@ -402,6 +404,112 @@ describe('createDrafts', () => {
       entry.autosave.edit('mine');
       expect(await drafts.saveVersion('doc', 1)).toBeUndefined();
       expect(server.revisions).toHaveLength(1);
+    });
+  });
+
+  describe('saveVersion after a lost answer', () => {
+    /** The writer saved `mine` as a version: the server made it, and its answer was lost. */
+    const lost = async (setupResult: ReturnType<typeof setup>) => {
+      const { server, drafts, entry } = setupResult;
+      const createRevision = vi.spyOn(server, 'createRevision');
+      entry.autosave.edit('mine');
+      server.lostVersionAnswers = 1;
+      const error: unknown = await drafts.saveVersion('doc', 1).catch((caught: unknown) => caught);
+      expect(isServerUnreachable(error)).toBe(true);
+      expect(server.revisions.map((revision) => revision.content)).toEqual(['base', 'mine']);
+      return createRevision;
+    };
+
+    it('sends the same request again: the version that exists is the answer, whatever another device did', async () => {
+      const setupResult = setup();
+      const { server, drafts, state, documents } = setupResult;
+      const createRevision = await lost(setupResult);
+      server.otherDevice('theirs');
+      server.otherVersion('theirs');
+      server.document.draft = { ...server.draft, baseRevision: 3 };
+
+      const saved = await drafts.saveVersion('doc', 1);
+      expect(saved).toMatchObject({ revision: 3, savedRevision: 2, draft: { content: 'theirs', draftVersion: 3 } });
+      expect(server.revisions.map((revision) => revision.content)).toEqual(['base', 'mine', 'theirs']);
+      // The draft moved elsewhere, and the local text is in the version: the newer draft is taken, as a read would.
+      expect(state()).toMatchObject({ status: 'saved', content: 'theirs' });
+      expect(documents.at(-1)).toMatchObject({ revision: 3, draft: { draftVersion: 3 } });
+      const [first, again] = createRevision.mock.calls.map(([, input]) => input);
+      expect(first).toEqual({ draftVersion: 2, baseRevision: 1, idempotencyKey: expect.any(String) });
+      expect(again).toEqual(first);
+    });
+
+    it('sends the same key and base again until an answer, then takes a new key', async () => {
+      const setupResult = setup();
+      const { server, drafts, entry } = setupResult;
+      const createRevision = await lost(setupResult);
+      server.failing = new NetworkError(new TypeError('offline'));
+      await expect(drafts.saveVersion('doc', 1)).rejects.toBeInstanceOf(NetworkError);
+      server.failing = undefined;
+      await drafts.saveVersion('doc', 1);
+      entry.autosave.edit('mine and more');
+      await drafts.saveVersion('doc', 2);
+      const [lostOne, offline, replay, more] = createRevision.mock.calls.map(([, input]) => input);
+      expect(offline).toEqual(lostOne);
+      expect(replay).toEqual(lostOne);
+      expect(more?.idempotencyKey).not.toBe(lostOne?.idempotencyKey);
+      expect(server.revisions.map((revision) => revision.content)).toEqual(['base', 'mine', 'mine and more']);
+    });
+
+    it('takes a new key for a retry on a new head, when the lost request never arrived', async () => {
+      const { server, drafts, entry } = setup();
+      entry.autosave.edit('mine');
+      await wait(debounceMs);
+      server.failing = new NetworkError(new TypeError('offline'));
+      await expect(drafts.saveVersion('doc', 1)).rejects.toBeInstanceOf(NetworkError);
+      server.failing = undefined;
+      server.otherVersion('a version from elsewhere');
+      const createRevision = vi.spyOn(server, 'createRevision');
+      expect(await drafts.saveVersion('doc', 1)).toMatchObject({ revision: 3, content: 'mine' });
+      const [first, retry] = createRevision.mock.calls.map(([, input]) => input);
+      expect([first?.baseRevision, retry?.baseRevision]).toEqual([1, 2]);
+      expect(retry?.idempotencyKey).not.toBe(first?.idempotencyKey);
+    });
+
+    it('is a conflict when the writer typed more and the draft moved elsewhere', async () => {
+      const setupResult = setup();
+      const { server, drafts, entry, state } = setupResult;
+      await lost(setupResult);
+      server.otherDevice('theirs');
+      entry.autosave.edit('mine and more');
+      expect(await drafts.saveVersion('doc', 1)).toBeUndefined();
+      expect(state()).toMatchObject({ status: 'conflict', content: 'mine and more', server: { content: 'theirs' } });
+      expect(server.revisions).toHaveLength(2);
+    });
+
+    it('keeps the text typed while the replay was on its way, as a conflict with a draft from elsewhere', async () => {
+      const setupResult = setup();
+      const { server, drafts, entry, state } = setupResult;
+      await lost(setupResult);
+      server.otherDevice('theirs');
+      server.paused = true;
+      const saving = drafts.saveVersion('doc', 1);
+      await wait();
+      entry.autosave.edit('mine and more');
+      server.release();
+      server.paused = false;
+      expect(await saving).toMatchObject({ savedRevision: 2 });
+      await wait(debounceMs);
+      expect(state()).toMatchObject({ status: 'conflict', content: 'mine and more', server: { content: 'theirs' } });
+      expect(server.draft.content).toBe('theirs');
+    });
+
+    it('is refused by the server with the same key on another request, which records nothing', async () => {
+      const { server } = setup();
+      server.otherDevice('mine');
+      const request = { draftVersion: 2, baseRevision: 1, idempotencyKey: newId() };
+      await expect(server.createRevision('doc', { ...request, baseRevision: 0 })).rejects.toMatchObject({
+        status: 409,
+      });
+      expect(server.versionKeys.size).toBe(0);
+      await server.createRevision('doc', request);
+      await expect(server.createRevision('doc', { ...request, name: 'other' })).rejects.toMatchObject({ status: 422 });
+      expect(server.revisions).toHaveLength(2);
     });
   });
 

@@ -1,7 +1,7 @@
 import { createAutosave, type Autosave, type Draft, type SaveResult } from '@reviewr/autosave';
 import { createReconcileSession, type ReconcileSession, type SessionApi, type Side } from '@reviewr/reconcile';
-import type { Document, DocumentDraft } from '@reviewr/shared';
-import { ApiError, conflictOf } from '@reviewr/shared';
+import type { CreateRevisionInput, Document, DocumentDraft } from '@reviewr/shared';
+import { ApiError, conflictOf, isServerUnreachable } from '@reviewr/shared';
 import type { LocalCopy } from './localCopy';
 import { createTitleSaver, type TitleSaver } from './title';
 
@@ -56,6 +56,8 @@ export interface DraftsOptions {
   copy?: LocalCopy;
   debounceMs?: number;
   now?: () => Date;
+  /** A new UUID, for the idempotency key of each "Save version" request. */
+  newId: () => string;
 }
 
 /** A text the phone kept in its local buffer, with the server draft it was written from. */
@@ -160,8 +162,24 @@ export const shownDocument = (drafts: Drafts, id: string, read: Document | undef
   read ?? drafts.get(id)?.document;
 
 export const createDrafts = (options: DraftsOptions): Drafts => {
-  const { report, onDraft, onDocument, copy, debounceMs, now = () => new Date() } = options;
+  const { report, onDraft, onDocument, copy, debounceMs, now = () => new Date(), newId } = options;
   const entries = new Map<string, Entry>();
+  /**
+   * "Save version" requests whose answer was lost (the server was unreachable), by document: the version may exist.
+   * Only the last one is kept, in memory: a restart of the app forgets it.
+   */
+  const lostVersions = new Map<string, CreateRevisionInput>();
+
+  /**
+   * The request to send for `input`, with an idempotency key. The request whose answer was lost is sent again as it
+   * was, key and `baseRevision` included, when it saves the same draft (`draftVersion`) under the same name: the
+   * server then answers the version it already made, whatever moved since. Any other request takes a new key.
+   */
+  const versionRequest = (id: string, input: Omit<CreateRevisionInput, 'idempotencyKey'>): CreateRevisionInput => {
+    const lost = lostVersions.get(id);
+    if (lost?.draftVersion === input.draftVersion && (lost.name ?? null) === (input.name ?? null)) return lost;
+    return { ...input, idempotencyKey: newId() };
+  };
 
   const reported = async <T>(request: () => Promise<T>): Promise<T> => {
     try {
@@ -271,16 +289,24 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
     let baseRevision = revision;
     // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
     for (let attempt = 1; ; attempt++) {
+      const request = versionRequest(id, {
+        name,
+        draftVersion,
+        baseRevision: baseRevision === 0 ? null : baseRevision,
+      });
       try {
-        const saved = await api.createRevision(id, {
-          name,
-          draftVersion,
-          baseRevision: baseRevision === 0 ? null : baseRevision,
-        });
+        const saved = await api.createRevision(id, request);
+        lostVersions.delete(id);
+        // A request sent again answers the document as it is now: a later head, a draft saved elsewhere since. Both
+        // are taken as any read's, never over a local text (see `refresh`).
         autosave.refresh(draftOf(saved));
         onDocument(saved, 'text');
         return saved;
       } catch (error) {
+        // Kept when its answer was lost; any answer of the server ends its key, which would be refused with another
+        // request.
+        if (isServerUnreachable(error)) lostVersions.set(id, request);
+        else lostVersions.delete(id);
         const conflict = conflictOf(error);
         // The draft moved elsewhere: the local text stays, and is a conflict unless the draft holds it.
         if (conflict?.code === 'draft_conflict') autosave.refresh(conflict.draft, true);
@@ -370,6 +396,7 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
     discard(id) {
       const entry = entries.get(id);
       if (entry !== undefined) drop(id, entry);
+      lostVersions.delete(id);
       copy?.forget(id);
     },
 
