@@ -89,16 +89,27 @@ describe('Drafts API', () => {
     expect(revisions.map((rev) => rev.revision)).toEqual([1]);
   });
 
-  it('treats saving the stored text as a no-op', async () => {
+  it('moves only the counter on a save of the stored text at the stored draftVersion', async () => {
     const doc = await create('v1');
     await saveDraft(doc.id, 'v2', 1);
     const before = await get(doc.id);
 
     expect(await saveDraft(doc.id, 'v2', 2)).toEqual({
       status: 200,
-      body: { content: 'v2', draftVersion: 2, baseRevision: 1 },
+      body: { content: 'v2', draftVersion: 3, baseRevision: 1 },
     });
-    expect(await get(doc.id)).toEqual(before);
+    expect(await get(doc.id)).toEqual({ ...before, draft: { content: 'v2', draftVersion: 3, baseRevision: 1 } });
+  });
+
+  it('refuses a save still on its way after the same client saved the stored text again on its version', async () => {
+    // The client sent B on 2, gave up waiting (B is still on its way), and the writer went back to A: it saves A on 2.
+    const doc = await create('v1');
+    await saveDraft(doc.id, 'A', 1);
+    expect((await saveDraft(doc.id, 'A', 2)).body).toMatchObject({ content: 'A', draftVersion: 3 });
+
+    // B reaches the server late: it must not replace A, which the client was told is saved.
+    expect((await saveDraft(doc.id, 'B', 2)).status).toBe(409);
+    expect((await get(doc.id)).draft).toMatchObject({ content: 'A', draftVersion: 3 });
   });
 
   it('answers 409 with the server draft on a stale draftVersion, and keeps that draft', async () => {

@@ -1,5 +1,6 @@
 import type {
   CreateDocumentInput,
+  CreateDraftDocumentInput,
   CreateRevisionInput,
   Document,
   SaveDraftInput,
@@ -55,8 +56,11 @@ let created: number;
 /** The API's rules for reading a document, saving its draft, creating a version, and creating a document. */
 const fakeApi = ({ method, path, body }: Call): Response => {
   if (method === 'POST' && path === '/documents') {
-    const input = body as CreateDocumentInput;
-    const document = { ...fresh(`new-${++created}`, input.title ?? null, input.content), revision: 1 };
+    const input = body as CreateDocumentInput & { id?: string };
+    // The same creation sent again answers the document it made.
+    const made = input.id === undefined ? undefined : db.get(input.id);
+    if (made !== undefined) return reply(201, made);
+    const document = { ...fresh(input.id ?? `new-${++created}`, input.title ?? null, input.content), revision: 1 };
     db.set(document.id, document);
     return reply(201, document);
   }
@@ -618,10 +622,11 @@ describe('a document deleted elsewhere', () => {
         fireEvent.click(within(section).getByRole('button', { name: 'Save as a new document' }));
         await elapse();
 
-        expect(
-          calls.filter((call) => call.method === 'POST' && call.path === '/documents').map((call) => call.body),
-        ).toEqual([{ title: 'Le phare', content: text }]);
-        expect(server('new-1').draft?.content).toBe(text);
+        const creations = calls.filter((call) => call.method === 'POST' && call.path === '/documents');
+        expect(creations).toHaveLength(1);
+        const { id, ...creation } = creations[0]?.body as CreateDraftDocumentInput;
+        expect(creation).toEqual({ title: 'Le phare', content: text, draftOnly: true });
+        expect(server(id).draft?.content).toBe(text);
         // The new document is open.
         expect(textarea().value).toBe(text);
 
@@ -629,6 +634,30 @@ describe('a document deleted elsewhere', () => {
         expect(listed()).toEqual(all);
       },
     );
+
+    it('sends a creation whose answer was lost again as it was, and makes one document', async () => {
+      await deletedDuringMerge();
+      // The server makes the document, but its answer never comes back.
+      intercept = (call) => (call.method === 'POST' ? (fakeApi(call), reply(504)) : undefined);
+      const save = () =>
+        fireEvent.click(
+          within(screen.getByRole('region', { name: 'Your text' })).getByRole('button', {
+            name: 'Save as a new document',
+          }),
+        );
+      save();
+      await elapse();
+      // Shown as "Server unreachable": the recovery stays.
+      expect(recovery()).not.toBeNull();
+
+      intercept = () => undefined;
+      save();
+      await elapse();
+      const [first, again] = calls.filter((call) => call.method === 'POST' && call.path === '/documents');
+      expect(again?.body).toEqual(first?.body);
+      expect([...db.keys()].filter((id) => id !== 'doc-2')).toHaveLength(1);
+      expect(textarea().value).toBe(edited);
+    });
 
     it('discards every text only through the action that says so', async () => {
       await deletedDuringMerge();

@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api-error.js';
 import { ReviewrClient } from './client.js';
-import { conflictOf } from './errors.js';
+import { conflictOf, isServerUnreachable } from './errors.js';
+import { NetworkError } from './network-error.js';
 import type {
   ConflictBody,
   CreateDraftDocumentInput,
@@ -308,5 +309,137 @@ describe('ReviewrClient.createDocument', () => {
       expect(error).toBeInstanceOf(ApiError);
       expect((error as ApiError).status).toBe(status);
     }
+  });
+});
+
+describe('ReviewrClient time limit', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A fetch that never answers, nor fails when its signal is aborted (the worst case). */
+  const silentFetch = () =>
+    vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Promise<Response>(() => {
+          // Never settles.
+        }),
+    );
+
+  /** Settles `promise` into a value or the error it rejected with, so fake time can run before it is awaited. */
+  const settled = (promise: Promise<unknown>) => {
+    const outcome: { done: boolean; value?: unknown; error?: unknown } = { done: false };
+    void promise.then(
+      (value: unknown) => Object.assign(outcome, { done: true, value }),
+      (error: unknown) => Object.assign(outcome, { done: true, error }),
+    );
+
+    return outcome;
+  };
+
+  it('fails as unreachable after 15 s without an answer, and aborts the request', async () => {
+    const fetchFn = silentFetch();
+    const outcome = settled(new ReviewrClient('http://api.test', fetchFn).listDocuments());
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(outcome.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outcome.error).toBeInstanceOf(NetworkError);
+    expect(isServerUnreachable(outcome.error)).toBe(true);
+    expect(((outcome.error as NetworkError).cause as Error).name).toBe('TimeoutError');
+    expect(fetchFn.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports its own abort as unreachable, not as an abort', async () => {
+    const aborted = vi.fn();
+    const fetchFn = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            aborted();
+            reject(new DOMException('Aborted', 'AbortError'));
+          });
+        }),
+    );
+    const outcome = settled(new ReviewrClient('http://api.test', fetchFn, { timeoutMs: 1000 }).getDocument('id'));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(aborted).toHaveBeenCalledOnce();
+    expect(isServerUnreachable(outcome.error)).toBe(true);
+  });
+
+  it('stays unreachable when the body fails after the limit', async () => {
+    let fail: (error: Error) => void = () => undefined;
+    const late = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        fail = (error) => controller.error(error);
+      },
+    });
+    const fetchFn = vi.fn(async () => new Response(late, { status: 200 }));
+    const outcome = settled(new ReviewrClient('http://api.test', fetchFn).getDocument('id'));
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    fail(new TypeError('Connection reset'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(isServerUnreachable(outcome.error)).toBe(true);
+    expect(((outcome.error as NetworkError).cause as Error).name).toBe('TimeoutError');
+  });
+
+  it('fails as unreachable when the body of the answer never finishes', async () => {
+    const endless = new ReadableStream<Uint8Array>({
+      start: (controller) => controller.enqueue(new TextEncoder().encode('{"id":')),
+    });
+    const fetchFn = vi.fn(async () => new Response(endless, { status: 200 }));
+    const outcome = settled(new ReviewrClient('http://api.test', fetchFn).getDocument('id'));
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(isServerUnreachable(outcome.error)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('leaves a request answered in time untouched, and no timer behind', async () => {
+    const client = new ReviewrClient('http://api.test', vi.fn(async () => jsonResponse(200, serverDraft)));
+
+    await expect(client.saveDraft('id', { content: 'phone', draftVersion: 2 })).resolves.toEqual(serverDraft);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('lets an abort of the caller through untouched, before the limit', async () => {
+    // A fetch wrapper with its own controller, aborted on purpose after 10 s.
+    const abort = new DOMException('The operation was aborted.', 'AbortError');
+    let signal: AbortSignal | undefined;
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      const own = new AbortController();
+      setTimeout(() => own.abort(abort), 10_000);
+
+      return new Promise<Response>((_resolve, reject) => {
+        own.signal.addEventListener('abort', () => reject(own.signal.reason as Error));
+      });
+    });
+    const outcome = settled(new ReviewrClient('http://api.test', fetchFn).listDocuments());
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(outcome.error).toBe(abort);
+    expect(signal?.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('gives the health check 5 s, and a long body one more second per 16 KiB', async () => {
+    const client = new ReviewrClient('http://api.test', silentFetch());
+    const health = settled(client.health());
+    const save = settled(client.saveDraft('id', { content: 'a'.repeat(5 * 16_384), draftVersion: 1 }));
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(isServerUnreachable(health.error)).toBe(true);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(save.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(isServerUnreachable(save.error)).toBe(true);
   });
 });

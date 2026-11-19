@@ -20,6 +20,31 @@ import { NetworkError } from './network-error.js';
 
 const httpNoContent: number = 204;
 
+/** Default limit for a request to end, answer included: see {@link ClientOptions.timeoutMs}. */
+const defaultTimeoutMs: number = 15_000;
+
+/** Default limit for the health check: see {@link ClientOptions.healthTimeoutMs}. */
+const defaultHealthTimeoutMs: number = 5000;
+
+/** Characters of request body sent per second of time added to the limit (about 128 kbit/s, up and back). */
+const bodyCharsPerSecond: number = 16_384;
+
+const msPerSecond: number = 1000;
+
+/**
+ * Time limits of the client. A request that has no complete answer (headers and body) in time is aborted and rejects
+ * with a `NetworkError`, as when the server cannot be reached.
+ */
+export interface ClientOptions {
+  /**
+   * Limit of a request, in milliseconds, plus one second per 16 KiB of body it sends (a draft can be long, and is
+   * answered with its text). Default: 15 s, for a home server reached through a VPN from a slow mobile network.
+   */
+  timeoutMs?: number;
+  /** Limit of the health check, in milliseconds. Default: 5 s, the interval at which the apps poll it. */
+  healthTimeoutMs?: number;
+}
+
 /**
  * Path of a document resource.
  */
@@ -30,23 +55,29 @@ const documentPath = (id: string): string => `/documents/${encodeURIComponent(id
  */
 export class ReviewrClient {
   private readonly root: string;
+  private readonly timeoutMs: number;
+  private readonly healthTimeoutMs: number;
 
   /**
    * @param baseUrl - Root URL of the API, e.g. `http://localhost:3000`
    * @param fetchFn - Fetch implementation, overridable for tests
+   * @param options - Time limits of the requests
    */
   constructor(
     baseUrl: string,
     private readonly fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+    options: ClientOptions = {},
   ) {
     this.root = baseUrl.replace(/\/+$/, '');
+    this.timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
+    this.healthTimeoutMs = options.healthTimeoutMs ?? defaultHealthTimeoutMs;
   }
 
   /**
    * Check the API (and its database) is up.
    */
   public async health(): Promise<{ status: 'ok' }> {
-    return this.request('GET', '/health');
+    return this.request('GET', '/health', undefined, this.healthTimeoutMs);
   }
 
   /**
@@ -155,21 +186,47 @@ export class ReviewrClient {
   }
 
   /**
-   * Send a JSON request and parse the JSON response.
+   * Send a JSON request and parse the JSON response, within a time limit (by default, the client's limit for the body
+   * sent). A request still unanswered then is aborted and rejects with a `NetworkError`. The timer is a race, not only
+   * an abort, so the request ends even with a fetch that ignores the signal or a body that never finishes.
    */
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, limitMs?: number): Promise<T> {
+    const payload: string | undefined = body === undefined ? undefined : JSON.stringify(body);
+    const limit: number =
+      limitMs ?? this.timeoutMs + Math.ceil((payload?.length ?? 0) / bodyCharsPerSecond) * msPerSecond;
+    const controller: AbortController = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut: Promise<never> = new Promise<never>((unused: unknown, reject: (error: NetworkError) => void) => {
+      timer = setTimeout(() => {
+        const cause: Error = new Error(`No complete answer within ${limit} ms`);
+        cause.name = 'TimeoutError';
+        reject(new NetworkError(cause));
+        controller.abort(cause);
+      }, limit);
+    });
+
+    return Promise.race([this.send<T>(method, path, payload, controller.signal), timedOut]).finally(() => {
+      clearTimeout(timer);
+    });
+  }
+
+  /**
+   * Send a request and read its answer; `signal` is aborted only by the time limit of `request`.
+   */
+  private async send<T>(method: string, path: string, payload: string | undefined, signal: AbortSignal): Promise<T> {
     const headers: Headers = new Headers();
     headers.set('Accept', 'application/json');
-    if (body !== undefined) {
+    if (payload !== undefined) {
       headers.set('Content-Type', 'application/json');
     }
     const response: Response = await this.fetchFn(`${this.root}${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: payload,
+      signal,
     }).catch((error: unknown) => {
-      // An aborted request was cancelled on purpose: let the caller see it as such.
-      throw error instanceof Error && error.name === 'AbortError' ? error : new NetworkError(error);
+      // An abort of the caller's was made on purpose: let the caller see it as such. One of the time limit is a failure.
+      throw error instanceof Error && error.name === 'AbortError' && !signal.aborted ? error : new NetworkError(error);
     });
 
     if (!response.ok) {
