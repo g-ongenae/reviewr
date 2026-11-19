@@ -1,6 +1,8 @@
 import type { Document, DocumentDraft } from '@reviewr/shared';
 import type { QueryClient } from '@tanstack/react-query';
-import { createDrafts, type Drafts, type DraftsOptions } from './drafts';
+import { createDrafts, draftOf, type Drafts, type DraftsOptions } from './drafts';
+import type { LocalBuffer } from './localBuffer';
+import { createLocalCopy, type LocalCopy } from './localCopy';
 import { queryKeys } from './queryKeys';
 
 /** The newest draft and head revision the app has seen confirmed for a document. */
@@ -11,8 +13,13 @@ interface Newest {
 
 export interface AppDrafts {
   drafts: Drafts;
-  /** The query function of a document: the server's answer, settled against what the app has seen confirmed. */
+  /**
+   * The query function of a document: the server's answer, settled against what the app has seen confirmed. It
+   * first restores a text the phone kept for it (see `fetchDocument`).
+   */
   fetchDocument: (id: string) => Promise<Document>;
+  /** The phone's copy of the texts, with a buffer: the notice reads its failure. */
+  copy?: LocalCopy;
 }
 
 /**
@@ -24,8 +31,10 @@ export interface AppDrafts {
  */
 export const createAppDrafts = (
   queryClient: QueryClient,
-  options: Omit<DraftsOptions, 'onDraft' | 'onDocument'>,
+  options: Omit<DraftsOptions, 'onDraft' | 'onDocument' | 'copy'> & { buffer?: LocalBuffer },
 ): AppDrafts => {
+  const { buffer, ...draftsOptions } = options;
+  const copy = buffer === undefined ? undefined : createLocalCopy(buffer);
   // One draft and one head per document opened since the app started: the price of telling a late answer apart.
   const newest = new Map<string, Newest>();
   /**
@@ -62,7 +71,8 @@ export const createAppDrafts = (
     });
 
   const drafts = createDrafts({
-    ...options,
+    ...draftsOptions,
+    copy,
     onDraft: (id, draft) => {
       see(id, draft);
       write(id, (cached) => cached && { ...cached, draft });
@@ -82,12 +92,29 @@ export const createAppDrafts = (
     },
   });
 
+  /**
+   * A text the phone kept for the document when the app was last stopped comes back on the document's own read, before
+   * any screen gets it: dropped if the server holds it, else reopened as the local text on the base it was written
+   * from (see `Drafts.recover`). Each document decides once, on its own read: a read that fails leaves the text in the
+   * buffer for the next one (opening the document again, or the server's return), and never holds back another
+   * document. Only the wait for the scan of the buffer, a local read, comes first.
+   */
+  const restoreKept = async (id: string, read: () => Promise<Document>): Promise<Document> => {
+    if (copy === undefined) return read();
+    const kept = await copy.kept(id);
+    const document = await read();
+    if (kept === undefined || drafts.get(id) !== undefined || !copy.claim(id)) return document;
+    if (kept.content === draftOf(document).content) copy.forget(id);
+    else drafts.recover(document, kept);
+    return document;
+  };
+
   const fetchDocument = async (id: string): Promise<Document> => {
     const started = ++requests;
-    const document = settle(await options.api.getDocument(id));
+    const document = await restoreKept(id, async () => settle(await options.api.getDocument(id)));
     const rename = renamed.get(id);
     return rename !== undefined && rename.at > started ? { ...document, title: rename.title } : document;
   };
 
-  return { drafts, fetchDocument };
+  return { drafts, fetchDocument, copy };
 };
