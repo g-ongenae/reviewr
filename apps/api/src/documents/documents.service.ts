@@ -269,8 +269,12 @@ export class DocumentsService {
    * Autosave the draft of a document. Creates no revision and leaves the head (`content`, `revision`)
    * and the draft's base revision alone.
    *
-   * Saving the text already stored answers the current draft and changes nothing, whatever
-   * `draftVersion` it carries: a retry after a lost response must not conflict with itself.
+   * Saving the text already stored on an older `draftVersion` answers the current draft and changes nothing: a retry
+   * after a lost response must not conflict with itself. Saving it on the current `draftVersion` moves only the
+   * counter: a client that gave up waiting for an earlier save and sends its base text again (the writer undid the
+   * edit) is told it is saved, so that earlier save, if it is still on its way, must no longer match and get a 409
+   * instead of replacing the text silently. Only a client whose outcome is unknown sends that: the autosave never
+   * sends the text of its base otherwise.
    * Otherwise it fails with 409 `draft_conflict` if the draft was saved since `draftVersion`, with the
    * current draft in the body so the client can reconcile without another request.
    * A save moves `updatedAt`, so documents being written rise in the list.
@@ -280,7 +284,7 @@ export class DocumentsService {
       const [locked] = await tx.select().from(documents).where(eq(documents.id, id)).for('update');
       const current: DocumentRow = assertFound(locked, id);
 
-      if (current.draftContent === input.content) {
+      if (current.draftContent === input.content && current.draftVersion !== input.draftVersion) {
         return toDocumentDraft(current);
       }
       if (current.draftVersion !== input.draftVersion) {
@@ -293,7 +297,11 @@ export class DocumentsService {
 
       const [row] = await tx
         .update(documents)
-        .set({ draftContent: input.content, draftVersion: current.draftVersion + 1, updatedAt: new Date() })
+        .set(
+          current.draftContent === input.content
+            ? { draftVersion: current.draftVersion + 1 }
+            : { draftContent: input.content, draftVersion: current.draftVersion + 1, updatedAt: new Date() },
+        )
         .where(eq(documents.id, id))
         .returning();
 
