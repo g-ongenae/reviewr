@@ -296,6 +296,27 @@ describe('the local buffer, from the editor', () => {
     expect(stored()).toBeUndefined();
   });
 
+  it('brings back the first text of a document with no version yet, and saves it as its draft', async () => {
+    const server = FakeApi.draftOnly();
+    const first = start(server);
+    const { entry } = await first.show();
+    server.failing = offline;
+    entry.autosave.edit('First words, offline');
+    await wait(debounceMs);
+    await first.copy.settled();
+    expect(stored()).toEqual({ content: 'First words, offline', base: '', draftVersion: 1 });
+    await first.kill();
+
+    server.failing = undefined;
+    const second = start(server);
+    const { state } = await second.show();
+    expect(state().content).toBe('First words, offline');
+    await wait(debounceMs);
+    expect(state()).toMatchObject({ status: 'saved', content: 'First words, offline' });
+    expect(server.document).toMatchObject({ revision: 0, draft: { content: 'First words, offline', draftVersion: 2 } });
+    expect(server.revisions).toEqual([]);
+  });
+
   it('tries a kept text again when the document is opened again, after a read that failed for another reason', async () => {
     const server = new FakeApi('A');
     await killedWith('Kept');

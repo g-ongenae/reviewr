@@ -1,12 +1,13 @@
 import type {
   ConflictBody,
+  CreateDraftDocumentInput,
   CreateRevisionInput,
   DeleteDocumentInput,
   Document,
   DocumentDraft,
   SaveDraftInput,
 } from '@reviewr/shared';
-import { ApiError } from '@reviewr/shared';
+import { ApiError, NetworkError } from '@reviewr/shared';
 import type { DraftsApi } from './drafts';
 
 /**
@@ -29,6 +30,10 @@ export class FakeApi implements DraftsApi {
   tooLarge = (content: string) => content.length > 20;
   /** How many of the next reads answer what the server held when they arrived, but only at `releaseReads`. */
   lateReads = 0;
+  /** The body of each creation the server took, by document id. */
+  creations = new Map<string, string>();
+  /** How many of the next creations the server makes, but whose answer is lost on the way back. */
+  lostAnswers = 0;
   private waiting: (() => void)[] = [];
   private waitingReads: (() => void)[] = [];
 
@@ -44,6 +49,14 @@ export class FakeApi implements DraftsApi {
       draft: { content, draftVersion: 1, baseRevision: 1 },
     };
     this.revisions = [{ revision: 1, content }];
+  }
+
+  /** A document created as a draft only: no version (revision 0, an empty head), its text in the draft. */
+  static draftOnly(content = '', id = 'doc'): FakeApi {
+    const server = new FakeApi('');
+    server.document = { ...server.document, id, revision: 0, draft: { content, draftVersion: 1, baseRevision: null } };
+    server.revisions = [];
+    return server;
   }
 
   get draft(): DocumentDraft {
@@ -113,6 +126,30 @@ export class FakeApi implements DraftsApi {
     return this.read();
   }
 
+  /**
+   * Creates a draft-only document under the client's id, which becomes the document this server holds. The same
+   * creation sent again answers the document as it is now; another body is refused (422), a deleted id too (410).
+   */
+  async createDocument(input: CreateDraftDocumentInput): Promise<Document> {
+    await this.gate(`createDocument ${input.id}`, false);
+    const body = JSON.stringify([input.title ?? null, input.content, input.draftOnly]);
+    const taken = this.creations.get(input.id);
+    if (taken === undefined) {
+      this.creations.set(input.id, body);
+      const { document, revisions } = FakeApi.draftOnly(input.content, input.id);
+      Object.assign(this, { document, revisions, gone: false });
+    } else if (this.gone && this.document.id === input.id) {
+      throw new ApiError(410, { statusCode: 410, message: 'Document deleted' });
+    } else if (taken !== body) {
+      throw new ApiError(422, { statusCode: 422, message: 'Another creation used this id' });
+    }
+    if (this.lostAnswers > 0) {
+      this.lostAnswers--;
+      throw new NetworkError(new TypeError('Network request failed'));
+    }
+    return this.read();
+  }
+
   async renameDocument(_id: string, title: string | null): Promise<Document> {
     await this.gate(`renameDocument ${title}`);
     this.document.title = title;
@@ -137,10 +174,10 @@ export class FakeApi implements DraftsApi {
     return new ApiError(409, { statusCode: 409, message: 'Conflict', ...structuredClone(body) } as ConflictBody);
   }
 
-  private async gate(request: string) {
+  private async gate(request: string, checkGone = true) {
     if (this.paused) await new Promise<void>((resume) => this.waiting.push(resume));
     if (this.failing !== undefined) throw this.failing;
-    if (this.gone) throw new ApiError(404, { statusCode: 404, message: 'Document not found' });
+    if (checkGone && this.gone) throw new ApiError(404, { statusCode: 404, message: 'Document not found' });
     this.log.push(request);
   }
 }
