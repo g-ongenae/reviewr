@@ -1,8 +1,9 @@
-import { displayTitle, type Document } from '@reviewr/shared';
+import { displayTitle, formatBuildVersion, type Document } from '@reviewr/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { randomUUID } from 'expo-crypto';
 import { router, Stack } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ToolbarButton } from '@/components/ToolbarButton';
 import { api, apiUrl, inlineError, queryKeys } from '@/lib/api';
 import { formatDate } from '@/lib/format';
@@ -14,6 +15,7 @@ const newDocument = createNewDocument({ api, newId: randomUUID });
 
 export default function DocumentListScreen() {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
   const documents = useQuery({ queryKey: queryKeys.documents, queryFn: () => api.listDocuments() });
 
@@ -78,6 +80,9 @@ export default function DocumentListScreen() {
           )}
         />
       )}
+      <Text style={[styles.version, { color: theme.muted, paddingBottom: insets.bottom + 8 }]}>
+        {formatBuildVersion(process.env.EXPO_PUBLIC_BUILD_VERSION)}
+      </Text>
     </View>
   );
 }
@@ -88,4 +93,5 @@ const styles = StyleSheet.create({
   separator: { height: StyleSheet.hairlineWidth, marginLeft: 16 },
   item: { paddingHorizontal: 16, paddingVertical: 14, gap: 4 },
   title: { fontSize: 17, fontWeight: '500' },
+  version: { paddingTop: 8, paddingHorizontal: 16, fontSize: 12, fontVariant: ['tabular-nums'], opacity: 0.8 },
 });

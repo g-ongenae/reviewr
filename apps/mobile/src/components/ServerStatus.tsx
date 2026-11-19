@@ -1,5 +1,6 @@
 import { isServerUnreachable } from '@reviewr/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { usePathname } from 'expo-router';
 import { useEffect, useSyncExternalStore } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,6 +14,8 @@ import { useTheme } from '@/lib/theme';
 export const ServerStatus = () => {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  // The document list ends with its version line: keep it readable under the notification.
+  const lift = usePathname() === '/' ? 24 : 0;
   const queryClient = useQueryClient();
   const unreachable = useSyncExternalStore(reachability.subscribe, reachability.isUnreachable);
 
@@ -35,7 +38,7 @@ export const ServerStatus = () => {
   }
 
   return (
-    <View style={[styles.region, { bottom: insets.bottom + 16 }]} accessibilityLiveRegion="polite">
+    <View style={[styles.region, { bottom: insets.bottom + 16 + lift }]} accessibilityLiveRegion="polite">
       <View
         accessibilityRole="alert"
         style={[
