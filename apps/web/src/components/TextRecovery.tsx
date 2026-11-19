@@ -5,6 +5,7 @@ import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { api, inlineError, queryKeys } from '../api';
 import type { Autosave, AutosaveState } from '../autosave/autosave';
 import { discardAutosave, useKeptCopies } from '../autosave/useAutosave';
+import { writeDocument } from '../documentCache';
 import { existingSession, type SessionState, type Side } from '../reconcile/session';
 
 /** How a text a merge holds is labelled, after the side it came from. */
@@ -115,7 +116,7 @@ export const DeletedDocument = ({
   const create = useMutation({
     mutationFn: (content: string) => api.createDocument({ title: title ?? null, content }),
     onSuccess: async (document) => {
-      queryClient.setQueryData(queryKeys.document(document.id), document);
+      writeDocument(queryClient, document.id, () => document);
       await queryClient.invalidateQueries({ queryKey: queryKeys.documents, exact: true });
       onOpen(document);
     },

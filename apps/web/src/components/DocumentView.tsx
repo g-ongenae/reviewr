@@ -2,7 +2,7 @@ import type { Document } from '@reviewr/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useEffect, useEffectEvent, useReducer, useState } from 'react';
-import { api, inlineError, isNotFound, queryKeys } from '../api';
+import { inlineError, isNotFound, queryKeys } from '../api';
 import {
   blankDocument,
   entryOf,
@@ -11,6 +11,7 @@ import {
   useRestored,
   useWaitingTexts,
 } from '../autosave/useAutosave';
+import { readDocument } from '../documentCache';
 import { Editor } from './Editor';
 import { DeletedDocument, HeldText, keptCopyLabel } from './TextRecovery';
 
@@ -48,7 +49,7 @@ export const DocumentView = ({
   const [blankPage] = useState(() => (blank ? blankDocument(id) : undefined));
   const document = useQuery({
     queryKey: queryKeys.document(id),
-    queryFn: () => api.getDocument(id),
+    queryFn: () => readDocument(queryClient, id),
     enabled: id.length > 0 && (blankPage === undefined || isCreated(queryClient, id)),
     retry: (failureCount, error) => !isNotFound(error) && failureCount < 3,
   });
