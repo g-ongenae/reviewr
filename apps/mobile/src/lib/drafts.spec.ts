@@ -450,17 +450,53 @@ describe('createDrafts', () => {
       expect(createRevision.mock.calls.map(([, input]) => input.draftVersion)).toEqual([2, 4]);
     });
 
-    it('goes on when the head moved elsewhere too, within the same number of tries', async () => {
+    it('goes on when the head moved elsewhere too: the new counter on the second try, the new head on the third', async () => {
+      const setupResult = setup();
+      const { server, drafts, state } = setupResult;
+      const createRevision = await saved(setupResult);
+      // Another device, through the endpoints: saves its text, makes it a version, then saves `mine` again.
+      await server.saveDraft('doc', { content: 'theirs', draftVersion: 2 });
+      // Called on the prototype, so that the spy records only the phone's requests.
+      await FakeApi.prototype.createRevision.call(server, 'doc', {
+        draftVersion: 3,
+        baseRevision: 1,
+        idempotencyKey: newId(),
+      });
+      await server.saveDraft('doc', { content: 'mine', draftVersion: 3 });
+      expect(server.document).toMatchObject({ revision: 2, content: 'theirs' });
+      expect(server.draft).toEqual({ content: 'mine', draftVersion: 4, baseRevision: 2 });
+
+      expect(await drafts.saveVersion('doc', 1)).toMatchObject({ revision: 3, content: 'mine', savedRevision: 3 });
+      expect(server.revisions.map((revision) => revision.content)).toEqual(['base', 'theirs', 'mine']);
+      expect(state()).toMatchObject({ status: 'saved', content: 'mine', base: { draftVersion: 4 } });
+      const requests = createRevision.mock.calls.map(([, input]) => input);
+      expect(requests.map(({ draftVersion, baseRevision }) => [draftVersion, baseRevision])).toEqual([
+        [2, 1],
+        [4, 1],
+        [4, 2],
+      ]);
+      expect(new Set(requests.map((request) => request.idempotencyKey)).size).toBe(3);
+    });
+
+    it('sends the same-text retry again as it was when its answer was lost', async () => {
       const setupResult = setup();
       const { server, drafts } = setupResult;
       const createRevision = await saved(setupResult);
       server.otherDevice('mine');
-      server.otherVersion('a version from elsewhere');
+      // The retry on the new counter is applied by the server, and its answer is lost.
+      server.lostVersionAnswers = 1;
+      const error: unknown = await drafts.saveVersion('doc', 1).catch((caught: unknown) => caught);
+      expect(isServerUnreachable(error)).toBe(true);
+      expect(server.revisions.map((revision) => revision.content)).toEqual(['base', 'mine']);
 
-      expect(await drafts.saveVersion('doc', 1)).toMatchObject({ revision: 3, content: 'mine' });
-      expect(server.revisions.map((revision) => revision.content)).toEqual(['base', 'a version from elsewhere', 'mine']);
-      const keys = createRevision.mock.calls.map(([, input]) => input.idempotencyKey);
-      expect(new Set(keys).size).toBe(3);
+      expect(await drafts.saveVersion('doc', 1)).toMatchObject({ revision: 2, content: 'mine', savedRevision: 2 });
+      const [first, retry, again] = createRevision.mock.calls.map(([, input]) => input);
+      expect(first).toMatchObject({ draftVersion: 2, baseRevision: 1 });
+      expect(retry).toEqual({ draftVersion: 3, baseRevision: 1, idempotencyKey: expect.any(String) });
+      expect(retry?.idempotencyKey).not.toBe(first?.idempotencyKey);
+      expect(again).toEqual(retry);
+      expect(createRevision).toHaveBeenCalledTimes(3);
+      expect(server.revisions.map((revision) => revision.content)).toEqual(['base', 'mine']);
     });
 
     it('stops after three tries when every answer is a conflict on the same text', async () => {
