@@ -7,7 +7,8 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { ToolbarActions, ToolbarButton } from '@/components/ToolbarButton';
-import { HistoryIcon, SaveIcon, StatsIcon, TrashIcon } from '@/components/ToolbarIcons';
+import { ChevronIcon, HistoryIcon, SaveIcon, StatsIcon, TrashIcon } from '@/components/ToolbarIcons';
+import { VersionNameInput } from '@/components/VersionNameInput';
 import { WritingStatsPanel } from '@/components/WritingStats';
 import { api, inlineError, queryKeys } from '@/lib/api';
 import { draftsOf, fetchDocument, localCopyOf } from '@/lib/appDrafts';
@@ -16,6 +17,7 @@ import { heldTexts, shownDocument, textMoved } from '@/lib/drafts';
 import type { LocalCopy } from '@/lib/localCopy';
 import type { TitleState } from '@/lib/title';
 import { useTheme } from '@/lib/theme';
+import { createVersionName } from '@/lib/versionName';
 import { useWritingBaselines } from '@/lib/writingBaselines';
 import { useWritingStatsPanel } from '@/lib/writingStatsPanel';
 
@@ -28,7 +30,7 @@ export default function DocumentScreen() {
   // A read that fails (deleted elsewhere, server down) keeps showing a text the app holds for the document.
   const shown = shownDocument(draftsOf(queryClient), id, document.data);
   if (shown !== undefined) {
-    return <Editor document={shown} />;
+    return <Editor key={shown.id} document={shown} />;
   }
   if (document.isPending) {
     return <ActivityIndicator style={styles.message} color={theme.accent} />;
@@ -132,7 +134,11 @@ const Editor = ({ document }: { document: Document }) => {
   const copy = localCopyOf(queryClient);
   const copyFailure = useLocalCopyNotice(copy);
 
-  const saveVersion = useMutation({ mutationFn: () => drafts.saveVersion(document.id, document.revision) });
+  const [versionName] = useState(createVersionName);
+  const nameField = useSyncExternalStore(versionName.subscribe, versionName.getSnapshot);
+  const saveVersion = useMutation({
+    mutationFn: () => versionName.save((name) => drafts.saveVersion(document.id, document.revision, name)),
+  });
 
   /**
    * Deletes the document with the pair this screen showed when the confirmation opened (see `askToDelete`). Until the
@@ -240,6 +246,13 @@ const Editor = ({ document }: { document: Document }) => {
                 disabled={!canSave}
                 onPress={() => saveVersion.mutate()}
               />
+              <ToolbarButton
+                label="Name this version"
+                icon={ChevronIcon}
+                expanded={nameField.open}
+                disabled={frozen || saveVersion.isPending || (!canSave && !nameField.open)}
+                onPress={versionName.toggle}
+              />
             </ToolbarActions>
           ),
         }}
@@ -247,6 +260,19 @@ const Editor = ({ document }: { document: Document }) => {
       <View style={[styles.statusBar, { borderColor: theme.border }]}>
         <Text style={{ color: saved ? theme.muted : theme.accent }}>{status}</Text>
       </View>
+      {nameField.open && (
+        <View style={styles.versionName}>
+          <VersionNameInput
+            value={nameField.value}
+            onChangeText={versionName.edit}
+            placeholder="Name this version (optional)"
+            editable={!frozen && !saveVersion.isPending}
+            onSubmitEditing={() => {
+              if (canSave) saveVersion.mutate();
+            }}
+          />
+        </View>
+      )}
       {copyFailure !== undefined && (
         <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: theme.warning }]}>
           <Text style={[styles.noticeTitle, { color: theme.text }]}>Copy on this phone not confirmed</Text>
@@ -342,6 +368,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  versionName: { paddingHorizontal: 16, paddingVertical: 8 },
   notice: { paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
   noticeTitle: { fontWeight: '600' },
   noticeButton: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6 },
