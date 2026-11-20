@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { inlineError, queryKeys } from './api';
 import type { Autosave, AutosaveState } from './autosave/autosave';
 import { cacheDocument, draftOf } from './autosave/useAutosave';
+import { sameTextMoved } from './versionRequest';
 
 /** The text or the title on screen changed during the restore: replacing them would lose what was typed. */
 export const textMoved = new Error('The text changed during the restore');
@@ -68,6 +69,9 @@ export const restoreRefusal = (state: AutosaveState, busy: boolean, gone: boolea
 
 const refusalOf = ({ autosave, busy, gone }: RestoreOptions) => restoreRefusal(autosave.getSnapshot(), busy(), gone());
 
+/** How many times the keep sends its request for one reason (the head moved, or only the draft's counter). */
+const keepAttempts = 3;
+
 /**
  * Saves the text on screen, `text`, as a version: the draft first, then the draft as a revision. Undefined once it is
  * kept; otherwise the outcome that stops the restore.
@@ -88,10 +92,11 @@ const keep = async (options: RestoreOptions, text: string): Promise<RestoreOutco
   // sent: either way nothing will be restored over it, so no version is asked for.
   const { base, content } = autosave.getSnapshot();
   if (base.content !== text || content !== text) return { kind: 'failed', error: textMoved };
-  const { draftVersion } = base;
+  let { draftVersion } = base;
   let baseRevision = head.revision;
-  // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
-  for (let attempt = 1; ; attempt++) {
+  let staleRevisions = 0;
+  let movedDrafts = 0;
+  for (;;) {
     try {
       const saved = await createRevision({
         name: beforeRestoreName(now()),
@@ -102,8 +107,15 @@ const keep = async (options: RestoreOptions, text: string): Promise<RestoreOutco
       return undefined;
     } catch (error) {
       const conflict = conflictOf(error);
-      if (conflict?.code === 'stale_revision' && attempt < 3) {
+      // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
+      if (conflict?.code === 'stale_revision' && ++staleRevisions < keepAttempts) {
         baseRevision = conflict.revision;
+        continue;
+      }
+      // Only the counter moved: the server's draft holds the very text kept, which is kept on its counter.
+      if (sameTextMoved(conflict, text, draftVersion) && ++movedDrafts < keepAttempts) {
+        autosave.refresh(conflict.draft, true);
+        draftVersion = conflict.draft.draftVersion;
         continue;
       }
       if (conflict?.code === 'draft_conflict') {
