@@ -56,3 +56,9 @@ export const StatsIcon = ({ size = 18, ...props }: IconProps) => (
     <Path d="M8 16v-4M12 16V8M16 16v-6" />
   </Icon>
 );
+
+export const ChevronIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <Path d="m6 9 6 6 6-6" />
+  </Icon>
+);
