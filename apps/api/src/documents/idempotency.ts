@@ -62,15 +62,19 @@ export const reserveCreation = async (
   }
 
   const [creation] = await tx.select().from(documentCreations).where(eq(documentCreations.documentId, id));
-  const [row] = await tx.select().from(documents).where(eq(documents.id, id));
   // eslint-disable-next-line no-null/no-null -- a record without hash is a creation whose id the server chose
-  const serverChosen: boolean = creation?.requestHash === null;
-  if (serverChosen && row !== undefined) {
-    throw new UnprocessableEntityException(`Document ${id} already exists`);
+  if (creation?.requestHash === null) {
+    const [existing] = await tx.select({ id: documents.id }).from(documents).where(eq(documents.id, id));
+    if (existing !== undefined) {
+      throw new UnprocessableEntityException(`Document ${id} already exists`);
+    }
+    throw new GoneException(`Document ${id} was deleted`);
   }
-  if (!serverChosen && creation?.requestHash !== requestHash) {
+  if (creation?.requestHash !== requestHash) {
     throw new UnprocessableEntityException(`Document ${id} was already created with another body`);
   }
+
+  const [row] = await tx.select().from(documents).where(eq(documents.id, id));
   if (row === undefined) {
     throw new GoneException(`Document ${id} was deleted`);
   }

@@ -4,6 +4,8 @@
 -- so that its id stays taken once it is deleted. It reads only "id" and "created_at", rewrites no row of "documents"
 -- or "revisions", and skips a document that already has its record (created with a client id). Documents deleted
 -- before this migration left no trace: their ids stay free.
+-- Stop and drain all API writers before applying this migration, then start the new build.
+-- Old builds can still write unreserved IDs after the backfill, including if restarted during a rollback.
 ALTER TABLE "document_creations" ALTER COLUMN "request_hash" DROP NOT NULL;--> statement-breakpoint
 INSERT INTO "document_creations" ("document_id", "created_at")
 SELECT "id", "created_at" FROM "documents"
