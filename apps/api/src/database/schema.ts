@@ -40,15 +40,19 @@ export const revisions = pgTable(
 );
 
 /**
- * One row per document created with a client-generated id (`POST /documents` with `id`), kept after the
- * document is deleted (no foreign key), so that a creation sent again is recognised: the same body answers
- * the document instead of creating a second one, a different body is refused, and a deleted document is
- * answered as gone rather than created again.
+ * One row per document ever created, whoever chose its id, kept after the document is deleted (no foreign key), so
+ * that no document is ever created again under the id of another one. A creation with a client-generated id
+ * (`POST /documents` with `id`) sent again is recognised: the same body answers the document instead of creating a
+ * second one, a different body is refused, and a deleted document is answered as gone rather than created again.
+ * Documents that existed before migration 0005 got a row from it; those deleted before it left none.
  */
 export const documentCreations = pgTable('document_creations', {
   documentId: uuid('document_id').primaryKey(),
-  /** SHA-256 (hex) of the creation body as validated: title, content and `draftOnly`. */
-  requestHash: text('request_hash').notNull(),
+  /**
+   * SHA-256 (hex) of the creation body as validated: title, content and `draftOnly`. Null when the server chose the
+   * id: no request can be the same creation sent again.
+   */
+  requestHash: text('request_hash'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

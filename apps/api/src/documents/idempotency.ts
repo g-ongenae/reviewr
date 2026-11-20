@@ -11,6 +11,10 @@ import type { CreateRevisionDto } from './dto/create-revision.dto.js';
 /*
  * Requests that can be sent again safely: a creation with a client-generated id (`DocumentsService.create`), and a
  * version with an idempotency key (`DocumentsService.createRevision`). Each records what it made, under a key.
+ *
+ * Every creation is recorded, also when the server chooses the id, and the record outlives the document: no document
+ * is ever created under the id of another one, so a client that still holds something of a deleted document under
+ * its id (a cache, a local buffer, an answer still on its way) can never take it for a new document.
  */
 
 /**
@@ -23,19 +27,31 @@ export const creationHash = (input: CreateDocumentBodyDto): string =>
     .digest('hex');
 
 /**
- * Record the creation of the document `id` with a client-generated id. Answers undefined when this is the first
+ * Reserve `id` before creating its document. Answers undefined when this is the first
  * creation with this id, or the document as it is now when the same creation was already made.
  *
  * The insert of the record waits for a concurrent creation with the same id to commit or roll back, then either
  * inserts (the other one rolled back) or skips; the select after it, a new statement, sees the committed record.
  * Fails with 422 if the id was used with another body, and 410 if its document was deleted since: sending a
  * creation again never brings a deleted document back.
+ *
+ * An id the server chose (a record without hash, see the insert below, or one added by migration 0005 for the
+ * documents that existed then) is never the same creation: 422 while its document exists, 410 once it is deleted.
+ * A deletion never removes the record, so whichever of a delete and this creation commits first, the outcome is one
+ * of these answers, never a new document under that id.
  */
-export const claimCreation = async (
+export const reserveCreation = async (
   tx: Transaction,
   id: string,
-  requestHash: string,
+  input: CreateDocumentBodyDto,
 ): Promise<Document | undefined> => {
+  if (input.id === undefined) {
+    // Reserve the UUID before inserting the document. A collision fails instead of reusing an id.
+    await tx.insert(documentCreations).values({ documentId: id });
+
+    return undefined;
+  }
+  const requestHash: string = creationHash(input);
   const claimed: unknown[] = await tx
     .insert(documentCreations)
     .values({ documentId: id, requestHash })
@@ -46,10 +62,15 @@ export const claimCreation = async (
   }
 
   const [creation] = await tx.select().from(documentCreations).where(eq(documentCreations.documentId, id));
-  if (creation?.requestHash !== requestHash) {
+  const [row] = await tx.select().from(documents).where(eq(documents.id, id));
+  // eslint-disable-next-line no-null/no-null -- a record without hash is a creation whose id the server chose
+  const serverChosen: boolean = creation?.requestHash === null;
+  if (serverChosen && row !== undefined) {
+    throw new UnprocessableEntityException(`Document ${id} already exists`);
+  }
+  if (!serverChosen && creation?.requestHash !== requestHash) {
     throw new UnprocessableEntityException(`Document ${id} was already created with another body`);
   }
-  const [row] = await tx.select().from(documents).where(eq(documents.id, id));
   if (row === undefined) {
     throw new GoneException(`Document ${id} was deleted`);
   }

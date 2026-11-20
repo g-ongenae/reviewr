@@ -2,10 +2,15 @@ import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
+import { GoneException, UnprocessableEntityException } from '@nestjs/common';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { migrationsFolder } from '../src/database/database.js';
+import * as schema from '../src/database/schema.js';
+import { DocumentsService } from '../src/documents/documents.service.js';
+import type { CreateDocumentBodyDto } from '../src/documents/dto/create-document-body.dto.js';
+import { creationHash } from '../src/documents/idempotency.js';
 
 interface Journal {
   entries: { tag: string }[];
@@ -271,6 +276,7 @@ describe('Migration 0002 (nullable title) on a populated database', () => {
 describe('Migration 0003 (document creations) on a populated database', () => {
   let pglite: PGlite;
   let oldFolder: string;
+  let targetFolder: string;
   const columns: string = `id, title, content, revision, draft_content AS "draftContent", draft_version AS "draftVersion",
     draft_base_revision AS "draftBaseRevision", created_at AS "createdAt", updated_at AS "updatedAt"`;
   let before: unknown[];
@@ -310,12 +316,14 @@ describe('Migration 0003 (document creations) on a populated database', () => {
     before = (await pglite.query(`SELECT ${columns} FROM documents ORDER BY id`)).rows;
     revisionsBefore = (await pglite.query('SELECT * FROM revisions ORDER BY document_id, revision')).rows;
 
-    await migrate(db, { migrationsFolder });
+    targetFolder = await migrationsUpTo(4);
+    await migrate(db, { migrationsFolder: targetFolder });
   });
 
   afterAll(async () => {
     await pglite.close();
     await rm(oldFolder, { recursive: true, force: true });
+    await rm(targetFolder, { recursive: true, force: true });
   });
 
   it('leaves the documents, their drafts and their revisions as they were', async () => {
@@ -423,5 +431,67 @@ describe('Migration 0004 (revision requests) on a populated database', () => {
         [titledDocuments[1]?.id],
       ),
     ).rejects.toThrow(/foreign key/);
+  });
+});
+
+describe('Migration 0005 (document ids never reused) on a populated database', () => {
+  it('backfills legacy IDs without changing texts or existing creation records', async () => {
+    const pglite = new PGlite();
+    const db = drizzle(pglite, { schema });
+    const oldFolder = await migrationsUpTo(5);
+    const legacyId: string = '00000000-0000-4000-8000-000000000020';
+    const creation: CreateDocumentBodyDto = {
+      id: '00000000-0000-4000-8000-000000000021',
+      title: 'Brouillon',
+      content: 'Sur la page blanche 🙂',
+      draftOnly: true,
+    };
+    const deletedId: string = '00000000-0000-4000-8000-000000000022';
+    const hash: string = creationHash(creation);
+
+    try {
+      await migrate(db, { migrationsFolder: oldFolder });
+      await pglite.query(
+        `INSERT INTO documents (id, title, content, revision, draft_content, draft_version, draft_base_revision)
+         VALUES ($1, 'Ancien', 'Écrit hier', 1, 'Écrit aujourd’hui', 2, 1), ($2, $3, '', 0, $4, 1, NULL)`,
+        [legacyId, creation.id, creation.title, creation.content],
+      );
+      await pglite.query('INSERT INTO revisions (document_id, revision, content) VALUES ($1, 1, $2)', [
+        legacyId,
+        'Écrit hier',
+      ]);
+      await pglite.query('INSERT INTO document_creations (document_id, request_hash) VALUES ($1, $3), ($2, $3)', [
+        creation.id,
+        deletedId,
+        hash,
+      ]);
+      const documentsBefore = await pglite.query('SELECT * FROM documents ORDER BY id');
+      const revisionsBefore = await pglite.query('SELECT * FROM revisions');
+
+      await migrate(db, { migrationsFolder });
+      expect((await pglite.query('SELECT * FROM documents ORDER BY id')).rows).toEqual(documentsBefore.rows);
+      expect((await pglite.query('SELECT * FROM revisions')).rows).toEqual(revisionsBefore.rows);
+      const { rows } = await pglite.query(
+        `SELECT c.document_id AS "documentId", c.request_hash AS "requestHash", c.created_at = d.created_at AS "sameCreatedAt"
+         FROM document_creations c JOIN documents d ON d.id = c.document_id WHERE c.document_id = $1`,
+        [legacyId],
+      );
+      // eslint-disable-next-line no-null/no-null -- server-chosen IDs have no request hash
+      expect(rows).toEqual([{ documentId: legacyId, requestHash: null, sameCreatedAt: true }]);
+
+      const service = new DocumentsService(db);
+      await expect(service.create(creation)).resolves.toMatchObject({
+        revision: 0,
+        draft: { content: creation.content },
+      });
+      await expect(service.create({ ...creation, id: deletedId })).rejects.toThrow(GoneException);
+      const reuse = { ...creation, id: legacyId };
+      await expect(service.create(reuse)).rejects.toThrow(UnprocessableEntityException);
+      await service.delete(legacyId);
+      await expect(service.create(reuse)).rejects.toThrow(GoneException);
+    } finally {
+      await pglite.close();
+      await rm(oldFolder, { recursive: true, force: true });
+    }
   });
 });
