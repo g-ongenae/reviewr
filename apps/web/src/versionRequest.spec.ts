@@ -22,6 +22,19 @@ describe('versionRequest', () => {
     expect(third.idempotencyKey).not.toBe(first.idempotencyKey);
   });
 
+  it("retires a lost request's key once a replay of it is answered with a 409", () => {
+    const queryClient = new QueryClient();
+    const input = { name: 'Dawn', draftVersion: 4, baseRevision: 2 };
+    const lost = versionRequest(queryClient, 'doc', input);
+    settleVersionRequest(queryClient, 'doc', lost, new NetworkError(new TypeError('offline')));
+    const replay = versionRequest(queryClient, 'doc', input);
+    expect(replay).toBe(lost);
+    settleVersionRequest(queryClient, 'doc', replay, new ApiError(409, draftConflict('Mine.', 5)));
+    // The same counter and name at once: the server answered, so the key is never sent again.
+    const next = versionRequest(queryClient, 'doc', input);
+    expect(next.idempotencyKey).not.toBe(lost.idempotencyKey);
+  });
+
   it('takes a new key on another counter even after a lost answer: that is another request', () => {
     const queryClient = new QueryClient();
     const first = versionRequest(queryClient, 'doc', { draftVersion: 4, baseRevision: 2 });
