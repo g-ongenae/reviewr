@@ -1,7 +1,7 @@
 /* eslint-disable no-null/no-null -- an unnamed version is sent as null, as the API does */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
-import { ConflictException, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { ConflictException, GoneException, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import type { ConflictBody, Document, DocumentDraft } from '@reviewr/shared';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
@@ -12,7 +12,7 @@ import { closeTestDatabase, openTestDatabase, serverUrl, setupTimeout, type Test
 
 /**
  * Row-lock tests of `saveDraft`, `update` and `createRevision`, and of creations sent again with the same id
- * (the unique key of their record), on a real PostgreSQL, with several connections (see `pg-database.ts`).
+ * (the unique key of their record), also while the document is being deleted, on a real PostgreSQL, with several connections (see `pg-database.ts`).
  */
 
 /** Rounds of each race: enough to see both orders, few enough to stay fast. */
@@ -360,6 +360,42 @@ describe.skipIf(serverUrl === undefined)('Document row lock on PostgreSQL', () =
           expect(reason).toBeInstanceOf(UnprocessableEntityException);
         }
         expect((await service.get(id)).draft?.content).toBe(created[0]?.draft?.content);
+      }
+    });
+
+    // A deletion never removes the record of a creation, so whichever commits first, a creation sent again with the
+    // id of the document being deleted answers it (before the delete) or 410 (after), and never makes it again.
+    it('a delete racing creations with the same id never leaves a document under the deleted id', async () => {
+      for (let round: number = 0; round < rounds; round += 1) {
+        const serverChosen: boolean = round % 2 === 0;
+        const input = { id: randomUUID(), title: 'Chapitre', content: 'premier jet', draftOnly: true as const };
+        const doc: Document = serverChosen ? await create('premier jet') : await service.create(input);
+        const reuse = serverChosen ? { ...input, id: doc.id } : input;
+        const [, ...results] = await Promise.all([
+          service.delete(doc.id),
+          ...Array.from({ length: racers }, async () =>
+            service.create(reuse).then(
+              (value) => ({ ok: true as const, value }),
+              (error: unknown) => ({ ok: false as const, error }),
+            ),
+          ),
+        ]);
+
+        for (const result of results) {
+          if (result.ok) {
+            expect(serverChosen).toBe(false);
+            expect(result.value).toEqual(doc);
+          } else if (result.error instanceof UnprocessableEntityException) {
+            expect(serverChosen).toBe(true);
+          } else {
+            expect(result.error).toBeInstanceOf(GoneException);
+          }
+        }
+        const { rows } = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM documents WHERE id = $1', [
+          doc.id,
+        ]);
+        expect(rows[0]?.n).toBe(0);
+        await expect(service.create(reuse)).rejects.toThrow(GoneException);
       }
     });
 

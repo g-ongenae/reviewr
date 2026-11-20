@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   ConflictException,
   HttpStatus,
@@ -34,7 +35,7 @@ import { NameRevisionDto } from './dto/name-revision.dto.js';
 import { RenameDocumentDto } from './dto/rename-document.dto.js';
 import { SaveDraftDto } from './dto/save-draft.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
-import { claimCreation, creationHash, recordedRevision, recordRevision, revisionRequestHash } from './idempotency.js';
+import { recordedRevision, recordRevision, reserveCreation, revisionRequestHash } from './idempotency.js';
 
 /** Revision number of the first save of a document. */
 const firstRevision: number = 1;
@@ -177,22 +178,20 @@ export class DocumentsService {
    * Create a document and its first revision. The draft starts equal to that revision.
    *
    * With `draftOnly`, no revision: the head is empty at revision 0 and the draft holds the content, based on no
-   * revision (null). With a client-generated `id`, the same creation sent again answers the document as it is now
-   * (see `claimCreation`); an id already taken by a document created without one is refused with 422.
+   * revision (null). The creation record prevents reuse and lets a matching request replay (see `reserveCreation`).
    */
   public async create(input: CreateDocumentBodyDto): Promise<Document> {
     return this.db.transaction(async (tx) => {
-      if (input.id !== undefined) {
-        const existing: Document | undefined = await claimCreation(tx, input.id, creationHash(input));
-        if (existing !== undefined) {
-          return existing;
-        }
+      const id: string = input.id ?? randomUUID();
+      const existing: Document | undefined = await reserveCreation(tx, id, input);
+      if (existing !== undefined) {
+        return existing;
       }
       const draftOnly: boolean = input.draftOnly === true;
       const [row] = await tx
         .insert(documents)
         .values({
-          id: input.id,
+          id,
           title: input.title,
           content: draftOnly ? '' : input.content,
           revision: draftOnly ? noRevision : firstRevision,
@@ -203,7 +202,7 @@ export class DocumentsService {
         .onConflictDoNothing()
         .returning();
       if (row === undefined) {
-        throw new UnprocessableEntityException(`Document ${input.id ?? 'new'} already exists`);
+        throw new UnprocessableEntityException(`Document ${id} already exists`);
       }
       if (draftOnly) {
         return toDocument(row);

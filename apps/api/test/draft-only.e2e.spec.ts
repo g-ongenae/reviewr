@@ -349,4 +349,77 @@ describe('Documents with only a draft', () => {
       expect((await call('POST', '/documents', { id: old.id, content: 'autre', draftOnly: true })).status).toBe(422);
     });
   });
+
+  describe('the id of a deleted document is never given again', () => {
+    /** Create a document as the builds already installed do: the server chooses the id. */
+    const createWithoutId = async (content: string): Promise<Document> => {
+      const created = await call('POST', '/documents', { title: 'Ancien', content });
+      expect(created.status).toBe(201);
+
+      return created.body as Document;
+    };
+
+    it('records the id the server chose, with no request hash', async () => {
+      const doc = await createWithoutId('v1');
+      const { rows } = await pglite.query<{ requestHash: string | null }>(
+        'SELECT request_hash AS "requestHash" FROM document_creations WHERE document_id = $1',
+        [doc.id],
+      );
+
+      expect(rows).toEqual([{ requestHash: null }]);
+    });
+
+    it('answers 410 for the id of a deleted document created without one, whatever the body', async () => {
+      const doc = await createWithoutId('v1');
+      expect((await call('DELETE', `/documents/${doc.id}`)).status).toBe(204);
+
+      const reuses = [
+        { id: doc.id, title: 'Ancien', content: 'v1' },
+        { id: doc.id, title: 'Ancien', content: 'v1', draftOnly: true },
+        { id: doc.id, content: 'tout autre chose', draftOnly: true },
+      ];
+      for (const reuse of reuses) {
+        expect((await call('POST', '/documents', reuse)).status).toBe(410);
+      }
+      expect((await call('GET', `/documents/${doc.id}`)).status).toBe(404);
+      expect((await call('GET', `/documents/${doc.id}/revisions`)).status).toBe(404);
+    });
+
+    it('answers 410 for a deleted document created without an id and seen by its delete', async () => {
+      const doc = await createWithoutId('v1');
+      expect((await call('DELETE', `/documents/${doc.id}?revision=1&draftVersion=1`)).status).toBe(204);
+
+      expect((await call('POST', '/documents', { id: doc.id, content: 'v1', draftOnly: true })).status).toBe(410);
+      expect((await call('GET', `/documents/${doc.id}`)).status).toBe(404);
+    });
+
+    it('still refuses with 422 the id of a document created without one that exists, and changes nothing', async () => {
+      const doc = await createWithoutId('v1');
+
+      expect((await call('POST', '/documents', { id: doc.id, title: 'Ancien', content: 'v1' })).status).toBe(422);
+      expect(await get(doc.id)).toEqual(doc);
+      expect(await revisionsOf(doc.id)).toHaveLength(1);
+    });
+
+    it('keeps refusing a different body with 422 for an id a client chose, deleted or not', async () => {
+      const doc = await createDraft('a');
+      const other = { id: doc.id, title: 'Brouillon', content: 'b', draftOnly: true };
+      expect((await call('POST', '/documents', other)).status).toBe(422);
+
+      await call('DELETE', `/documents/${doc.id}`);
+      expect((await call('POST', '/documents', other)).status).toBe(422);
+      expect(
+        (await call('POST', '/documents', { id: doc.id, title: 'Brouillon', content: 'a', draftOnly: true })).status,
+      ).toBe(410);
+    });
+
+    it('gives a new id to every creation without one', async () => {
+      const first = await createWithoutId('même texte');
+      await call('DELETE', `/documents/${first.id}`);
+      const second = await createWithoutId('même texte');
+
+      expect(second.id).not.toBe(first.id);
+      expect(await get(second.id)).toEqual(second);
+    });
+  });
 });
