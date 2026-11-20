@@ -247,6 +247,26 @@ describe('"Save version" on a draft whose counter moved, with the same text', ()
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('sends the retry on the new counter again as it was when its answer was lost', async () => {
+    open();
+    await typeAndSave('Mine.');
+    draftElsewhere('Mine.');
+    // The retry on the server's counter is applied, but its answer is lost on the way back.
+    loseNextAnswer = true;
+    await saveVersion('Dawn');
+    expect(notice()).toContain('The version could not be saved');
+    expect(versions).toEqual([['Dawn', 'Mine.']]);
+    expect(posts.map((post) => post.draftVersion)).toEqual([4, 5]);
+
+    await saveVersion('Dawn');
+    // Exactly the request whose answer was lost: same counter, same key; the server answers the version it made.
+    expect(posts).toHaveLength(3);
+    expect(posts[2]).toEqual(posts[1]);
+    expect(versions).toEqual([['Dawn', 'Mine.']]);
+    expect(notice()).toBeUndefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('saves it too when another device changed the text and came back to it', async () => {
     open();
     await typeAndSave('Mine.');
