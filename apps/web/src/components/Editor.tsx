@@ -32,7 +32,7 @@ import { hiddenTexts, sessionFor, type Stop } from '../reconcile/session';
 import { cacheKeptVersion, restore, useRestore } from '../restore';
 import { setUnsavedChanges } from '../unsavedChanges';
 import { useLastRevisionBaseline, useTodayBaseline } from '../useTodayBaseline';
-import { settleVersionRequest, versionRequest } from '../versionRequest';
+import { sameTextMoved, settleVersionRequest, versionRequest } from '../versionRequest';
 import { RevisionHistory } from './RevisionHistory';
 import { earlierTextLabel, HeldText, keptCopyLabel } from './TextRecovery';
 import { ChevronIcon, HistoryIcon, SaveIcon, TrashIcon } from './ToolbarIcons';
@@ -76,6 +76,9 @@ const titleRetryMs = 5000;
 
 /** Whether the server refused a rename (a 4xx): sending the same title again cannot help, a changed one may. */
 const refused = (error: unknown): boolean => error instanceof ApiError && error.status < 500;
+
+/** How many times "Save version" sends its request for one reason (the head moved, or only the draft's counter). */
+const versionAttempts = 3;
 
 /** What "Save version" sends: the version's name, and the text on screen when the writer asked for it. */
 interface VersionRequest {
@@ -209,11 +212,13 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
       if (flushed === 'failed') throw draftNotSaved;
       if (flushed !== 'saved') return undefined;
       // The flush may end on a later text, typed after the click and sent along with it: that one is not the version.
-      const { draftVersion, content: confirmed } = autosave.getSnapshot().base;
+      const { draftVersion: confirmedVersion, content: confirmed } = autosave.getSnapshot().base;
       if (confirmed !== text) throw textMoved;
+      let draftVersion = confirmedVersion;
       let baseRevision = document.revision;
-      // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
-      for (let attempt = 1; ; attempt++) {
+      let staleRevisions = 0;
+      let movedDrafts = 0;
+      for (;;) {
         // A request whose answer was lost is sent again as it was: the version may exist (see `versionRequest`).
         const input = versionRequest(queryClient, document.id, {
           name,
@@ -227,8 +232,18 @@ export const Editor = ({ document, isNew = false, onOpenPage, onDeleted, toolbar
         } catch (error) {
           settleVersionRequest(queryClient, document.id, input, error);
           const conflict = conflictOf(error);
-          if (conflict?.code !== 'stale_revision' || attempt === 3) throw error;
-          baseRevision = conflict.revision;
+          // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
+          if (conflict?.code === 'stale_revision' && ++staleRevisions < versionAttempts) {
+            baseRevision = conflict.revision;
+            continue;
+          }
+          // Only the counter moved: the server's draft holds the very text asked for (see `sameTextMoved`).
+          if (sameTextMoved(conflict, text, draftVersion) && ++movedDrafts < versionAttempts) {
+            autosave.refresh(conflict.draft, true);
+            draftVersion = conflict.draft.draftVersion;
+            continue;
+          }
+          throw error;
         }
       }
     },

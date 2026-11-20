@@ -187,6 +187,59 @@ describe('restore', () => {
     expect(autosave.getSnapshot()).toMatchObject({ status: 'conflict', content: 'mine' });
   });
 
+  describe('when only the draft’s counter moved, holding the very text kept', () => {
+    /** The server moves the draft's counter alone, as a draft save of the stored text on its counter does. */
+    const moveCounter = (server: ReturnType<typeof fakeServer>) => {
+      const { draft } = server.document;
+      server.document = { ...server.document, draft: { ...draft, draftVersion: draft.draftVersion + 1 } };
+    };
+
+    it('keeps the text on the new counter, then restores', async () => {
+      const { server, autosave, apply, options } = setup();
+      autosave.edit('mine');
+      await autosave.flush();
+      server.before = () => {
+        server.before = undefined;
+        moveCounter(server);
+      };
+      expect(await restore(options())).toEqual({ kind: 'restored' });
+      expect(server.versions.map((version) => version.content)).toEqual(['mine']);
+      expect(server.revisionRequests).toBe(2);
+      expect(apply).toHaveBeenCalledOnce();
+      // The restored text is sent on the server's counter, without a conflict.
+      await autosave.flush();
+      expect(autosave.getSnapshot().status).toBe('saved');
+      expect(server.document.draft.content).toBe('an old text');
+    });
+
+    it('keeps it too when another device changed the text and came back to it', async () => {
+      const { server, autosave, apply, options } = setup();
+      autosave.edit('mine');
+      await autosave.flush();
+      server.before = () => {
+        server.before = undefined;
+        server.otherDevice('theirs');
+        server.otherDevice('mine');
+      };
+      expect(await restore(options())).toEqual({ kind: 'restored' });
+      expect(server.versions.map((version) => version.content)).toEqual(['mine']);
+      expect(apply).toHaveBeenCalledOnce();
+    });
+
+    it('stops after three tries when the counter keeps moving: nothing is restored', async () => {
+      const { server, autosave, apply, options } = setup();
+      autosave.edit('mine');
+      await autosave.flush();
+      server.before = () => moveCounter(server);
+      const outcome = await restore(options());
+      expect(outcome).toEqual({ kind: 'failed', error: textMoved });
+      expect(server.revisionRequests).toBe(3);
+      expect(server.versions).toEqual([]);
+      expect(apply).not.toHaveBeenCalled();
+      expect(autosave.getSnapshot().content).toBe('mine');
+    });
+  });
+
   it('keeps an empty draft when the head it knows is at revision 0: another device may have saved a version', async () => {
     const { server, autosave, apply, options } = setup(1, 'saved elsewhere as revision 1');
     autosave.edit('');
