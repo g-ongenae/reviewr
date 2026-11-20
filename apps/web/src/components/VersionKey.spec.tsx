@@ -27,6 +27,8 @@ let posts: CreateRevisionInput[];
 let keys: Map<string, { request: string; revision: number }>;
 /** The next "Save version" is carried out, but its answer is lost on the way back (502). */
 let loseNextAnswer: boolean;
+/** Called when a "Save version" request arrives, before the server reads the document: another device, say. */
+let beforePost: (() => void) | undefined;
 
 /** The API's rules for the draft and the revisions of one document, idempotency keys included. */
 const fakeApi = (method: string, path: string, body: unknown): Response => {
@@ -43,6 +45,7 @@ const fakeApi = (method: string, path: string, body: unknown): Response => {
   }
   const input = body as CreateRevisionInput;
   posts.push(input);
+  beforePost?.();
   const { idempotencyKey, ...rest } = input;
   const request = JSON.stringify([rest.draftVersion, rest.baseRevision ?? 0, rest.name ?? null]);
   const recorded = idempotencyKey === undefined ? undefined : keys.get(idempotencyKey);
@@ -50,13 +53,14 @@ const fakeApi = (method: string, path: string, body: unknown): Response => {
     if (recorded.request !== request) return reply(422, { statusCode: 422, message: 'Key used for another request' });
     return reply(200, { ...document, savedRevision: recorded.revision });
   }
-  if (draft.draftVersion !== input.draftVersion) return conflict({ code: 'draft_conflict', draft });
-  if (draft.content === document.content) return reply(200, document);
+  const current = document.draft ?? draft;
+  if (current.draftVersion !== input.draftVersion) return conflict({ code: 'draft_conflict', draft: current });
+  if (current.content === document.content) return reply(200, document);
   if (document.revision !== (input.baseRevision ?? 0)) {
     return conflict({ code: 'stale_revision', revision: document.revision });
   }
-  document = { ...document, revision: document.revision + 1, content: draft.content };
-  versions.push([input.name ?? null, draft.content]);
+  document = { ...document, revision: document.revision + 1, content: current.content };
+  versions.push([input.name ?? null, current.content]);
   if (idempotencyKey !== undefined) keys.set(idempotencyKey, { request, revision: document.revision });
   if (loseNextAnswer) {
     loseNextAnswer = false;
@@ -118,6 +122,7 @@ beforeEach(() => {
   posts = [];
   keys = new Map();
   loseNextAnswer = false;
+  beforePost = undefined;
   queryClient = createQueryClient();
   queryClient.setDefaultOptions({ queries: { refetchOnWindowFocus: false, retry: false, staleTime: Infinity } });
   queryClient.setQueryData(queryKeys.document('doc-1'), document);
@@ -202,6 +207,109 @@ describe('"Save version" sent again after a lost answer', () => {
     await saveVersion();
     expect(posts.map((post) => post.baseRevision)).toEqual([2, 3]);
     expect(posts[1]?.idempotencyKey).not.toBe(posts[0]?.idempotencyKey);
+    expect(versions).toEqual([[null, 'Mine.']]);
+    expect(notice()).toBeUndefined();
+  });
+});
+
+describe('"Save version" on a draft whose counter moved, with the same text', () => {
+  /** The server's draft takes `content` on a later counter, as a save of this device given up, or another device. */
+  const draftElsewhere = (content: string) => {
+    const { draft } = document;
+    if (draft === undefined) throw new Error('No draft');
+    document = { ...document, draft: { ...draft, content, draftVersion: draft.draftVersion + 1 } };
+  };
+  const typeAndSave = async (text: string) => {
+    type(text);
+    await elapse(5_000);
+    expect(document.draft?.content).toBe(text);
+  };
+
+  it('saves the version in one click when only the counter moved', async () => {
+    open();
+    await typeAndSave('Mine.');
+    draftElsewhere('Mine.');
+    await saveVersion('Dawn');
+
+    expect(versions).toEqual([['Dawn', 'Mine.']]);
+    expect(notice()).toBeUndefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByText('Saved · revision 3')).toBeTruthy();
+    // Sent again on the server's counter, with a key of its own: the 409 was an answer, which ended the first key.
+    expect(posts.map((post) => post.draftVersion)).toEqual([4, 5]);
+    expect(posts[1]?.idempotencyKey).toMatch(uuid);
+    expect(posts[1]?.idempotencyKey).not.toBe(posts[0]?.idempotencyKey);
+
+    // The autosave goes on from the new counter: the next edit is saved without a conflict.
+    type('Mine. More.');
+    await elapse(5_000);
+    expect(document.draft).toMatchObject({ content: 'Mine. More.', draftVersion: 6 });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('saves it too when another device changed the text and came back to it', async () => {
+    open();
+    await typeAndSave('Mine.');
+    beforePost = () => {
+      beforePost = undefined;
+      draftElsewhere('Theirs.');
+      draftElsewhere('Mine.');
+    };
+    await saveVersion();
+
+    expect(versions).toEqual([[null, 'Mine.']]);
+    expect(notice()).toBeUndefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(posts.map((post) => post.draftVersion)).toEqual([4, 6]);
+  });
+
+  it('goes on after a stale revision too: the head and the counter both moved', async () => {
+    open();
+    await typeAndSave('Mine.');
+    draftElsewhere('Mine.');
+    document = { ...document, revision: 3, content: 'Elsewhere.' };
+    versions.push([null, 'Elsewhere.']);
+    await saveVersion();
+
+    expect(versions).toEqual([
+      [null, 'Elsewhere.'],
+      [null, 'Mine.'],
+    ]);
+    expect(notice()).toBeUndefined();
+    expect(posts.map((post) => [post.draftVersion, post.baseRevision])).toEqual([
+      [4, 2],
+      [5, 2],
+      [5, 3],
+    ]);
+    expect(new Set(posts.map((post) => post.idempotencyKey)).size).toBe(3);
+  });
+
+  it('is a conflict as before when the draft holds another text: no version is saved', async () => {
+    open();
+    await typeAndSave('Mine.');
+    draftElsewhere('Theirs.');
+    await saveVersion();
+
+    expect(posts).toHaveLength(1);
+    expect(versions).toEqual([]);
+    // The conflict has its own banner, as before.
+    expect(screen.getByRole('alert').textContent).toContain('This text was also changed on another device.');
+    expect(screen.getByText('Not saved · changed elsewhere')).toBeTruthy();
+    expect(screen.getByPlaceholderText<HTMLTextAreaElement>('Start writing…').value).toBe('Mine.');
+  });
+
+  it('stops after three tries when the counter keeps moving, with the message of a moved text', async () => {
+    open();
+    await typeAndSave('Mine.');
+    beforePost = () => draftElsewhere('Mine.');
+    await saveVersion();
+
+    expect(posts).toHaveLength(3);
+    expect(versions).toEqual([]);
+    expect(notice()).toContain('the text changed while it was being saved');
+    // Nothing is lost: the text is the server's, and a second click saves it once the counter stays.
+    beforePost = undefined;
+    await saveVersion();
     expect(versions).toEqual([[null, 'Mine.']]);
     expect(notice()).toBeUndefined();
   });
