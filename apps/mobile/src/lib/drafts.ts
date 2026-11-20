@@ -284,10 +284,12 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
     const text = autosave.getSnapshot().content;
     if ((await autosave.flush()) !== 'saved') return undefined;
     // The flush may end on a later text, typed after the tap and sent along with it: that one is not the version.
-    const { draftVersion, content } = autosave.getSnapshot().base;
+    const { content } = autosave.getSnapshot().base;
+    let { draftVersion } = autosave.getSnapshot().base;
     if (content !== text) throw textMoved;
     let baseRevision = revision;
-    // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it.
+    // The head moved elsewhere, not the draft: that version stays in the history, and the draft is saved over it. Or
+    // the draft's counter moved, not its text: the version is sent again on the new counter.
     for (let attempt = 1; ; attempt++) {
       const request = versionRequest(id, {
         name,
@@ -310,8 +312,17 @@ export const createDrafts = (options: DraftsOptions): Drafts => {
         const conflict = conflictOf(error);
         // The draft moved elsewhere: the local text stays, and is a conflict unless the draft holds it.
         if (conflict?.code === 'draft_conflict') autosave.refresh(conflict.draft, true);
-        if (conflict?.code !== 'stale_revision' || attempt === 3) throw error;
-        baseRevision = conflict.revision;
+        if (attempt === 3) throw error;
+        if (conflict?.code === 'stale_revision') {
+          baseRevision = conflict.revision;
+        } else if (conflict?.code === 'draft_conflict' && conflict.draft.content === content) {
+          // The server's draft holds exactly the text asked for, on a later counter: it moved alone (a save of the
+          // same text), or another device changed the text and came back to it. The version of that text is sent
+          // again on the new counter, under a new key (see `versionRequest`). Never when the texts differ.
+          draftVersion = conflict.draft.draftVersion;
+        } else {
+          throw error;
+        }
       }
     }
   };

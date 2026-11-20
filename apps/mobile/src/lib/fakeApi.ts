@@ -109,8 +109,15 @@ export class FakeApi implements DraftsApi {
   async saveDraft(_id: string, { content, draftVersion }: SaveDraftInput): Promise<DocumentDraft> {
     await this.gate(`saveDraft ${content}`);
     if (this.tooLarge(content)) throw new ApiError(413, { statusCode: 413, message: 'The text is too large' });
-    if (content === this.draft.content) return { ...this.draft };
-    if (draftVersion !== this.draft.draftVersion) throw this.conflict({ code: 'draft_conflict', draft: this.draft });
+    if (draftVersion !== this.draft.draftVersion) {
+      if (content === this.draft.content) return { ...this.draft };
+      throw this.conflict({ code: 'draft_conflict', draft: this.draft });
+    }
+    // The stored text on the current counter moves the counter alone, as the API does.
+    if (content === this.draft.content) {
+      this.document.draft = { ...this.draft, draftVersion: this.draft.draftVersion + 1 };
+      return { ...this.draft };
+    }
     // This client overwrites the draft: was its text kept?
     const text = this.draft.content;
     this.overwritten.push({ text, kept: this.revisions.some((revision) => revision.content === text) });
