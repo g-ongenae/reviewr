@@ -24,8 +24,13 @@ const setup = async () => {
   entry.autosave.edit('base and more');
   await vi.advanceTimersByTimeAsync(debounceMs);
   const field = createVersionName();
-  const save = () => field.save((name) => drafts.saveVersion('doc', server.document.revision, name));
-  return { server, entry, field, save };
+  const readName = vi.fn(async (revision: number) => server.revisions.find((item) => item.revision === revision)?.name);
+  const save = () =>
+    field.save(
+      (name) => drafts.saveVersion('doc', server.document.revision, name),
+      (saved) => readName(saved.revision),
+    );
+  return { server, entry, field, save, readName };
 };
 
 beforeEach(() => {
@@ -50,10 +55,11 @@ describe('versionNameToSend', () => {
 
 describe('createVersionName', () => {
   it('saves without a name while the field is closed: one tap, as before', async () => {
-    const { server, field, save } = await setup();
+    const { server, field, save, readName } = await setup();
     expect(field.getSnapshot()).toEqual({ open: false, value: '', saving: false });
     await save();
     expect(server.revisions.at(-1)).toMatchObject({ revision: 2, content: 'base and more', name: undefined });
+    expect(readName).not.toHaveBeenCalled();
   });
 
   it('saves with the name typed, then closes and empties the field for the next version', async () => {
@@ -80,6 +86,22 @@ describe('createVersionName', () => {
     await save();
     expect(server.revisions.at(-1)).toMatchObject({ revision: 2, name: undefined });
     expect(field.getSnapshot().open).toBe(false);
+  });
+
+  it.each(['different name', 'failed read'])('keeps a typed name after a successful save with a %s', async (result) => {
+    const { field, save, readName } = await setup();
+    field.toggle();
+    field.edit('  The gull arrives ');
+    if (result === 'different name') readName.mockResolvedValueOnce('Another writer’s name');
+    else readName.mockRejectedValueOnce(new NetworkError(new TypeError('Network request failed')));
+
+    await expect(save()).resolves.toMatchObject({ revision: 2 });
+    expect(field.getSnapshot()).toEqual({
+      open: true,
+      value: '  The gull arrives ',
+      saving: false,
+      unconfirmed: true,
+    });
   });
 
   it('keeps the name typed when the version is refused, to save again with one tap', async () => {

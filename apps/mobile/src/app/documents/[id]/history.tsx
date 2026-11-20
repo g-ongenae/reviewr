@@ -169,8 +169,10 @@ export default function HistoryScreen() {
                   </View>
                   {preview.isPending ? (
                     <ActivityIndicator color={theme.accent} />
-                  ) : preview.isError ? (
-                    <Text style={{ color: theme.danger }}>{inlineError(preview.error)}</Text>
+                  ) : preview.data === undefined ? (
+                    <Text style={{ color: theme.danger }}>
+                      {inlineError(preview.error) ?? 'The preview will show up as soon as the server is back.'}
+                    </Text>
                   ) : (
                     <>
                       <Text style={[styles.previewText, { color: theme.text }]}>{preview.data.content}</Text>

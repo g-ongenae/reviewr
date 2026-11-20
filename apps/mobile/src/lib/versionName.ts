@@ -8,6 +8,8 @@ export interface VersionNameState {
   value: string;
   /** A version is being saved with this name: the field waits for the answer. */
   saving: boolean;
+  /** The save returned a version, but its name could not be confirmed. */
+  unconfirmed?: boolean;
 }
 
 export interface VersionName {
@@ -17,11 +19,14 @@ export interface VersionName {
   toggle(): void;
   edit(value: string): void;
   /**
-   * Saves a version through `saveVersion`, with the name typed when the field is shown. A version saved closes the
+   * Saves a version through `saveVersion`, with the name typed when the field is shown. A version with the requested name closes the
    * field and empties it, so that its name is not the next version's; anything else (an error, or no version made
    * because the draft could not be saved) leaves the name as typed, to save again with one tap.
    */
-  save<T>(saveVersion: (name?: string) => Promise<T | undefined>): Promise<T | undefined>;
+  save<T>(
+    saveVersion: (name?: string) => Promise<T | undefined>,
+    readName: (saved: T) => Promise<string | null | undefined>,
+  ): Promise<T | undefined>;
 }
 
 /** The name a version is saved with: trimmed and cut at the server's limit; a blank name is no name. */
@@ -52,13 +57,19 @@ export const createVersionName = (): VersionName => {
     edit(value) {
       if (state.open && !state.saving) set({ ...state, value });
     },
-    async save(saveVersion) {
+    async save(saveVersion, readName) {
       const name = state.open ? versionNameToSend(state.value) : undefined;
       const before = state;
-      set({ ...state, saving: true });
+      set({ ...state, saving: true, unconfirmed: undefined });
       try {
         const saved = await saveVersion(name);
-        set(saved === undefined ? before : closed);
+        if (saved === undefined) {
+          set(before);
+        } else if (name !== undefined && (await readName(saved).catch(() => undefined)) !== name) {
+          set({ ...before, unconfirmed: true });
+        } else {
+          set(closed);
+        }
         return saved;
       } catch (error) {
         set(before);

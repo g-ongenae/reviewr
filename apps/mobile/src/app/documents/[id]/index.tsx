@@ -137,7 +137,11 @@ const Editor = ({ document }: { document: Document }) => {
   const [versionName] = useState(createVersionName);
   const nameField = useSyncExternalStore(versionName.subscribe, versionName.getSnapshot);
   const saveVersion = useMutation({
-    mutationFn: () => versionName.save((name) => drafts.saveVersion(document.id, document.revision, name)),
+    mutationFn: () =>
+      versionName.save(
+        (name) => drafts.saveVersion(document.id, document.revision, name),
+        async (saved) => (await api.getRevision(saved.id, saved.revision)).name,
+      ),
   });
 
   /**
@@ -271,6 +275,11 @@ const Editor = ({ document }: { document: Document }) => {
               if (canSave) saveVersion.mutate();
             }}
           />
+          {nameField.unconfirmed === true && (
+            <Text accessibilityRole="alert" style={{ color: theme.muted }}>
+              Could not confirm the name. Open History to check or edit it.
+            </Text>
+          )}
         </View>
       )}
       {copyFailure !== undefined && (
@@ -368,7 +377,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  versionName: { paddingHorizontal: 16, paddingVertical: 8 },
+  versionName: { paddingHorizontal: 16, paddingVertical: 8, gap: 8 },
   notice: { paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
   noticeTitle: { fontWeight: '600' },
   noticeButton: { alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6 },
